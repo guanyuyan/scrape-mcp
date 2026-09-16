@@ -5,7 +5,7 @@ description = "反爬感知抓取 + 极省 Token 内容精简的 MCP Server"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "<你的名字>" }]
+authors = [{ name = "tpgythp" }]
 keywords = ["mcp", "scraping", "web-fetch", "token-efficiency", "anti-bot", "llm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
