@@ -56,6 +56,16 @@ scrape-mcp
 
 ## 环境变量（前缀 `SCRAPE_MCP_`）
 
+全部配置可用环境变量（`SCRAPE_MCP_` 前缀）设置，也可集中放到**项目根目录 `.env`** 文件里。
+
+```bash
+# 项目根目录执行
+cp .env.example .env    # 生成配置模板
+# 编辑 .env 后无需改代码，直接启动即可
+```
+
+优先级：实际进程环境变量 > `.env` > 默认值。`.env` 被 gitignore，不入库；`.env.example` 是随仓库提交的模板。
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `IMPERSONATE` | `chrome` | curl_cffi 指纹模板 |

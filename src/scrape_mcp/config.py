@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     # login 工具默认打开带界面的窗口供手动登录；确认后可按需切回无头
     login_timeout: float = 180.0
 
+    # ---- 传输模式 ----
+    # stdio（默认，MCP 进程管道）/ streamable-http（HTTP，Postman/curl 直连）
+    transport: str = "stdio"
+    # streamable-http 时监听 host/port
+    http_host: str = "127.0.0.1"
+    http_port: int = 8000
+    # streamable-http 纯 JSON 响应（True）vs 事件流（False）
+    http_json: bool = True
+    # streamable-http 免握手/免会话（True）；有状态需先 initialize
+    http_stateless: bool = True
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from contextlib import asynccontextmanager
 
 from mcp.server.mcpserver import MCPServer
@@ -211,15 +210,16 @@ async def login(url: str, timeout: float = 180.0) -> str:
 
 
 def main() -> None:
-    transport = os.getenv("SCRAPE_MCP_TRANSPORT", "stdio")
+    settings = get_settings()
+    transport = settings.transport
     if transport == "streamable-http":
         # HTTP 入口（Postman/curl 友好）：JSON 响应 + 无状态会话，免 session 头
         mcp.run(
             transport="streamable-http",
-            host=os.getenv("SCRAPE_MCP_HTTP_HOST", "127.0.0.1"),
-            port=int(os.getenv("SCRAPE_MCP_HTTP_PORT", "8000")),
-            json_response=os.getenv("SCRAPE_MCP_HTTP_JSON", "1") not in ("0", "false", "False"),
-            stateless_http=os.getenv("SCRAPE_MCP_HTTP_STATELESS", "1") not in ("0", "false", "False"),
+            host=settings.http_host,
+            port=settings.http_port,
+            json_response=settings.http_json,
+            stateless_http=settings.http_stateless,
         )
     else:
         mcp.run(transport=transport)
