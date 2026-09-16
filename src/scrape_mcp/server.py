@@ -85,24 +85,20 @@ def _payload(**kwargs) -> str:
     return json.dumps(kwargs, ensure_ascii=False, indent=None)
 
 
-async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
-    """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
-    settings = get_settings()
+async def _fetch_html(url: str) -> tuple[FetchOutcome | None, dict | None]:
+    """抓取单个 URL，返回 (outcome, 错误 payload)。
 
-    if link_policy not in LINK_POLICIES:
-        return {"ok": False, "error": f"link_policy 必须是 {LINK_POLICIES} 之一"}
-
-    # 阶段 0 合规：白/黑名单、全局限流、robots.txt——被拦则不发起抓取
+    web_fetch 与 web_extract 共用：先做合规检查，再走分级抓取链路；
+    拦截/登录墙统一如实上报，避免把挑战页当正文/当数据。成功时 error 为 None。
+    """
     denied = await _compliance_check(url)
     if denied is not None:
-        return denied
-
-    budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
+        return None, denied
 
     outcome: FetchOutcome = await _get_fetcher().fetch(url)
 
     if outcome.error:
-        return {
+        return None, {
             "ok": False,
             "url": url,
             "tier": outcome.tier,
@@ -111,7 +107,6 @@ async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
         }
 
     if outcome.blocked != "none":
-        # 已尝试的分级如实上报，避免把挑战页/空壳页当正文喂给模型
         hint = (
             "命中反爬拦截"
             if outcome.blocked in ("cloudflare", "captcha", "waf", "rate_limit")
@@ -134,7 +129,6 @@ async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
             "error": f"{hint}；{explain}",
         }
         if outcome.login_required:
-            # 渲染过后正文仍极薄，很可能该内容需要登录才可见：明确提示可用的登录路径
             state = (
                 "已带登录态仍失败，登录态可能过期，请重新 login"
                 if outcome.session_loaded
@@ -143,8 +137,23 @@ async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
             payload["login_required"] = True
             payload["error"] = f"{payload['error']}；{state}，可调用 login(url=...) 手动登录后重试"
             payload["login_hint"] = f'可调用 login(url="{url}", timeout=180) 打开浏览器手动登录'
-        return payload
+        return None, payload
 
+    return outcome, None
+
+
+async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
+    """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
+    settings = get_settings()
+
+    if link_policy not in LINK_POLICIES:
+        return {"ok": False, "error": f"link_policy 必须是 {LINK_POLICIES} 之一"}
+
+    outcome, error = await _fetch_html(url)
+    if error is not None:
+        return error
+
+    budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
     result = compact_html(
         outcome.html,
         outcome.final_url or url,
@@ -197,6 +206,60 @@ async def web_fetch(url: str, max_tokens: int = 4000, link_policy: str = "intern
     if not url.startswith(("http://", "https://")):
         return _payload(ok=False, error="url 必须以 http:// 或 https:// 开头")
     return _payload(**await _fetch_dict(url, max_tokens, link_policy))
+
+
+@mcp.tool()
+async def web_extract(url: str, schema: dict) -> str:
+    """抓取网页并按字段 schema 抽取结构化 JSON（字段级数据，可入库）。
+
+    适合需要"数据而非整页正文"的场景：给 URL 和字段规则，直接返回字段值，
+    而不是一段 compact 文本。抓取链路（分级反爬、登录态、合规）与 web_fetch 一致。
+
+    字段规则示例：
+      {"fields": {
+        "title": {"selector": "h1", "type": "text"},
+        "first_heading": {"selector": "h1", "type": "text"},
+        "main_link":     {"selector": "a", "type": "attr", "attr": "href"},
+        "link_count":    {"selector": "a", "type": "count"},
+        "tags":          {"selector": ".tag", "type": "list", "list_key": "text"}
+      }}
+    字段类型：text（默认，节点归一化文本）/ attr（需配 attr，取属性值）/
+        count（匹配节点数）/ list（取所有匹配节点，list_key 决定取值方式：
+        text / text_trimmed / attr / html）。
+
+    Args:
+        url: 目标网页完整 URL。
+        schema: 字段抽取规则字典，见上方示例。
+    """
+    if not url.startswith(("http://", "https://")):
+        return _payload(ok=False, error="url 必须以 http:// 或 https:// 开头")
+
+    outcome, error = await _fetch_html(url)
+    if error is not None:
+        return _payload(**error)
+
+    try:
+        from .extract.schema import SchemaValidationError, extract_fields, parse_schema
+
+        fields = parse_schema(schema)
+    except SchemaValidationError as exc:
+        return _payload(ok=False, url=url, error=f"schema 非法: {exc}")
+
+    result = extract_fields(outcome.html, fields)
+    payload = {
+        "ok": True,
+        "url": url,
+        "final_url": outcome.final_url,
+        "status": outcome.status,
+        "tier": outcome.tier,
+        "cached": outcome.cached,
+        "elapsed_ms": outcome.elapsed_ms,
+        "data": result.fields,
+        "missing": [k for k, v in result.fields.items() if v is None],
+    }
+    if result.errors:
+        payload["schema_notes"] = result.errors
+    return _payload(**payload)
 
 
 @mcp.tool()

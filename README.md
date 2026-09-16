@@ -108,10 +108,24 @@ python -m scrape_mcp.server
 
 - **`web_fetch(url, max_tokens=4000, link_policy="internal")`** → 状态 + 极省正文
   - `link_policy`: `internal`（站内相对链接+站外降级）/ `all` / `none`
+- **`web_extract(url, schema={...})`** → 按字段 schema 抽取结构化 JSON（可入库）
+  - 字段类型：`text`（默认）/ `attr`（需配 `attr` 取属性）/ `count` / `list`（`list_key` 取值）
 - **`web_batch(urls, max_tokens=3000, link_policy="internal")`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
 - **`login(url, timeout=180)`** → 打开带界面浏览器手动登录并持久化登录态
 
 返回为 JSON 字符串（落在 `content[0].text`，请解析文本，勿依赖 `structured_content`）。
+
+### web_extract 示例
+
+```bash
+schema='{"fields": {
+  "title":    {"selector": "h1", "type": "text"},
+  "main_link":{"selector": "a", "type": "attr", "attr": "href"},
+  "tag_count":{"selector": ".tag", "type": "count"},
+  "tags":     {"selector": ".tag", "type": "list", "list_key": "text"}
+}}'
+# → {"ok":true, "data": {"title":"…","main_link":"…","tag_count":3,"tags":["a","b","c"]}, "missing":[]}
+```
 
 ## 目录结构
 
