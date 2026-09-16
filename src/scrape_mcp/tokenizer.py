@@ -10,7 +10,9 @@ import re
 from functools import lru_cache
 
 _WS = re.compile(r"\s+")
-_CJK = re.compile(r"[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]")
+_CJK = re.compile(
+    r"[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]"
+)
 
 
 @lru_cache(maxsize=1)

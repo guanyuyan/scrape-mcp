@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -199,21 +200,15 @@ class BrowserRenderer:
 
     async def aclose(self) -> None:
         for context in self._contexts.values():
-            try:
+            with contextlib.suppress(Exception):  # 关闭失败不影响进程退出
                 await context.close()
-            except Exception:  # 关闭失败不影响进程退出
-                pass
         self._contexts.clear()
         if self._browser is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._browser.close()
-            except Exception:
-                pass
         if self._playwright is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._playwright.stop()
-            except Exception:
-                pass
         self._playwright = self._browser = None
 
     # ---------- 渲染 ----------
@@ -262,10 +257,8 @@ class BrowserRenderer:
                 error=f"{type(exc).__name__}: {exc}",
             )
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 await page.close()
-            except Exception:
-                pass
 
     # ---------- 登录（M3） ----------
 
@@ -283,7 +276,9 @@ class BrowserRenderer:
         context = await self._new_context(host, headless=False)
         page = await context.new_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=self._s.l2_navigate_timeout * 1000)
+            await page.goto(
+                url, wait_until="domcontentloaded", timeout=self._s.l2_navigate_timeout * 1000
+            )
 
             deadline = time.perf_counter() + timeout
             logged_in = False
@@ -361,7 +356,14 @@ def _pending_kind(html: str) -> str | None:
 
 # 登录页 URL 上的常见路径特征；命中说明用户还停留在登录页、尚未完成登录
 _LOGIN_PATH_TOKENS = (
-    "signin", "sign-in", "login", "passport", "auth", "ucenter", "account/login", "switchlogin",
+    "signin",
+    "sign-in",
+    "login",
+    "passport",
+    "auth",
+    "ucenter",
+    "account/login",
+    "switchlogin",
 )
 
 

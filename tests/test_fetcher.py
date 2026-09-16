@@ -7,10 +7,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scrape_mcp.config import Settings  # noqa: E402
-from scrape_mcp.core.browser import BrowserOutcome  # noqa: E402
-from scrape_mcp.core.fetcher import Fetcher  # noqa: E402
-from scrape_mcp.core.http_client import HttpResponse  # noqa: E402
+from scrape_mcp.config import Settings
+from scrape_mcp.core.browser import BrowserOutcome
+from scrape_mcp.core.fetcher import Fetcher
+from scrape_mcp.core.http_client import HttpResponse
 
 URL = "https://example.com/page"
 
@@ -20,7 +20,11 @@ CLOUDFLARE_HTML = "<html><body>Just a moment... cf-chl</body></html>"
 SHELL_HTML = (
     "<html><body><div id='root'>" + "载入中" * 100 + "<span></span>" * 8000 + "</body></html>"
 )
-RENDERED_HTML = "<html><body><article><h1>浏览器渲染出的标题</h1><p>" + LONG_TEXT + "</p></article></body></html>"
+RENDERED_HTML = (
+    "<html><body><article><h1>浏览器渲染出的标题</h1><p>"
+    + LONG_TEXT
+    + "</p></article></body></html>"
+)
 
 
 class FakeHttp:
@@ -32,7 +36,12 @@ class FakeHttp:
     async def get(self, url, **_kwargs) -> HttpResponse:
         self.calls += 1
         return HttpResponse(
-            ok=True, status=self.status, url=url, content_type="text/html", text=self.text, elapsed_ms=10
+            ok=True,
+            status=self.status,
+            url=url,
+            content_type="text/html",
+            text=self.text,
+            elapsed_ms=10,
         )
 
 
@@ -65,7 +74,9 @@ def make_fetcher(status: int = 200, text: str = LONG_TEXT, browser=None, **overr
 
 async def test_clean_l1_does_not_start_browser():
     browser = FakeBrowser()
-    fetcher, http = make_fetcher(text=f"<html><body><p>{LONG_TEXT}</p></body></html>", browser=browser)
+    fetcher, http = make_fetcher(
+        text=f"<html><body><p>{LONG_TEXT}</p></body></html>", browser=browser
+    )
     outcome = await fetcher.fetch(URL)
     assert outcome.tier == "l1"
     assert outcome.blocked == "none"
@@ -112,7 +123,13 @@ async def test_still_blocked_after_l2_reports_l2_tier():
 
 async def test_l2_failure_keeps_l1_body_and_reason():
     failed = BrowserOutcome(
-        ok=False, url=URL, final_url=URL, status=0, html="", elapsed_ms=120, error="浏览器启动失败: 未安装"
+        ok=False,
+        url=URL,
+        final_url=URL,
+        status=0,
+        html="",
+        elapsed_ms=120,
+        error="浏览器启动失败: 未安装",
     )
     browser = FakeBrowser(failed)
     fetcher, _ = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
@@ -125,7 +142,9 @@ async def test_l2_failure_keeps_l1_body_and_reason():
 
 async def test_rate_limit_is_not_escalated():
     browser = FakeBrowser()
-    fetcher, _ = make_fetcher(status=429, text="<html><body>too many requests</body></html>", browser=browser)
+    fetcher, _ = make_fetcher(
+        status=429, text="<html><body>too many requests</body></html>", browser=browser
+    )
     outcome = await fetcher.fetch(URL)
     assert browser.calls == 0 and outcome.blocked == "rate_limit"
 
@@ -140,7 +159,9 @@ async def test_l2_can_be_disabled():
 async def test_transport_error_is_not_escalated():
     class FailingHttp:
         async def get(self, url, **_kwargs):
-            return HttpResponse(ok=False, status=0, url=url, content_type="", text="", elapsed_ms=5, error="超时")
+            return HttpResponse(
+                ok=False, status=0, url=url, content_type="", text="", elapsed_ms=5, error="超时"
+            )
 
     browser = FakeBrowser()
     fetcher = Fetcher(Settings())

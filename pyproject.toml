@@ -26,7 +26,30 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6.0",
+    "pre-commit>=3.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+# RUF 的 RUF1xx 是"歧义字符"系列（字符串/文档/注释里的全角标点），
+# 本项目刻意使用中文标点，整组忽略这类误报
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+per-file-ignores = {}
+unfixable = []
+[tool.ruff.lint.isort]
+known-first-party = ["scrape_mcp"]
+
+[tool.ruff.format]
+quote-style = "double"
 
 [project.scripts]
 scrape-mcp = "scrape_mcp.server:main"

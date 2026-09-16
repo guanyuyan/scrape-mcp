@@ -36,7 +36,11 @@ def test_web_batch_gathers_and_counts(monkeypatch):
     out = _run(["https://a.com/1", "https://a.com/2", "https://a.com/3"])
     assert out["ok"] is True
     assert out["total"] == 3 and out["ok_count"] == 3
-    assert [r["url"] for r in out["results"]] == ["https://a.com/1", "https://a.com/2", "https://a.com/3"]
+    assert [r["url"] for r in out["results"]] == [
+        "https://a.com/1",
+        "https://a.com/2",
+        "https://a.com/3",
+    ]
 
 
 def test_web_batch_isolates_single_failure(monkeypatch):

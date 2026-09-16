@@ -26,42 +26,72 @@ DROP_SELECTOR = (
 BOILERPLATE_TAGS = {"nav", "footer", "aside"}
 # 模板块特征词。按独立词元匹配，不做子串包含，否则 class="downloads" 会命中 "ads"、
 # class="commentary" 会命中 "comment"，整块正文被误删。
-BOILERPLATE_HINTS = frozenset({
-    "nav",
-    "navigation",
-    "navbar",
-    "menu",
-    "sidebar",
-    "footer",
-    "contentinfo",
-    "complementary",
-    "comment",
-    "share",
-    "related",
-    "recommend",
-    "advert",
-    "ad",
-    "ads",
-    "breadcrumb",
-    "cookie",
-    "popup",
-    "modal",
-    "banner",
-    "toolbar",
-    "pagination",
-    # 页脚常写作 foot（而非 footer），版权/备案行也归此类。
-    # beian 是中文站点的通用命名（ICP 备案号区块），国内页面几乎必带。
-    "foot",
-    "copyright",
-    "license",
-    "beian",
-})
+BOILERPLATE_HINTS = frozenset(
+    {
+        "nav",
+        "navigation",
+        "navbar",
+        "menu",
+        "sidebar",
+        "footer",
+        "contentinfo",
+        "complementary",
+        "comment",
+        "share",
+        "related",
+        "recommend",
+        "advert",
+        "ad",
+        "ads",
+        "breadcrumb",
+        "cookie",
+        "popup",
+        "modal",
+        "banner",
+        "toolbar",
+        "pagination",
+        # 页脚常写作 foot（而非 footer），版权/备案行也归此类。
+        # beian 是中文站点的通用命名（ICP 备案号区块），国内页面几乎必带。
+        "foot",
+        "copyright",
+        "license",
+        "beian",
+    }
+)
 _HINT_SPLIT = re.compile(r"[^a-z0-9]+")
 HEADINGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
 INLINE_TAGS = {
-    "a", "span", "strong", "b", "em", "i", "u", "s", "del", "ins", "sup", "sub",
-    "mark", "small", "code", "br", "img", "wbr", "time", "abbr", "cite", "q",
-    "kbd", "samp", "var", "bdi", "bdo", "ruby", "rt", "meter", "progress",
+    "a",
+    "span",
+    "strong",
+    "b",
+    "em",
+    "i",
+    "u",
+    "s",
+    "del",
+    "ins",
+    "sup",
+    "sub",
+    "mark",
+    "small",
+    "code",
+    "br",
+    "img",
+    "wbr",
+    "time",
+    "abbr",
+    "cite",
+    "q",
+    "kbd",
+    "samp",
+    "var",
+    "bdi",
+    "bdo",
+    "ruby",
+    "rt",
+    "meter",
+    "progress",
 }
 
 MAX_TABLE_ROWS = 100
@@ -171,7 +201,9 @@ class _Renderer:
         if node.tag in BOILERPLATE_TAGS:
             return True
         attrs = node.attributes
-        raw = f"{attrs.get('id') or ''} {attrs.get('class') or ''} {attrs.get('role') or ''}".lower()
+        raw = (
+            f"{attrs.get('id') or ''} {attrs.get('class') or ''} {attrs.get('role') or ''}".lower()
+        )
         tokens = {t for t in _HINT_SPLIT.split(raw) if t}
         if not tokens:
             return False

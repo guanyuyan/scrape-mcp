@@ -7,11 +7,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scrape_mcp.config import Settings  # noqa: E402
-from scrape_mcp.core.browser import BrowserOutcome  # noqa: E402
-from scrape_mcp.core.fetcher import Fetcher  # noqa: E402
-from scrape_mcp.core.http_client import HttpResponse  # noqa: E402
-from scrape_mcp.core.session import SessionStore  # noqa: E402
+from scrape_mcp.config import Settings
+from scrape_mcp.core.browser import BrowserOutcome
+from scrape_mcp.core.fetcher import Fetcher
+from scrape_mcp.core.http_client import HttpResponse
+from scrape_mcp.core.session import SessionStore
 
 
 def test_session_store_roundtrip(tmp_path):
@@ -34,13 +34,21 @@ def test_session_store_ignores_bad_json(tmp_path):
 
 # ---- fetcher 层面：登录墙上报 ----
 
+
 class FakeHttp:
     def __init__(self, status: int = 200, text: str = "正常正文" * 500) -> None:
         self.status = status
         self.text = text
 
     async def get(self, url, **_kwargs) -> HttpResponse:
-        return HttpResponse(ok=True, status=self.status, url=url, content_type="text/html", text=self.text, elapsed_ms=10)
+        return HttpResponse(
+            ok=True,
+            status=self.status,
+            url=url,
+            content_type="text/html",
+            text=self.text,
+            elapsed_ms=10,
+        )
 
 
 CLOUDFLARE_HTML = "<html><body>Just a moment... cf-chl</body></html>"
@@ -69,7 +77,14 @@ async def test_no_login_needed_for_clean_page(tmp_path):
 
 
 async def test_login_required_reported_when_still_blocked_after_l2(tmp_path):
-    still_blocked = BrowserOutcome(ok=True, url="https://www.zhihu.com/q", final_url="https://www.zhihu.com/q", status=200, html=CLOUDFLARE_HTML, elapsed_ms=100)
+    still_blocked = BrowserOutcome(
+        ok=True,
+        url="https://www.zhihu.com/q",
+        final_url="https://www.zhihu.com/q",
+        status=200,
+        html=CLOUDFLARE_HTML,
+        elapsed_ms=100,
+    )
     fetcher = Fetcher(Settings(data_dir=str(tmp_path)))
     fetcher._http = FakeHttp(status=200, text=CLOUDFLARE_HTML)
     fetcher._browser = FakeBrowser(still_blocked)
@@ -83,7 +98,14 @@ async def test_session_loaded_when_state_exists(tmp_path):
     # 预置一个登录态文件，模拟之前 login 过
     host = "www.zhihu.com"
     SessionStore(str(tmp_path)).save(host, {"cookies": [], "origins": []})
-    still_blocked = BrowserOutcome(ok=True, url="https://www.zhihu.com/q", final_url="https://www.zhihu.com/q", status=200, html=CLOUDFLARE_HTML, elapsed_ms=100)
+    still_blocked = BrowserOutcome(
+        ok=True,
+        url="https://www.zhihu.com/q",
+        final_url="https://www.zhihu.com/q",
+        status=200,
+        html=CLOUDFLARE_HTML,
+        elapsed_ms=100,
+    )
     fetcher = Fetcher(Settings(data_dir=str(tmp_path)))
     fetcher._http = FakeHttp(status=200, text=CLOUDFLARE_HTML)
     fetcher._browser = FakeBrowser(still_blocked, has_session=True)

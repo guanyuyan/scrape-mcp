@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scrape_mcp.extract.compact import compact_html  # noqa: E402
+from scrape_mcp.extract.compact import compact_html
 
 SAMPLE = """<!doctype html>
 <html><head><title>测试标题</title>
@@ -107,7 +107,7 @@ def test_brackets_in_link_text_are_escaped():
 def test_downgraded_external_links_do_not_glue():
     # 相邻的站外链接降级成纯文字后必须能分清，不能粘成"新华网人民网"
     html = (
-        '<html><body><article><h1>合作媒体</h1>'
+        "<html><body><article><h1>合作媒体</h1>"
         '<p><a href="https://news.xinhuanet.com">新华网</a>'
         '<a href="https://www.people.com.cn">人民网</a>'
         '<a href="https://www.cctv.com">央视网</a></p>'
@@ -121,7 +121,7 @@ def test_downgraded_external_links_do_not_glue():
 def test_hint_match_is_token_based_not_substring():
     # downloads 不能被 "ads" 命中，commentary 不能被 "comment" 命中
     html = (
-        '<html><body><article><p>正文开头，用于通过空页判定。</p>'
+        "<html><body><article><p>正文开头，用于通过空页判定。</p>"
         '<div class="downloads"><p>下载区的可用内容。</p></div>'
         '<div class="commentary"><p>这是一篇评论文章的内容。</p></div>'
         "</article></body></html>"
@@ -133,7 +133,7 @@ def test_hint_match_is_token_based_not_substring():
 
 def test_comment_blocks_are_skipped():
     html = (
-        '<html><body><article><p>正文开头，用于通过空页判定。</p>'
+        "<html><body><article><p>正文开头，用于通过空页判定。</p>"
         '<div class="comments"><p>评论区内容。</p></div>'
         '<div class="comment-list"><p>评论列表内容。</p></div>'
         "</article></body></html>"
@@ -146,7 +146,9 @@ def test_comment_blocks_are_skipped():
 def test_density_root_picks_content_container_over_chrome():
     # class 名刻意不含模板块特征词，只有内容密度选根能排除它
     nav = "".join(f'<a href="/c{i}">频道{i}</a>' for i in range(30))
-    paragraphs = "".join(f"<p>这是正文第{i}段，内容足够长以便通过内容密度判定。</p>" for i in range(20))
+    paragraphs = "".join(
+        f"<p>这是正文第{i}段，内容足够长以便通过内容密度判定。</p>" for i in range(20)
+    )
     html = (
         f'<html><body><div class="channel-bar">{nav}</div>'
         f'<div class="post-body"><h1>真正的标题</h1>{paragraphs}</div>'
@@ -161,7 +163,7 @@ def test_footer_variants_are_skipped():
     # 页脚常写作 foot 而非 footer，版权/备案行也属模板噪声
     # beian__AMcCz 是 CSS Module 的哈希类名，词元化后应命中 beian
     html = (
-        '<html><body><article><p>正文开头，用于通过空页判定。</p>'
+        "<html><body><article><p>正文开头，用于通过空页判定。</p>"
         '<div class="foot"><p>沪ICP备12345678号</p></div>'
         '<div class="copyright-bar"><p>版权所有 © 2026</p></div>'
         '<div class="beian__AMcCz"><p>增值电信业务经营许可证</p></div>'
@@ -174,9 +176,11 @@ def test_footer_variants_are_skipped():
 
 
 def test_truncate_respects_budget():
-    long_html = "<html><body><article><h1>T</h1>" + "".join(
-        f"<p>第{i}段内容，用于验证预算截断行为是否生效。</p>" for i in range(400)
-    ) + "</article></body></html>"
+    long_html = (
+        "<html><body><article><h1>T</h1>"
+        + "".join(f"<p>第{i}段内容，用于验证预算截断行为是否生效。</p>" for i in range(400))
+        + "</article></body></html>"
+    )
     r = compact_html(long_html, URL, max_tokens=300)
     assert r.truncated is True
     assert "省略" in r.content

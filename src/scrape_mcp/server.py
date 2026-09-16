@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from mcp.server.mcpserver import MCPServer
 
 from .config import get_settings
-from .core.fetcher import FetchOutcome, Fetcher
+from .core.fetcher import Fetcher, FetchOutcome
 from .extract.compact import LINK_POLICIES, compact_html
 from .tokenizer import count_tokens
 
@@ -57,13 +57,13 @@ async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
     outcome: FetchOutcome = await _get_fetcher().fetch(url)
 
     if outcome.error:
-        return dict(
-            ok=False,
-            url=url,
-            tier=outcome.tier,
-            elapsed_ms=outcome.elapsed_ms,
-            error=outcome.error,
-        )
+        return {
+            "ok": False,
+            "url": url,
+            "tier": outcome.tier,
+            "elapsed_ms": outcome.elapsed_ms,
+            "error": outcome.error,
+        }
 
     if outcome.blocked != "none":
         # 已尝试的分级如实上报，避免把挑战页/空壳页当正文喂给模型
@@ -77,20 +77,24 @@ async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
             if outcome.tier == "l2"
             else "未取得 L2 渲染结果（限流类判定不升级，或浏览器渲染失败，详见 block_reason）"
         )
-        payload = dict(
-            ok=False,
-            url=url,
-            final_url=outcome.final_url,
-            status=outcome.status,
-            tier=outcome.tier,
-            blocked=outcome.blocked,
-            block_reason=outcome.block_reason,
-            elapsed_ms=outcome.elapsed_ms,
-            error=f"{hint}；{explain}",
-        )
+        payload = {
+            "ok": False,
+            "url": url,
+            "final_url": outcome.final_url,
+            "status": outcome.status,
+            "tier": outcome.tier,
+            "blocked": outcome.blocked,
+            "block_reason": outcome.block_reason,
+            "elapsed_ms": outcome.elapsed_ms,
+            "error": f"{hint}；{explain}",
+        }
         if outcome.login_required:
             # 渲染过后正文仍极薄，很可能该内容需要登录才可见：明确提示可用的登录路径
-            state = "已带登录态仍失败，登录态可能过期，请重新 login" if outcome.session_loaded else "该站还无登录态"
+            state = (
+                "已带登录态仍失败，登录态可能过期，请重新 login"
+                if outcome.session_loaded
+                else "该站还无登录态"
+            )
             payload["login_required"] = True
             payload["error"] = f"{payload['error']}；{state}，可调用 login(url=...) 手动登录后重试"
             payload["login_hint"] = f'可调用 login(url="{url}", timeout=180) 打开浏览器手动登录'
@@ -122,7 +126,10 @@ async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
     }
 
     # 大页面却榨不出正文，多半是 JS 登录墙/骨架页：正文本身可能是真实内容，故不判失败，只如实提示
-    if len(outcome.html) >= LOW_CONTENT_HTML_BYTES and payload["token_estimate"] < LOW_CONTENT_TOKENS:
+    if (
+        len(outcome.html) >= LOW_CONTENT_HTML_BYTES
+        and payload["token_estimate"] < LOW_CONTENT_TOKENS
+    ):
         payload["note"] = (
             "正文极少，疑似 JS 登录墙或骨架页；浏览器已渲染过，公开区域确实只有这些内容"
             if outcome.tier == "l2"
