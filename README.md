@@ -1,8 +1,14 @@
 # scrape-mcp
 
+> **⚠️ 这是 scrape-mcp 的官方源仓库（upstream）。** 若你在别处看到同名/相似项目并带不同作者署名，即为转载或派生，非原作者发布。
+
 > **反爬感知抓取 + 极省 Token 内容精简的 MCP Server —— 让 AI 读真实网页时，只花 1%~5% 的 token 就能拿到干净、真实、免登录的正文。**
 >
 > 自动化分三层应对：默认 curl_cffi（伪装 TLS/JA3 + HTTP2）低成本打头阵，命中 Cloudflare/验证码/WAF 才升级 Playwright 真浏览器渲染；遇到"登录才给内容"的站，先弹窗手动登录一次、登录态落盘，之后自动带上、过期会提示重登。
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/guanyuyan/scrape-mcp/releases)
+[![CI](https://github.com/guanyuyan/scrape-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/guanyuyan/scrape-mcp/actions)
 
 ## 功能说明
 
