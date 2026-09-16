@@ -85,6 +85,10 @@ cp .env.example .env    # 生成配置模板
 | `CACHE_TTL` | `300` | L1 缓存 TTL（秒），`0` 关闭 |
 | `BATCH_MAX_CONCURRENCY` | `4` | `web_batch` 并发上限 |
 | `BATCH_MAX_URLS` | `20` | `web_batch` 单批上限 |
+| `RESPECT_ROBOTS` | `true` | 默认遵循目标站 robots.txt；`false` 忽略（仅建议自用合规场景关闭） |
+| `ALLOWED_HOSTS` | — | 主机白名单（逗号分隔）；非空时仅允许名单内主机 |
+| `DENIED_HOSTS` | — | 主机黑名单（逗号分隔），优先于白名单 |
+| `MAX_QPS` | `10` | 全网抓取限流（每秒请求数）；`0` 不限速 |
 
 ## HTTP 模式（Postman / curl 直连）
 

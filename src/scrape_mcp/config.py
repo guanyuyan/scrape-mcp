@@ -7,6 +7,11 @@ from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _split_hosts(raw: str) -> set[str]:
+    """把逗号分隔的主机名单解析成小写集合，忽略空项与首尾点。"""
+    return {h.strip().lower().lstrip(".") for h in raw.split(",") if h.strip()}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SCRAPE_MCP_",
@@ -31,6 +36,27 @@ class Settings(BaseSettings):
     # web_batch 单批并发上限
     batch_max_concurrency: int = 4
     batch_max_urls: int = 20
+
+    # ---- 阶段 0 合规（责任边界）----
+    # 默认遵循目标站 robots.txt；拉取不到规则时视为允许（不因拿不到而阻断可用性）
+    respect_robots: bool = True
+    # robots.txt 拉取结果的内存缓存 TTL（秒）
+    robots_cache_ttl: float = 86400
+    # 主机白名单 / 黑名单（逗号分隔，写域名即可，不含协议与端口）。denied 优先于 allowed：
+    #   - allowed_hosts 非空时，仅允许命中名单内的主机（=白名单模式）
+    #   - denied_hosts 非空时，命中即拒绝（=黑名单模式），可两者并存
+    allowed_hosts: str = ""
+    denied_hosts: str = ""
+    # 全网全局抓取限流（每秒请求数，web_fetch 与 web_batch 共用）；0 表示不限速
+    max_qps: float = 10.0
+
+    @property
+    def allowed_host_set(self) -> set[str]:
+        return _split_hosts(self.allowed_hosts)
+
+    @property
+    def denied_host_set(self) -> set[str]:
+        return _split_hosts(self.denied_hosts)
 
     # ---- L2 浏览器渲染（Playwright）----
     # 只在 L1 被判为拦截时才启用：启动浏览器比 curl_cffi 贵一到两个数量级

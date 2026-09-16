@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from mcp.server.mcpserver import MCPServer
 
 from .config import get_settings
 from .core.fetcher import Fetcher, FetchOutcome
+from .core.ratelimit import RateLimiter
+from .core.robots import RobotsChecker
 from .extract.compact import LINK_POLICIES, compact_html
 from .tokenizer import count_tokens
 
 _fetcher: Fetcher | None = None
+_ratelimiter: RateLimiter | None = None
+_robots: RobotsChecker | None = None
 
 
 def _get_fetcher() -> Fetcher:
@@ -20,6 +25,41 @@ def _get_fetcher() -> Fetcher:
     if _fetcher is None:
         _fetcher = Fetcher(get_settings())
     return _fetcher
+
+
+def _get_ratelimiter() -> RateLimiter:
+    global _ratelimiter
+    if _ratelimiter is None:
+        _ratelimiter = RateLimiter(get_settings().max_qps)
+    return _ratelimiter
+
+
+def _get_robots() -> RobotsChecker:
+    global _robots
+    if _robots is None:
+        _robots = RobotsChecker(get_settings())
+    return _robots
+
+
+async def _compliance_check(url: str) -> dict | None:
+    """阶段 0 合规：白/黑名单 → 全局限流 → robots.txt。
+
+    通过返回 None；被拦返回结构化错误 payload（拒绝抓取，不发起任何请求）。
+    """
+    settings = get_settings()
+    host = (urlparse(url).netloc or "").lower().split(":")[0]
+
+    if host in settings.denied_host_set:
+        return {"ok": False, "url": url, "error": f"主机 {host} 在黑名单内，已拒绝请求"}
+    if settings.allowed_host_set and host not in settings.allowed_host_set:
+        return {"ok": False, "url": url, "error": f"主机 {host} 不在白名单内，已拒绝请求"}
+
+    await _get_ratelimiter().acquire()
+
+    if settings.respect_robots and not await _get_robots().is_allowed(url):
+        return {"ok": False, "url": url, "error": "目标路径被该站 robots.txt 禁止抓取"}
+
+    return None
 
 
 @asynccontextmanager
@@ -51,6 +91,11 @@ async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
 
     if link_policy not in LINK_POLICIES:
         return {"ok": False, "error": f"link_policy 必须是 {LINK_POLICIES} 之一"}
+
+    # 阶段 0 合规：白/黑名单、全局限流、robots.txt——被拦则不发起抓取
+    denied = await _compliance_check(url)
+    if denied is not None:
+        return denied
 
     budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
 
