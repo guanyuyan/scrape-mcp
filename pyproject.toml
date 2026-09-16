@@ -1,0 +1,43 @@
+[project]
+name = "scrape-mcp"
+version = "0.1.0"
+description = "反爬感知抓取 + 极省 Token 内容精简的 MCP Server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "<你的名字>" }]
+keywords = ["mcp", "scraping", "web-fetch", "token-efficiency", "anti-bot", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = [
+    "mcp>=2.0.0,<3",
+    "curl_cffi>=0.7.0",
+    "selectolax>=0.3.21",
+    "tiktoken>=0.7.0",
+    "pydantic-settings>=2.2.0",
+    # L2 浏览器渲染。装完还需 playwright install chromium，
+    # 或用 SCRAPE_MCP_L2_CHANNEL=chrome|msedge 复用系统浏览器
+    "playwright>=1.49",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+scrape-mcp = "scrape_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scrape_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
