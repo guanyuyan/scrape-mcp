@@ -4,10 +4,13 @@
 
 ## [Unreleased]
 
+(暂无)
+
+## [0.2.0] - 2026-09-18
+
+在 v0.1.0 基础上新增结构化抽取与合规限流，并完善上手体验。
+
 ### Added
-- ruff + pre-commit 工程化配置，`pyproject.toml` 增加 dev 依赖与 lint 规则
-- CI 增加 ruff 检查步骤
-- `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`
 - **web_extract**：按字段 schema 从 HTML 抽取结构化 JSON（`text`/`attr`/`count`/`list` 类型、简写选择器、`default` 兜底、`missing` 如实上报）
 - 阶段 0 合规：`respect_robots`（robots.txt 遵循）、`allowed_hosts`/`denied_hosts` 白黑名单、`max_qps` 全局限流
 - `scripts/demo.py`、`scripts/smoke_extract.py`：一键演示与 HTTP 冒烟
@@ -15,6 +18,11 @@
 
 ### Changed
 - 抓取逻辑提取为 `_fetch_html`，供 `web_fetch`/`web_extract` 共用，避免重复抓取
+
+### Engineering
+- ruff + pre-commit 工程化配置，`pyproject.toml` 增加 dev 依赖与 lint 规则
+- CI 增加 ruff 检查步骤
+- `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`；README 增补发版流程
 
 ## [0.1.0] - 2026-09-16
 
