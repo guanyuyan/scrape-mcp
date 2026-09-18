@@ -10,6 +10,40 @@
 [![Release](https://img.shields.io/github/v/release/guanyuyan/scrape-mcp?color=blue&label=release)](https://github.com/guanyuyan/scrape-mcp/releases)
 [![CI](https://github.com/guanyuyan/scrape-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/guanyuyan/scrape-mcp/actions)
 
+---
+
+## ⚡ 60 秒入门
+
+**第 1 步：一键演示**（拉起库内 MCP 服务，对真实站点自动跑 `web_fetch` + `web_extract`）
+
+```bash
+git clone https://github.com/guanyuyan/scrape-mcp.git
+cd scrape-mcp
+python -m venv .venv && .venv\Scripts\pip install -e .
+.venv\Scripts\python scripts\demo.py
+```
+
+预计输出（对不同站点自动选 L1/L2 分级，给出省 token 压缩比）：
+
+```
+=== 文档站 | https://developer.mozilla.org/zh-CN/docs/Web/HTTP/CORS
+  ok=True tier=l1 status=200 html=260128B → tokens=3730 (约 5.7% 压缩)
+  标题: 跨源资源共享（CORS） - HTTP | MDN
+  ok=True tier=l1 data={"heading": "跨源资源共享（CORS）", "h2_count": 10, "links": 665}
+```
+
+**第 2 步：作为 MCP 客户端接入**（Claude / Cursor 等，命令指向本仓库）
+
+```bash
+scrape-mcp            # 已安装时；或 python -m scrape_mcp.server
+```
+
+在客户端里调用 `web_fetch(url=...)` 即可拿到极省正文。
+
+> MDN 整页约 260KB，这里只花几千 token 就拿到干净正文；拦截/登录页会自动升级或如实上报，不会把验证码当正文。
+
+---
+
 ## 功能说明
 
 **它解决什么**：模型读网页不是在读正文，而是在读整棵 DOM（脚本、导航、版权、链接一应尽收），又贵又脏。这个工具把页面剪成"只有正文"再喂给 AI。
@@ -26,7 +60,15 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 
 **覆盖的站点类型**：文章页 / 文档站 / 门户与列表页 / 需要 JS 渲染的 SPA / 需要登录才给正文的站（如知乎）。
 
-**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、登录持久化 `login`，缓存默认开启。
+**真实站点实测**（一键 `scripts/demo.py` 可复现）：
+
+| 站点 | 类型 | 分级 | 原始 | 抓到正文 | 说明 |
+|---|---|---|---|---|---|
+| MDN CORS 文档 | 文档站 | L1 | 260KB | ~3.7k token（约 5.7%） | 纯静态，最短路径直达 |
+| 腾讯新闻首页 | 列表/门户 | L2 | 338KB | ~1.4k token（约 1.6%） | 动态页升级浏览器渲染 |
+| 极客邦首页 | SPA/动态 | L2 | 12KB | ~1.4k token | JS 骨架页，需渲染才有正文 |
+
+**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、登录持久化 `login`，缓存默认开启。
 
 ---
 
@@ -104,6 +146,30 @@ python -m scrape_mcp.server
 
 必需项：请求头 `MCP-Method`、`Mcp-Name`；body 内 `params` 需带 `_meta`（`protocolVersion` + `clientCapabilities`）。完整示例见下。
 
+## 接入 MCP 客户端（Claude / Cursor 等）
+
+scrape-mcp 是标准 MCP Server，支持 **stdio**（推荐，配置即用，无需起 HTTP 服务）。
+
+以 Claude Desktop 为例（`claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "scrape-mcp": {
+      "command": "python",
+      "args": ["-m", "scrape_mcp.server"],
+      "env": { "PYTHONPATH": "/绝对路径/src" }
+    }
+  }
+}
+```
+
+- `command` 用项目 `.venv` 的 `python`（确保已 `pip install -e .`），避免系统解释器报 `ModuleNotFoundError`。
+- 若复用系统浏览器（免下载）：在 `env` 里加 `"SCRAPE_MCP_L2_CHANNEL": "chrome"` 或 `"msedge"`。
+- 配置完重启客户端，即可在会话里直接调用 `web_fetch` / `web_extract` / `web_batch`。
+
+> 其它支持 MCP 的 IDE/客户端（Cursor、Windsurf 等）配置方式同理：把上面的 `mcpServers` 段填进对应配置即可。
+
 ## MCP 工具
 
 - **`web_fetch(url, max_tokens=4000, link_policy="internal")`** → 状态 + 极省正文
@@ -142,7 +208,8 @@ src/scrape_mcp
 │   ├── session.py     # 登录态持久化
 │   └── cache.py       # HTTP 响应缓存
 └── extract/
-    └── compact.py     # DOM 剪枝 → 极省 token 正文
+    ├── compact.py     # DOM 剪枝 → 极省 token 正文
+    └── schema.py      # 结构化抽取（按字段 schema 出 JSON）
 ```
 
 ## 开发

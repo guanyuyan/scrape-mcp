@@ -31,6 +31,16 @@ pre-commit install               # 安装 git 钩子
 建议遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/)：
 `feat:`、`fix:`、`docs:`、`chore:`、`refactor:` 等前缀。
 
+## 发版流程
+
+项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)，避免长期停留在一个版本，
+保持稳定的小步快跑节奏（如每月一次 v0.x）：
+
+1. 合并目标改动到 `main`，确保 `pytest -q` 与 `ruff check .` 全绿
+2. `CHANGELOG.md` 从 `Unreleased` 摘要生成对应版本的 `Added/Fixed/Changed` 段
+3. 打 tag：`git tag v0.x.x && git push --tags`
+4. 在 GitHub 用该 tag 创建 Release，把该版 CHANGELOG 段复制进 release notes
+
 ## 反爬与合规
 
 本项目用于"让 AI 读取网页正文改善效率"的正当目的。请勿利用其绕开付费墙或授权控制。
