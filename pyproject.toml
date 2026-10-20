@@ -26,12 +26,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# PDF 文本抽取是可选能力，不装也能用其余工具，装上后 web_fetch 直接吃 PDF
+pdf = ["pypdf>=4.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "ruff>=0.6.0",
     "pre-commit>=3.8",
+    # 测试要覆盖 PDF 解析路径，运行时仍按可选依赖安装
+    "pypdf>=4.0",
 ]
 
 [tool.ruff]

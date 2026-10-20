@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scrape_mcp.config import Settings
 from scrape_mcp.core.browser import BrowserOutcome
-from scrape_mcp.core.fetcher import Fetcher
+from scrape_mcp.core.fetcher import Fetcher, _content_kind
 from scrape_mcp.core.http_client import HttpResponse
 
 URL = "https://example.com/page"
@@ -56,7 +56,7 @@ class FakeBrowser:
         self.calls += 1
         return self.outcome
 
-    def has_session(self, host: str) -> bool:
+    def has_session(self, host: str, session: str = "default") -> bool:
         return False
 
     async def aclose(self) -> None:
@@ -270,7 +270,12 @@ async def test_l2_interaction_options_forwarded():
     browser = RecordingBrowser()
     fetcher, _ = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
     await fetcher.fetch(URL, wait_for="main", scroll=True, click="#more")
-    assert browser.kwargs == {"wait_for": "main", "scroll": True, "click": "#more"}
+    assert browser.kwargs == {
+        "wait_for": "main",
+        "scroll": True,
+        "click": "#more",
+        "session": "default",
+    }
 
 
 async def test_rate_limit_waits_retry_after_when_allowed():
@@ -344,3 +349,42 @@ async def test_shell_escalation_reason_recorded():
     fetcher, _ = make_fetcher(text=SHELL_HTML, browser=FakeBrowser())
     outcome = await fetcher.fetch(URL)
     assert "escalate_l2:shell" in outcome.decisions
+
+
+# ---- 非 HTML 内容形态 ----
+
+
+def test_content_kind_classification():
+    assert _content_kind("application/pdf", "https://a.test/x") == "pdf"
+    # 部分站点用 octet-stream 下发 PDF，只能靠后缀判断
+    assert _content_kind("application/octet-stream", "https://a.test/x.PDF?t=1") == "pdf"
+    assert _content_kind("text/plain; charset=utf-8", "https://a.test/x") == "text"
+    assert _content_kind("text/markdown", "https://a.test/x") == "text"
+    assert _content_kind("text/html; charset=utf-8", "https://a.test/x") == "html"
+    assert _content_kind("", "https://a.test/x") == "html"
+
+
+async def test_pdf_response_skips_l2_and_keeps_bytes():
+    class PdfHttp:
+        async def get(self, url, **_kwargs):
+            return HttpResponse(
+                ok=True,
+                status=200,
+                url=url,
+                content_type="application/pdf",
+                text="%PDF-1.4",
+                content=b"%PDF-1.4 binary",
+                elapsed_ms=10,
+            )
+
+    browser = FakeBrowser()
+    fetcher = Fetcher(Settings())
+    fetcher._http = PdfHttp()
+    fetcher._browser = browser
+
+    outcome = await fetcher.fetch(URL)
+    assert outcome.kind == "pdf"
+    assert outcome.content == b"%PDF-1.4 binary"
+    # PDF 没有 DOM，升级浏览器只会白付启动成本
+    assert browser.calls == 0
+    assert "no_escalate:pdf" in outcome.decisions

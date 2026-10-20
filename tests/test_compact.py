@@ -213,3 +213,69 @@ def test_invalid_root_selector_falls_back():
     r = compact_html(SAMPLE, URL, root_selector="div[")
     assert "# 正文大标题" in r.content
     assert r.root != ""
+
+
+# ---- 正文质量：代码语言 / 表格合并单元格 / figure ----
+
+
+def test_code_language_marker_from_class_and_brush():
+    html = (
+        "<html><body><article><p>正文开头，用于通过空页判定。</p>"
+        '<pre><code class="language-python">print("hi")</code></pre>'
+        '<pre><code class="brush: js">let a = 1;</code></pre>'
+        '<pre class="highlight-rust"><code>fn main() {}</code></pre>'
+        '<pre><code class="hljs">plain()</code></pre>'
+        "</article></body></html>"
+    )
+    r = compact_html(html, URL)
+    assert "```python" in r.content
+    assert "```js" in r.content
+    assert "```rust" in r.content
+    # 无法识别语言时不乱猜，保持无标记围栏
+    assert "```plain" not in r.content and "```\nplain()" in r.content
+
+
+def test_table_spans_keep_columns_aligned():
+    html = (
+        "<html><body><article><p>正文开头，用于通过空页判定。</p><table>"
+        '<tr><th rowspan="2">姓名</th><th colspan="2">成绩</th></tr>'
+        "<tr><td>数学</td><td>语文</td></tr>"
+        "<tr><td>张三</td><td>90</td><td>80</td></tr>"
+        "</table></article></body></html>"
+    )
+    r = compact_html(html, URL)
+    lines = [line for line in r.content.splitlines() if "," in line]
+    # colspan 的空位保留在中间，行尾空位被裁掉，rowspan 的姓名在每个跨行里补齐
+    assert lines == ["姓名,成绩", "姓名,数学,语文", "张三,90,80"]
+
+
+def test_table_invalid_span_value_falls_back_to_one():
+    html = (
+        "<html><body><article><p>正文开头，用于通过空页判定。</p><table>"
+        '<tr><td colspan="abc">A</td><td>B</td></tr>'
+        "</table></article></body></html>"
+    )
+    r = compact_html(html, URL)
+    assert "A,B" in r.content
+
+
+def test_figure_renders_absolute_image_with_caption():
+    html = (
+        "<html><body><article><p>正文开头，用于通过空页判定。</p>"
+        '<figure><img src="/img/a.png" alt="架构图"><figcaption>图 1 系统架构</figcaption></figure>'
+        "</article></body></html>"
+    )
+    r = compact_html(html, URL)
+    assert "![架构图](https://example.com/img/a.png)" in r.content
+    assert "图 1 系统架构" in r.content
+
+
+def test_figure_inline_data_image_keeps_alt_only():
+    html = (
+        "<html><body><article><p>正文开头，用于通过空页判定。</p>"
+        '<figure><img src="data:image/png;base64,AAAA" alt="内联图"></figure>'
+        "</article></body></html>"
+    )
+    r = compact_html(html, URL)
+    assert "[内联图]" in r.content
+    assert "base64" not in r.content

@@ -46,6 +46,10 @@ class FetchOutcome:
     decisions: list[str] = field(default_factory=list)
     # L2 交互细节：wait_for 是否命中、点击是否成功、实际滚动轮数
     l2: dict[str, Any] = field(default_factory=dict)
+    # 内容形态：html（默认）/ pdf / text。非 HTML 不升级 L2，由上层直接转文本
+    kind: str = "html"
+    # 二进制正文（目前只有 PDF 用到）；从响应体原样带出，避免提前解码破坏结构
+    content: bytes = b""
 
 
 class Fetcher:
@@ -75,6 +79,7 @@ class Fetcher:
         scroll: bool = False,
         click: str | None = None,
         bypass_cache: bool = False,
+        session: str = "default",
     ) -> FetchOutcome:
         outcome = await self._fetch_l1_with_retry(
             url,
@@ -89,11 +94,15 @@ class Fetcher:
                 outcome.decisions.append("no_escalate:rate_limit")
             elif outcome.error:
                 outcome.decisions.append("no_escalate:transport_error")
+            elif outcome.kind != "html":
+                outcome.decisions.append(f"no_escalate:{outcome.kind}")
             elif not self._settings.l2_enabled and outcome.blocked != "none":
                 outcome.decisions.append("no_escalate:l2_disabled")
             return outcome
         outcome.decisions.append(f"escalate_l2:{reason}")
-        return await self._fetch_l2(url, outcome, wait_for=wait_for, scroll=scroll, click=click)
+        return await self._fetch_l2(
+            url, outcome, wait_for=wait_for, scroll=scroll, click=click, session=session
+        )
 
     async def _fetch_l1_with_retry(
         self,
@@ -151,6 +160,9 @@ class Fetcher:
         """需要升级 L2 时返回原因标签；不需要返回 None。"""
         if not self._settings.l2_enabled or outcome.error:
             return None
+        # PDF/纯文本没有 DOM，浏览器渲染不会带来更多信息，只会白付一次启动成本
+        if outcome.kind != "html":
+            return None
         if outcome.blocked == "none":
             # 没被判成拦截页，但大 HTML 榨不出可见文本时仍是骨架页/登录墙：
             # 这类页面（如 LinkedIn）只有浏览器把 JS 跑起来才有正文
@@ -188,6 +200,23 @@ class Fetcher:
                 elapsed_ms=resp.elapsed_ms,
                 error=resp.error,
             )
+        kind = _content_kind(resp.content_type, resp.url or url)
+        if kind != "html":
+            return FetchOutcome(
+                url=url,
+                final_url=resp.url,
+                status=resp.status,
+                tier="l1",
+                blocked="none",
+                block_reason="",
+                content_type=resp.content_type,
+                html=resp.text,
+                elapsed_ms=resp.elapsed_ms,
+                cached=resp.cached,
+                retry_after=resp.retry_after,
+                kind=kind,
+                content=resp.content,
+            )
         blocked, reason = detect_block(resp.status, resp.text, resp.content_type)
         return FetchOutcome(
             url=url,
@@ -211,10 +240,13 @@ class Fetcher:
         wait_for: str | None = None,
         scroll: bool = False,
         click: str | None = None,
+        session: str = "default",
     ) -> FetchOutcome:
         host = urlparse(l1.final_url or url).netloc.lower()
         browser = self._get_browser()
-        result = await browser.render(url, host, wait_for=wait_for, scroll=scroll, click=click)
+        result = await browser.render(
+            url, host, wait_for=wait_for, scroll=scroll, click=click, session=session
+        )
         elapsed = l1.elapsed_ms + result.elapsed_ms
         l2_diag = {
             "wait_for_hit": result.wait_for_hit,
@@ -229,7 +261,7 @@ class Fetcher:
                 l1,
                 block_reason=f"{l1.block_reason}；L2 渲染失败: {result.error}",
                 elapsed_ms=elapsed,
-                session_loaded=browser.has_session(host),
+                session_loaded=browser.has_session(host, session),
                 notes=[*l1.notes, *result.notes],
                 decisions=[*l1.decisions, "l2_failed"],
                 l2=l2_diag,
@@ -247,7 +279,7 @@ class Fetcher:
             content_type="text/html",
             html=result.html,
             elapsed_ms=elapsed,
-            session_loaded=browser.has_session(host),
+            session_loaded=browser.has_session(host, session),
             login_required=login_required,
             attempts=l1.attempts,
             notes=result.notes,
@@ -256,14 +288,26 @@ class Fetcher:
             l2=l2_diag,
         )
 
-    async def login(self, url: str, timeout: float | None = None) -> dict:
+    async def login(self, url: str, timeout: float | None = None, session: str = "default") -> dict:
         """手动登录并持久化该站登录态。返回带登录结果的结构，供 MCP 工具直接透传。"""
         timeout = timeout or self._settings.login_timeout
-        return await self._get_browser().login(url, timeout)
+        return await self._get_browser().login(url, timeout, session)
 
-    def has_session(self, url: str) -> bool:
+    def has_session(self, url: str, session: str = "default") -> bool:
         host = urlparse(url).netloc.lower()
-        return self._get_browser().has_session(host)
+        return self._get_browser().has_session(host, session)
+
+
+def _content_kind(content_type: str, url: str) -> str:
+    """按 Content-Type（必要时看 URL 后缀）区分 HTML / PDF / 纯文本。"""
+    ctype = (content_type or "").lower()
+    if "application/pdf" in ctype:
+        return "pdf"
+    if ctype in ("", "application/octet-stream") and url.lower().split("?")[0].endswith(".pdf"):
+        return "pdf"
+    if ctype.startswith("text/plain") or "text/markdown" in ctype or "text/x-markdown" in ctype:
+        return "text"
+    return "html"
 
 
 def _is_retryable(outcome: FetchOutcome) -> bool:

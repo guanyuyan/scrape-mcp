@@ -95,11 +95,12 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 
 - **分级抓取**：L1 `curl_cffi` → L2 Playwright，拦截才升级，不误伤正常页面。
 - **内容密度选根**：从 article/main/div 中挑出"恰好装住正文的最紧容器"，避开导航/侧栏。
-- **compact 精简**：属性剥离、模板块丢弃、站外链接降级、表格转 CSV、token 预算截断，
-  压缩率可达 1~20% 数量级（如 MDN 214KB → 数百 token）。
+- **compact 精简**：属性剥离、模板块丢弃、站外链接降级、表格转 CSV（合并单元格自动补齐空位）、
+  代码块带语言标记、`figure` 输出图片地址与图注，压缩率可达 1~20% 数量级（如 MDN 214KB → 数百 token）。
 - **拦截如实上报**：不把挑战页/空壳页当正文喂给模型，返回 `blocked`/`block_reason`。
 - **稳定错误码 + 可诊断**：失败返回 `error_code` 与 `retryable`，`debug=true` 还能看到分层决策、选择器命中数与 L2 交互结果。
-- **登录态持久化**：`login` 工具手动登录并落盘，`web_fetch` 自动带上；过期会提示重登。
+- **登录态持久化 + 多会话**：`login` 工具手动登录并落盘，`web_fetch` 自动带上；`session="work"` 可按身份隔离登录态，`session_export`/`session_import` 在机器之间搬运 cookie。
+- **非 HTML 内容**：`web_fetch` 直接读纯文本；装 `[pdf]` extra 后按页抽取 PDF 文本，扫描件（无文字层）如实返回 `empty`，不伪造正文。
 - **缓存与批量**：L1 明文响应按 TTL 磁盘缓存，过期后带 `ETag`/`Last-Modified` 做条件请求；`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。
 - **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`。
@@ -109,6 +110,11 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **Stealth 加固**：Wipe `webdriver`、UA 数据、Canvas/WebGL 确定性指纹噪声、时区对齐。
 
 ## 安装
+
+```bash
+pip install mcp-scrape                          # 核心：L1 抓取 + 精简 + 抽取
+pip install "mcp-scrape[pdf]"                   # 可选：让 web_fetch 直接读 PDF
+```
 
 ```bash
 # L2 渲染所需浏览器（国内可用镜像）
@@ -155,6 +161,7 @@ cp .env.example .env    # 生成配置模板
 | `L2_TIMEZONE` | `Asia/Shanghai` | 隐身加固时区 |
 | `DATA_DIR` | `~/.scrape_mcp` | 登录态/缓存放盘目录 |
 | `RECIPES_DIR` | `<DATA_DIR>/recipes` | 站点 recipe 目录；留空用默认路径 |
+| `PDF_MAX_PAGES` | `200` | PDF 单次最多解析页数（超出部分不抽取，`pages` 仍返回总页数） |
 | `CACHE_TTL` | `300` | L1 缓存 TTL（秒），`0` 关闭；过期后带 `ETag`/`Last-Modified` 做条件请求 |
 | `RETRY_TIMES` | `2` | 网络异常/5xx 重试次数（429/403 不重试） |
 | `RETRY_BACKOFF` | `0.5` | 重试退避基数（秒，指数增长） |
@@ -210,7 +217,9 @@ python -m scrape_mcp.server
   - `link_policy`: `internal`（站内相对链接+站外降级）/ `all` / `none`
   - `format`: `markdown`（默认，保留标题/列表/链接）/ `text`（剥掉标记的纯文本）/ `json`（`content` 为段落数组）
   - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
+  - 登录态：`session`（默认 `default`），与 `login` 时的会话名一致即可自动带上对应登录态
   - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）
+  - 非 HTML：PDF 返回结构化文本（装 `[pdf]` extra；`kind="pdf"` 且带 `pages`/`pages_parsed`），纯文本原样返回（`kind="text"`）
   - 诊断参数：`debug=true` 时返回 `diagnostics`（决策轨迹、选择器命中数、L2 交互结果），不含页面内容
 - **`web_extract(url, schema=None, ...)`** → 按字段 schema 抽取结构化 JSON（可入库）
   - `schema` 可省略：命中站点 recipe 时直接用 recipe 里的 schema，否则返回 `invalid_argument`
@@ -220,14 +229,20 @@ python -m scrape_mcp.server
   - 类型转换：`convert` 可设 `int` / `float` / `date`（去千分位与货币符号；日期兼容 ISO 与 `2026年10月20日` 这类写法）
   - 必填校验：字段设 `required: true`，缺失时整次调用 `ok=false`、`error_code=missing_required`，并在 `required_missing` 列出字段名
   - `jsonld` 用点号路径从 `<script type="application/ld+json">` 取值（多个 script / `@graph` 自动聚合，数组自动展开、数字段视为下标）
-  - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）
+  - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）；非 HTML（PDF/纯文本）返回 `unsupported_content`，请改用 `web_fetch`
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
-  - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug`（对该批所有 URL 生效）
+  - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session`（对该批所有 URL 生效）
 - **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → 从一个入口逐页抓取，返回带 `mode` 标明模式
   - `mode=links`（默认）：按 `depth`/`limit` 发现站内链接逐层抓取；`depth` 最大 `3`，`limit` 受 `CRAWL_MAX_PAGES` 约束
   - `mode=paginate`：传 `next_selector` 即启用分页模式，按"下一页"链接顺序翻页，`max_pages` 封顶（默认 `5`），已访问 URL 自动去重，默认不跟随站外链接（`same_host=false` 可放开）
-  - 单页失败只影响该页；图片/压缩包等静态资源链接自动跳过
-- **`login(url, timeout=180)`** → 打开带界面浏览器手动登录并持久化登录态
+  - 单页失败只影响该页；图片/压缩包等静态资源链接自动跳过；`session` 对该次所有页面生效
+- **`login(url, timeout=180, session="default")`** → 打开带界面浏览器手动登录并持久化登录态
+  - 多账号场景用不同 `session` 名分别登录，`web_fetch` 时传同一个名字即可，互不覆盖
+- **`session_list()`** → 列出本地已保存的登录态（`session` + `host` + `updated_at`），不含 cookie 内容
+- **`session_export(url, session="default", path=None)`** → 导出该站 cookie（`{host, session, cookies}`）；传 `path` 时同时写入本地文件
+- **`session_import(url, path, session="default", replace=False)`** → 从本地 JSON 导入 cookie
+  - 兼容 `session_export` 产物、Playwright `storage_state` 或裸 cookie 数组
+  - 默认按 `(name, domain, path)` 合并（同名以导入值为准），`replace=true` 整体替换；只读本地文件，不发网络请求
 
 返回为 JSON 字符串（落在 `content[0].text`，请解析文本，勿依赖 `structured_content`）。
 失败时带稳定 `error_code` 与 `retryable`；传输失败/5xx 会自动指数退避重试，`attempts` 为实际尝试次数；L2 交互未命中（如选择器不存在）只在 `notes` 中提示，不判失败。
@@ -245,6 +260,7 @@ python -m scrape_mcp.server
 | `login_required` | ❌ | 需要登录态，先调用 `login` |
 | `denied` / `robots_disallowed` | ❌ | 黑白名单或 robots.txt 拒绝 |
 | `missing_required` | ❌ | 必填字段缺失，见 `required_missing`；补齐 schema 或放宽 `required` |
+| `unsupported_content` | ❌ | 内容形态不支持当前工具（如对 PDF 用 `web_extract`）；改用 `web_fetch`，PDF 需装 `[pdf]` extra |
 | `invalid_url` / `invalid_argument` | ❌ | 参数问题 |
 
 失败时默认带精简 `diagnostics.decisions`（如 `["retry:5xx", "escalate_l2:cloudflare", "l2_ok"]`）；
@@ -339,14 +355,34 @@ schema='{"fields": {
 
 改完 JSON 无需重启：按文件 mtime 自动重载。写坏的 JSON 会被跳过，不影响其他 recipe。
 
+#### 开箱示例（真实站点）
+
+`examples/recipes/` 里有三份可直接使用的 recipe，复制到 `RECIPES_DIR` 即可：
+
 ```bash
-# 用 recipe 抽取（不传 schema）
-web_extract(url="https://example.com/post/1")
-# 按 recipe 翻页抓取（不传 max_pages 时默认翻 5 页）
-web_crawl(url="https://example.com/list", max_pages=3)
-# 单次覆盖：显式参数优先于 recipe
-web_fetch(url="https://example.com/post/1", wait_for=".comments")
+mkdir -p ~/.scrape_mcp/recipes
+cp examples/recipes/*.json ~/.scrape_mcp/recipes/
 ```
+
+| 文件 | 站点 | 演示的 recipe 能力 |
+|---|---|---|
+| `docs.python.org.json` | Python 官方文档 | `root_selector` 取 `div.body`；`crawl.next_selector` 用 `accesskey="N"` 顺序翻页；`extract` 取标题/版本/章节数/下一章链接 |
+| `github.com.json` | GitHub Trending | `type=list` 一次抽整张榜单（仓库名、URL、今日 star、语言、简介） |
+| `ruanyifeng.com.json` | 阮一峰的网络日志 | 正文根 `#main-content` + `regex` 提取发布日期；`host` 用 `ruanyifeng.com` 以覆盖 `www.` 子域 |
+
+```bash
+# 按 recipe 抽取（不传 schema）
+web_extract(url="https://docs.python.org/3/library/asyncio.html")
+web_extract(url="https://github.com/trending")
+web_extract(url="https://www.ruanyifeng.com/blog/2026/10/weekly-issue-415.html")
+
+# 按 recipe 翻页（next_selector 生效即进入 mode=paginate）
+web_crawl(url="https://docs.python.org/3/library/asyncio.html", max_pages=3)
+```
+
+> 示例选择器于 2026-10 实测通过；站点改版后失效属正常现象，改一行 selector 即可恢复。
+
+单次覆盖：显式参数优先于 recipe，例如 `web_fetch(url="...", wait_for=".comments")`。
 
 ## Docker
 
@@ -365,7 +401,7 @@ curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 
 ```
 src/scrape_mcp
-├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/login）
+├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/login/session_*）
 ├── config.py          # 环境变量配置
 ├── tokenizer.py       # tiktoken 计数 + 预算截断
 ├── core/
@@ -373,7 +409,8 @@ src/scrape_mcp
 │   ├── fetcher.py     # 分级调度（L1→L2），对工具层返回 FetchOutcome
 │   ├── detector.py    # 拦截/骨架页判定
 │   ├── browser.py     # L2 Playwright + stealth
-│   ├── session.py     # 登录态持久化
+│   ├── session.py     # 登录态持久化（多会话 + cookie 导入导出）
+│   ├── recipes.py     # 站点 recipe（按 host 最长后缀匹配、mtime 重载）
 │   ├── cache.py       # HTTP 响应缓存
 │   ├── errors.py      # 统一错误码
 │   └── hostlimit.py   # 同域并发闸门
@@ -381,6 +418,7 @@ src/scrape_mcp
     ├── compact.py     # DOM 剪枝 → 极省 token 正文
     ├── schema.py      # 结构化抽取（按字段 schema 出 JSON）
     ├── links.py       # 链接发现（web_crawl 用）
+    ├── pdf.py         # PDF → 文本（可选依赖 pypdf）
     └── render.py      # markdown → 纯文本 / 分块
 ```
 

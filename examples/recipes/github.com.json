@@ -1,0 +1,20 @@
+{
+  "host": "github.com",
+  "root_selector": "main",
+  "extract": {
+    "fields": {
+      "repos": {
+        "selector": "article.Box-row",
+        "type": "list",
+        "fields": {
+          "name": {"selector": "h2 a"},
+          "url": {"selector": "h2 a", "type": "attr", "attr": "href", "abs_url": true},
+          "stars_today": {"selector": "span.d-inline-block.float-sm-right"},
+          "language": {"selector": "span[itemprop=\"programmingLanguage\"]"},
+          "description": {"selector": "p.col-9"}
+        }
+      }
+    }
+  },
+  "note": "GitHub Trending 榜单：每行 article.Box-row，榜单页无分页"
+}

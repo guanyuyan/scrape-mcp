@@ -5,13 +5,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scrape_mcp.config import Settings
 from scrape_mcp.core.browser import BrowserOutcome
 from scrape_mcp.core.fetcher import Fetcher
 from scrape_mcp.core.http_client import HttpResponse
-from scrape_mcp.core.session import SessionStore
+from scrape_mcp.core.session import SessionStore, normalize_session
 
 
 def test_session_store_roundtrip(tmp_path):
@@ -30,6 +32,108 @@ def test_session_store_ignores_bad_json(tmp_path):
     (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
     (tmp_path / "sessions" / "bad.example.com.json").write_text("not json", encoding="utf-8")
     assert SessionStore(str(tmp_path)).load(host) is None
+
+
+# ---- 命名会话 ----
+
+
+def test_named_sessions_are_isolated(tmp_path):
+    store = SessionStore(str(tmp_path))
+    store.save("a.test", {"cookies": [{"name": "sid", "value": "work"}], "origins": []}, "work")
+    store.save("a.test", {"cookies": [{"name": "sid", "value": "me"}], "origins": []}, "personal")
+
+    assert store.load("a.test", "work")["cookies"][0]["value"] == "work"
+    assert store.load("a.test", "personal")["cookies"][0]["value"] == "me"
+    # 默认会话不因命名会话的存在而被写入
+    assert store.load("a.test") is None
+    assert (tmp_path / "sessions" / "work" / "a.test.json").is_file()
+
+
+def test_default_session_keeps_legacy_path(tmp_path):
+    store = SessionStore(str(tmp_path))
+    store.save("a.test", {"cookies": []})
+    assert (tmp_path / "sessions" / "a.test.json").is_file()
+
+
+def test_invalid_session_name_rejected(tmp_path):
+    store = SessionStore(str(tmp_path))
+    with pytest.raises(ValueError):
+        store.save("a.test", {"cookies": []}, "../evil")
+    with pytest.raises(ValueError):
+        store.has("a.test", "名字")
+
+
+def test_normalize_session_defaults_and_rejects():
+    assert normalize_session(None) == "default"
+    assert normalize_session("  ") == "default"
+    assert normalize_session("Work_1") == "Work_1"
+
+
+def test_list_sessions_reports_name_host_and_time(tmp_path):
+    store = SessionStore(str(tmp_path))
+    store.save("b.test", {"cookies": []})
+    store.save("a.test", {"cookies": []}, "work")
+
+    items = store.list_sessions()
+    assert [(item["session"], item["host"]) for item in items] == [
+        ("default", "b.test"),
+        ("work", "a.test"),
+    ]
+    assert all(item["updated_at"].endswith("+00:00") for item in items)
+
+
+# ---- cookie 导入 / 导出 ----
+
+
+def test_export_returns_cookies_without_origins(tmp_path):
+    store = SessionStore(str(tmp_path))
+    store.save(
+        "a.test",
+        {"cookies": [{"name": "sid", "value": "1"}], "origins": [{"origin": "x"}]},
+    )
+    assert store.export_cookies("a.test") == {
+        "host": "a.test",
+        "session": "default",
+        "cookies": [{"name": "sid", "value": "1"}],
+    }
+    assert store.export_cookies("missing.test") is None
+
+
+def test_import_merges_by_name_domain_path(tmp_path):
+    store = SessionStore(str(tmp_path))
+    store.save(
+        "a.test",
+        {
+            "cookies": [{"name": "sid", "value": "old", "domain": "a.test", "path": "/"}],
+            "origins": [{"origin": "keep"}],
+        },
+    )
+
+    count = store.import_cookies(
+        "a.test",
+        [{"name": "sid", "value": "new"}, {"name": "token", "value": "t"}, {"value": "no-name"}],
+    )
+
+    assert count == 2
+    state = store.load("a.test")
+    cookies = {c["name"]: c for c in state["cookies"]}
+    assert cookies["sid"]["value"] == "new"
+    assert cookies["token"]["domain"] == "a.test" and cookies["token"]["path"] == "/"
+    # 导入 cookie 不应冲掉 localStorage 等已有状态
+    assert state["origins"] == [{"origin": "keep"}]
+
+
+def test_import_replace_drops_existing_cookies(tmp_path):
+    store = SessionStore(str(tmp_path))
+    store.save("a.test", {"cookies": [{"name": "old", "value": "1"}], "origins": []})
+    store.import_cookies("a.test", [{"name": "new", "value": "2"}], replace=True)
+    assert [c["name"] for c in store.load("a.test")["cookies"]] == ["new"]
+
+
+def test_import_without_valid_cookie_does_not_write(tmp_path):
+    store = SessionStore(str(tmp_path))
+    assert store.import_cookies("a.test", [{"value": "x"}, "bad"]) == 0
+    assert not store.has("a.test")
 
 
 # ---- fetcher 层面：登录墙上报 ----
@@ -59,7 +163,7 @@ class FakeBrowser:
         self.outcome = outcome
         self._has = has_session
 
-    def has_session(self, host: str) -> bool:
+    def has_session(self, host: str, session: str = "default") -> bool:
         return self._has
 
     async def render(self, url: str, host: str | None = None, **kwargs) -> BrowserOutcome:

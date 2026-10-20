@@ -29,6 +29,8 @@ class HttpResponse:
     cached: bool = False
     # 服务端要求的下次请求间隔（秒），来自 Retry-After；没有则为 None
     retry_after: float | None = None
+    # 原始响应体（PDF 等二进制内容需要原样交给上层解析）
+    content: bytes = b""
 
 
 def _parse_retry_after(raw: str) -> float | None:
@@ -150,7 +152,9 @@ class HttpClient:
             )
 
         raw = resp.content or b""
-        if len(raw) > self._s.max_response_bytes:
+        # PDF 是二进制，截断后无法解析；其余内容仍按上限截断，避免大页面吃内存
+        is_pdf = "application/pdf" in content_type.lower()
+        if not is_pdf and len(raw) > self._s.max_response_bytes:
             raw = raw[: self._s.max_response_bytes]
         text = _decode(raw, content_type)
         out = HttpResponse(
@@ -161,6 +165,7 @@ class HttpClient:
             text=text,
             elapsed_ms=int((time.perf_counter() - t0) * 1000),
             retry_after=_parse_retry_after(resp_headers.get("retry-after", "")),
+            content=raw,
         )
         # 只缓存可判定的正常 HTML；拦截/错误响应不缓存，避免把挑战页当作有效内容缓存
         if use_cache and out.status == 200 and "text/html" in content_type:

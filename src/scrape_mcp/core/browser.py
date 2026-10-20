@@ -110,29 +110,32 @@ class BrowserRenderer:
         self._sessions = SessionStore(settings.data_dir)
         self._playwright: Any = None
         self._browser: Any = None
-        # 每站一个 context，各带一份独立的登录态；首个 context 自带登录态后复用
-        self._contexts: dict[str, Any] = {}
+        # 每站（按会话名隔离）一个 context，各带一份独立的登录态
+        self._contexts: dict[tuple[str, str], Any] = {}
         self._lock = asyncio.Lock()
 
-    def has_session(self, host: str) -> bool:
-        return self._sessions.has(host)
+    def has_session(self, host: str, session: str = "default") -> bool:
+        return self._sessions.has(host, session)
 
     # ---------- 生命周期 ----------
 
-    async def _context_for(self, host: str) -> Any:
+    async def _context_for(self, host: str, session: str = "default") -> Any:
+        key = (host, session)
         async with self._lock:
-            if host in self._contexts:
-                return self._contexts[host]
+            if key in self._contexts:
+                return self._contexts[key]
             try:
-                context = await self._new_context(host)
+                context = await self._new_context(host, session)
             except Exception:
                 # 半途失败会留下已启动的浏览器/驱动进程，先收干净再抛，避免每次重试都漏一个
                 await self.aclose()
                 raise
-            self._contexts[host] = context
+            self._contexts[key] = context
             return context
 
-    async def _new_context(self, host: str, *, headless: bool | None = None) -> Any:
+    async def _new_context(
+        self, host: str, session: str = "default", *, headless: bool | None = None
+    ) -> Any:
         # 延迟导入：没装 playwright 时 L1 仍然可用
         from playwright.async_api import async_playwright
 
@@ -150,8 +153,8 @@ class BrowserRenderer:
             "viewport": {"width": 1440, "height": 900},
             "proxy": {"server": self._s.proxy} if self._s.proxy else None,
         }
-        # 该站已有登录态则直接带上，跳过登录墙/再登录
-        saved = self._sessions.load(host)
+        # 该站该会话已有登录态则直接带上，跳过登录墙/再登录
+        saved = self._sessions.load(host, session)
         if saved:
             kwargs["storage_state"] = saved
         context = await self._browser.new_context(**kwargs)
@@ -226,11 +229,12 @@ class BrowserRenderer:
         wait_for: str | None = None,
         scroll: bool = False,
         click: str | None = None,
+        session: str = "default",
     ) -> BrowserOutcome:
         t0 = time.perf_counter()
         host = host or urlparse(url).netloc.lower()
         try:
-            context = await self._context_for(host)
+            context = await self._context_for(host, session)
         except Exception as exc:
             return BrowserOutcome(
                 ok=False,
@@ -333,18 +337,18 @@ class BrowserRenderer:
 
     # ---------- 登录（M3） ----------
 
-    async def login(self, url: str, timeout: float) -> dict[str, Any]:
+    async def login(self, url: str, timeout: float, session: str = "default") -> dict[str, Any]:
         """打开带界面的浏览器手动登录，成功后可保存登录态。
 
         轮询等待"离开登录页、正文变实"，超时未登录也会把当时的 storage_state
         存下来（便于下次从这里继续）。返回结构见 login() 解析方。
         """
         host = urlparse(url).netloc.lower()
-        had_session = self.has_session(host)
+        had_session = self.has_session(host, session)
         t0 = time.perf_counter()
 
         # 手动登录必须能看到界面；新开一个不落缓存的 context，避免被已存登录态干扰
-        context = await self._new_context(host, headless=False)
+        context = await self._new_context(host, session, headless=False)
         page = await context.new_page()
         try:
             await page.goto(
@@ -363,13 +367,14 @@ class BrowserRenderer:
                 await page.wait_for_timeout(2000)
 
             state = await context.storage_state()
-            self._sessions.save(host, state)
-            # 若该站已有带旧登录态的缓存 context，下次抓取要重新加载新登录态
-            self._contexts.pop(host, None)
+            self._sessions.save(host, state, session)
+            # 若该站该会话已有带旧登录态的缓存 context，下次抓取要重新加载新登录态
+            self._contexts.pop((host, session), None)
 
             return {
                 "ok": True,
                 "host": host,
+                "session": session,
                 "url": page.url,
                 "logged_in": logged_in,
                 "had_session": had_session,
@@ -379,6 +384,7 @@ class BrowserRenderer:
             return {
                 "ok": False,
                 "host": host,
+                "session": session,
                 "url": url,
                 "logged_in": False,
                 "error": f"{type(exc).__name__}: {exc}",

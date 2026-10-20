@@ -1,0 +1,19 @@
+{
+  "host": "docs.python.org",
+  "root_selector": "div.body",
+  "extract": {
+    "fields": {
+      "title": {"selector": "h1", "required": true},
+      "version": {"selector": "div.related li#cpython-language-and-version a"},
+      "sections": {"selector": "div.body section", "type": "count"},
+      "next": {
+        "selector": "div.related a[accesskey=\"N\"]",
+        "type": "attr",
+        "attr": "href",
+        "abs_url": true
+      }
+    }
+  },
+  "crawl": {"next_selector": "div.related a[accesskey=\"N\"]", "max_pages": 5},
+  "note": "Sphinx 文档站：正文在 div.body，下一页链接带 accesskey=N"
+}

@@ -35,6 +35,7 @@ CONNECTION = "connection"
 HTTP_4XX = "http_4xx"
 HTTP_5XX = "http_5xx"
 MISSING_REQUIRED = "missing_required"
+UNSUPPORTED_CONTENT = "unsupported_content"
 EMPTY = "empty"
 UNKNOWN = "unknown"
 
@@ -54,6 +55,7 @@ ALL_CODES = (
     HTTP_4XX,
     HTTP_5XX,
     MISSING_REQUIRED,
+    UNSUPPORTED_CONTENT,
     EMPTY,
     UNKNOWN,
 )

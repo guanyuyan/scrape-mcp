@@ -99,6 +99,10 @@ MAX_TABLE_ROWS = 100
 # 只对短块去重，避免误删正文里合理重复的长句
 DUP_BLOCK_MAX_CHARS = 120
 
+# 代码块语言标记：常见写法 language-python / lang-py / highlight-js / class="brush: python"
+_LANG_PREFIXES = ("language-", "lang-", "highlight-")
+_LANG_CLEAN = re.compile(r"[^a-z0-9_+#.-]+")
+
 # 正文根候选容器，以及用于计算"内容密度"的块级文字载体
 ROOT_SELECTOR = "article, main, [role=main], div, section"
 ROOT_TEXT_SELECTOR = "p, h1, h2, h3, h4, h5, h6, pre, blockquote, li, td, dd, dt, figcaption"
@@ -157,6 +161,91 @@ def _escape_link_text(text: str) -> str:
     if "[" not in text and "]" not in text:
         return text
     return text.replace("[", "\\[").replace("]", "\\]")
+
+
+def _span(value: str | None) -> int:
+    """解析 colspan/rowspan；非法值按 1 处理，并限制上限避免异常表格撑爆输出。"""
+    try:
+        span = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(span, 50))
+
+
+def _code_lang(code: Node) -> str:
+    """从 code / pre 的 class 或 data-lang 里取代码语言，取不到返回空串。"""
+    nodes = [code]
+    parent = code.parent
+    if parent is not None and parent.tag == "pre":
+        nodes.append(parent)
+    for node in nodes:
+        attrs = node.attributes
+        raw = f"{attrs.get('class') or ''} {attrs.get('data-lang') or ''}".strip()
+        tokens = raw.split()
+        for index, token in enumerate(tokens):
+            lowered = token.lower()
+            if lowered == "brush" or lowered.startswith("brush:"):
+                # Brush.js 写作 class="brush: python"，语言名可能在同一词或后一个词
+                lang = _LANG_CLEAN.sub("", lowered.partition(":")[2])
+                if not lang and index + 1 < len(tokens):
+                    lang = _LANG_CLEAN.sub("", tokens[index + 1].lower())
+                if lang:
+                    return lang
+                continue
+            for prefix in _LANG_PREFIXES:
+                if lowered.startswith(prefix):
+                    lang = _LANG_CLEAN.sub("", lowered[len(prefix) :])
+                    if lang:
+                        return lang
+    return ""
+
+
+def _table_grid(node: Node) -> list[list[str]]:
+    """把表格展开成对齐的网格，rowspan/colspan 占据的位置补空单元。
+
+    单元格文字只在跨列的首格保留，其余位置留空，避免同一句话在 CSV 里重复多列。
+    """
+    rows: list[list[str]] = []
+    # 列号 -> (还需要填充的行数, 文字)，由上方 rowspan 单元格留下
+    pending: dict[int, tuple[int, str]] = {}
+
+    for tr in node.css("tr"):
+        cells = [c for c in _children(tr) if c.tag in ("td", "th")]
+        row: list[str] = []
+        idx = 0
+        col = 0
+        while True:
+            if col in pending:
+                left, text = pending[col]
+                row.append(text)
+                if left <= 1:
+                    del pending[col]
+                else:
+                    pending[col] = (left - 1, text)
+                col += 1
+                continue
+            if idx < len(cells):
+                cell = cells[idx]
+                idx += 1
+                text = _norm(cell.text(deep=True, separator=" ") or "")
+                colspan = _span(cell.attributes.get("colspan"))
+                rowspan = _span(cell.attributes.get("rowspan"))
+                for offset in range(colspan):
+                    row.append(text if offset == 0 else "")
+                    if rowspan > 1:
+                        pending[col + offset] = (rowspan - 1, text if offset == 0 else "")
+                col += colspan
+                continue
+            # 本行单元格已用完，把上方 rowspan 留下的位置补在末尾（中间空隙也补齐）
+            rest = [c for c in pending if c >= col]
+            if not rest:
+                break
+            nxt = min(rest)
+            row.extend([""] * (nxt - col))
+            col = nxt
+        if any(row):
+            rows.append(row)
+    return rows
 
 
 class _Renderer:
@@ -233,13 +322,18 @@ class _Renderer:
             # pre 内部已含字面换行与缩进，拼接子节点时不能插入分隔符，否则代码会被逐 token 拆行
             code = node.css_first("code") or node
             raw = (code.text(deep=True, separator="") or "").strip("\n")
-            return [f"```\n{raw}\n```"] if raw.strip() else []
+            if not raw.strip():
+                return []
+            return [f"```{_code_lang(code)}\n{raw}\n```"]
 
         if tag == "blockquote":
             return [f"> {b}" for b in self._children(node)]
 
         if tag == "table":
             return self._table(node)
+
+        if tag == "figure":
+            return self._figure(node)
 
         if tag in ("br", "hr"):
             return []
@@ -248,18 +342,38 @@ class _Renderer:
 
     def _table(self, node: Node) -> list[str]:
         lines: list[str] = []
-        for tr in node.css("tr"):
-            cells = [
-                _norm(c.text(deep=True, separator=" ") or "")
-                for c in _children(tr)
-                if c.tag in ("td", "th")
-            ]
+        for cells in _table_grid(node):
+            # 行尾的空单元来自 colspan/rowspan，去掉可省 token 且不影响列含义
+            while cells and not cells[-1]:
+                cells.pop()
             if any(cells):
                 lines.append(",".join(_csv_cell(c) for c in cells))
             if len(lines) >= MAX_TABLE_ROWS:
                 lines.append("…(表格已截断)")
                 break
         return ["\n".join(lines)] if lines else []
+
+    def _figure(self, node: Node) -> list[str]:
+        """figure 单独渲染：图片给出可访问的绝对地址，figcaption 作为说明文字。"""
+        out: list[str] = []
+        img = node.css_first("img")
+        if img is not None:
+            line = self._image(img)
+            if line:
+                out.append(line)
+        cap = node.css_first("figcaption")
+        if cap is not None:
+            out.extend(self._block(cap))
+        return out or self._children(node)
+
+    def _image(self, node: Node) -> str:
+        attrs = node.attributes
+        alt = (attrs.get("alt") or "").strip()
+        src = (attrs.get("src") or "").strip()
+        # data: 内联图对外不可访问，保留 alt 文本即可
+        if not src or src.startswith("data:"):
+            return f"[{alt}]" if alt else ""
+        return f"![{alt}]({urljoin(self.base_url, src)})"
 
     # ---------- 行内 ----------
 

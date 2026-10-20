@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlparse
 
 from mcp.server.mcpserver import MCPServer
@@ -20,10 +21,12 @@ from .core.logging import configure, log_event
 from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
+from .core.session import SessionStore, normalize_session
 from .extract.compact import LINK_POLICIES, compact_html
 from .extract.links import extract_links, next_link
+from .extract.pdf import PdfError, pdf_pages
 from .extract.render import FORMATS, to_blocks, to_plain_text
-from .tokenizer import count_tokens
+from .tokenizer import count_tokens, truncate_to_budget
 
 _fetcher: Fetcher | None = None
 _ratelimiter: RateLimiter | None = None
@@ -66,6 +69,24 @@ def _host_of(url: str) -> str:
 def _recipe_for(url: str) -> Recipe | None:
     """按 host 取站点 recipe；没配就是 None（所有行为保持默认）。"""
     return get_recipe_store().for_url(url)
+
+
+def _session_store() -> SessionStore:
+    return SessionStore(get_settings().data_dir)
+
+
+def _session_error(session: str) -> dict | None:
+    """会话名非法时返回统一错误载荷，避免路径穿越等意外写入。"""
+    try:
+        normalize_session(session)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": str(exc),
+            "retryable": False,
+        }
+    return None
 
 
 def _denied_payload(url: str, code: str, message: str) -> dict:
@@ -166,6 +187,7 @@ async def _fetch_html(
     scroll: bool | None = None,
     click: str | None = None,
     bypass_cache: bool = False,
+    session: str = "default",
 ) -> tuple[FetchOutcome | None, dict | None]:
     """抓取单个 URL，返回 (outcome, 错误 payload)。
 
@@ -194,6 +216,7 @@ async def _fetch_html(
             scroll=bool(scroll),
             click=click,
             bypass_cache=bypass_cache,
+            session=session,
         )
 
     log_event(
@@ -279,6 +302,81 @@ async def _fetch_html(
     return outcome, None
 
 
+def _plain_payload(outcome: FetchOutcome, url: str, budget: int, fmt: str) -> dict:
+    """PDF / 纯文本的返回载荷：主键与 HTML 路径保持一致，便于调用方统一处理。"""
+    extra: dict = {}
+    if outcome.kind == "pdf":
+        try:
+            pages, total, parsed = pdf_pages(
+                outcome.content, max_pages=get_settings().pdf_max_pages
+            )
+        except PdfError as exc:
+            return {
+                "ok": False,
+                "url": url,
+                "status": outcome.status,
+                "tier": outcome.tier,
+                "error_code": errors.UNSUPPORTED_CONTENT,
+                "error": str(exc),
+                "retryable": False,
+                "diagnostics": _diagnostics(outcome),
+            }
+        text = "\n\n".join(pages)
+        extra = {"pages": total, "pages_parsed": parsed}
+        if not text.strip():
+            return {
+                "ok": False,
+                "url": url,
+                "status": outcome.status,
+                "tier": outcome.tier,
+                "error_code": errors.EMPTY,
+                "error": "PDF 未提取到文本（可能是扫描件，需要 OCR）",
+                "retryable": False,
+                "pages": total,
+                "diagnostics": _diagnostics(outcome),
+            }
+    else:
+        text = outcome.html
+
+    truncated = False
+    if budget > 0:
+        text, truncated, _ = truncate_to_budget(text, budget)
+
+    blocks = to_blocks(text)
+    payload = {
+        "ok": True,
+        "url": url,
+        "final_url": outcome.final_url,
+        "status": outcome.status,
+        "tier": outcome.tier,
+        "title": "",
+        "content": text,
+        "token_estimate": count_tokens(text),
+        "truncated": truncated,
+        "blocks": len(blocks),
+        "links_kept": 0,
+        "links_dropped": 0,
+        "html_bytes": len(outcome.html.encode("utf-8")) if outcome.html else len(outcome.content),
+        "elapsed_ms": outcome.elapsed_ms,
+        "cached": outcome.cached,
+        "attempts": outcome.attempts,
+        "content_type": outcome.content_type,
+        "kind": outcome.kind,
+    }
+    payload.update(extra)
+    if fmt != "markdown":
+        payload["format"] = fmt
+        if fmt == "text":
+            payload["content"] = to_plain_text(text)
+            payload["token_estimate"] = count_tokens(payload["content"])
+        else:  # json：按行分块，PDF 也是逐行切，调用方按需再按页聚合
+            payload["content"] = blocks
+            payload["token_estimate"] = sum(count_tokens(b) for b in blocks)
+    if outcome.notes:
+        payload["notes"] = outcome.notes
+    return payload
+
+
 async def _fetch_dict(
     url: str,
     max_tokens: int,
@@ -293,6 +391,7 @@ async def _fetch_dict(
     click: str | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
+    session: str = "default",
 ) -> dict:
     """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
     settings = get_settings()
@@ -321,11 +420,14 @@ async def _fetch_dict(
         scroll=scroll,
         click=click,
         bypass_cache=bypass_cache,
+        session=session,
     )
     if error is not None:
         return error
 
     budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
+    if outcome.kind != "html":
+        return _plain_payload(outcome, url, budget, fmt)
     recipe = _recipe_for(url)
     result = compact_html(
         outcome.html,
@@ -402,8 +504,12 @@ async def web_fetch(
     click: str | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
+    session: str = "default",
 ) -> str:
     """抓取网页并返回极省 token 的紧凑正文（自动辨别反爬拦截页并如实上报）。
+
+    支持 HTML 页面、PDF（需安装 ``mcp-scrape[pdf]``）与纯文本（``.txt``/``.md``）；
+    后两者直接返回文本内容，不做 DOM 精简。
 
     Args:
         url: 目标网页完整 URL，需带 http/https 协议头。
@@ -421,6 +527,7 @@ async def web_fetch(
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
         debug: 返回 diagnostics（分层决策、L2 交互命中情况、正文根与候选命中数），
             只含计数与决策、不含页面内容；失败时默认也会带精简版决策轨迹。
+        session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致，多身份互不干扰。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -428,6 +535,8 @@ async def web_fetch(
             error_code=errors.INVALID_URL,
             error="url 必须以 http:// 或 https:// 开头",
         )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
     return _payload(
         **await _fetch_dict(
             url,
@@ -442,6 +551,7 @@ async def web_fetch(
             click=click,
             bypass_cache=bypass_cache,
             debug=debug,
+            session=session,
         )
     )
 
@@ -458,6 +568,7 @@ async def web_extract(
     click: str | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
+    session: str = "default",
 ) -> str:
     """抓取网页并按字段 schema 抽取结构化 JSON（字段级数据，可入库）。
 
@@ -499,6 +610,7 @@ async def web_extract(
         click: 仅 L2 生效，渲染后点击一次该 CSS 选择器；不传则套用站点 recipe。
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
         debug: 返回 diagnostics（分层决策与 L2 交互命中情况），不含页面内容。
+        session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -506,6 +618,8 @@ async def web_extract(
             error_code=errors.INVALID_URL,
             error="url 必须以 http:// 或 https:// 开头",
         )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
 
     if schema is None:
         recipe = _recipe_for(url)
@@ -539,9 +653,21 @@ async def web_extract(
         scroll=scroll,
         click=click,
         bypass_cache=bypass_cache,
+        session=session,
     )
     if error is not None:
         return _payload(**error)
+
+    if outcome.kind != "html":
+        return _payload(
+            ok=False,
+            url=url,
+            status=outcome.status,
+            tier=outcome.tier,
+            error_code=errors.UNSUPPORTED_CONTENT,
+            error="该 URL 不是 HTML（PDF/纯文本不支持 CSS 字段抽取），请改用 web_fetch",
+            retryable=False,
+        )
 
     result = extract_fields(outcome.html, fields, base_url=outcome.final_url or url)
     payload = {
@@ -582,6 +708,7 @@ async def web_batch(
     timeout: float | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
+    session: str = "default",
 ) -> str:
     """并发抓取一批 URL，各自走完整分级链路，返回逐个结果。
 
@@ -595,8 +722,11 @@ async def web_batch(
         timeout: 单次请求超时秒数。
         bypass_cache: 跳过并绕过响应缓存。
         debug: 每条结果附带 diagnostics（决策轨迹与计数，不含页面内容）。
+        session: 登录态会话名（默认 default）；对该批所有 URL 生效。
     """
     settings = get_settings()
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
     if link_policy not in LINK_POLICIES:
         return _payload(
             ok=False,
@@ -632,6 +762,7 @@ async def web_batch(
                     timeout=timeout,
                     bypass_cache=bypass_cache,
                     debug=debug,
+                    session=session,
                 )
             except Exception as exc:  # 单条意外异常不应拖垮整批
                 code = errors.classify_exception(exc)
@@ -660,6 +791,7 @@ async def _crawl_page(
     timeout: float | None,
     bypass_cache: bool,
     next_selector: str | None = None,
+    session: str = "default",
 ) -> tuple[dict, list[str], str | None]:
     """抓一页并顺手抽链接/下一页；失败页返回错误 payload 和空链接列表。"""
     outcome, error = await _fetch_html(
@@ -668,9 +800,25 @@ async def _crawl_page(
         cookies=cookies,
         timeout=timeout,
         bypass_cache=bypass_cache,
+        session=session,
     )
     if error is not None:
         return error, [], None
+
+    if outcome.kind != "html":
+        return (
+            {
+                "ok": False,
+                "url": url,
+                "status": outcome.status,
+                "tier": outcome.tier,
+                "error_code": errors.UNSUPPORTED_CONTENT,
+                "error": "该页不是 HTML（PDF/纯文本不支持爬取正文），已跳过",
+                "retryable": False,
+            },
+            [],
+            None,
+        )
 
     base = outcome.final_url or url
     budget = max(200, min(int(max_tokens), get_settings().hard_max_tokens))
@@ -717,6 +865,7 @@ async def web_crawl(
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
     bypass_cache: bool = False,
+    session: str = "default",
 ) -> str:
     """从起始页发现站内链接并批量抓取，或按"下一页"顺序翻页，适合把一个栏目的前 N 篇读进来。
 
@@ -740,6 +889,7 @@ async def web_crawl(
         cookies: 所有页面共用的自定义 cookie；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
         bypass_cache: 跳过并绕过响应缓存。
+        session: 登录态会话名（默认 default）；对本次所有页面生效。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -747,6 +897,8 @@ async def web_crawl(
             error_code=errors.INVALID_URL,
             error="url 必须以 http:// 或 https:// 开头",
         )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
     settings = get_settings()
     if depth < 0 or depth > 3:
         return _payload(
@@ -796,6 +948,7 @@ async def web_crawl(
                     timeout=timeout,
                     bypass_cache=bypass_cache,
                     next_selector=next_selector,
+                    session=session,
                 )
             except Exception as exc:  # 单页异常不中断整次爬取
                 code = errors.classify_exception(exc)
@@ -842,6 +995,7 @@ async def web_crawl(
                     cookies=cookies,
                     timeout=timeout,
                     bypass_cache=bypass_cache,
+                    session=session,
                 )
             except Exception as exc:  # 单页异常不中断整次爬取
                 code = errors.classify_exception(exc)
@@ -893,7 +1047,7 @@ async def web_crawl(
 
 
 @mcp.tool()
-async def login(url: str, timeout: float = 180.0) -> str:
+async def login(url: str, timeout: float = 180.0, session: str = "default") -> str:
     """打开带界面的浏览器手动登录，并把该站登录态持久化到磁盘。
 
     用于 web_fetch 报告 login_required=true 的站点：浏览器会以非无头方式打开目标页，
@@ -903,6 +1057,8 @@ async def login(url: str, timeout: float = 180.0) -> str:
     Args:
         url: 目标站点任一页面 URL（按域名区分登录态）。
         timeout: 等待手动登录完成的秒数，超时也会保存当前状态便于下次继续。
+        session: 会话名（默认 default）。需要多账号/多身份时分别用不同名字登录，
+            web_fetch 时传同一个 session 即可，互不覆盖。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -910,8 +1066,10 @@ async def login(url: str, timeout: float = 180.0) -> str:
             error_code=errors.INVALID_URL,
             error="url 必须以 http:// 或 https:// 开头",
         )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
 
-    result = await _get_fetcher().login(url, timeout)
+    result = await _get_fetcher().login(url, timeout, session)
     result["host"] = urlparse(url).netloc.lower()
     if result.get("ok"):
         result["message"] = (
@@ -920,6 +1078,139 @@ async def login(url: str, timeout: float = 180.0) -> str:
             else "未检测到登录完成，但已保存当前状态；等你登录完成后可重新调用 login 覆盖"
         )
     return _payload(**result)
+
+
+def _url_host(url: str) -> str | None:
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return None
+    return (urlparse(url).netloc or "").lower().split(":")[0] or None
+
+
+@mcp.tool()
+async def session_list() -> str:
+    """列出本地已保存的登录态（会话名 + 主机 + 更新时间），不含 cookie 内容。"""
+    items = _session_store().list_sessions()
+    return _payload(ok=True, total=len(items), sessions=items)
+
+
+@mcp.tool()
+async def session_export(url: str, session: str = "default", path: str | None = None) -> str:
+    """导出某站登录态里的 cookie，便于备份或在另一台机器上导入。
+
+    Args:
+        url: 目标站点任一页面 URL（按域名匹配登录态）。
+        session: 会话名（默认 default）。
+        path: 可选本地文件路径；给出时把导出 JSON 写入该文件（目录需已存在），
+            不传则直接在返回里给出 cookies。
+    """
+    host = _url_host(url)
+    if host is None:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
+
+    data = _session_store().export_cookies(host, session)
+    if data is None:
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"{host} 在会话 {session} 下还没有登录态，请先调用 login",
+        )
+
+    payload = {"ok": True, "url": url, **data, "cookie_count": len(data["cookies"])}
+    if path:
+        target = Path(path).expanduser()
+        try:
+            target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:
+            return _payload(
+                ok=False,
+                url=url,
+                error_code=errors.INVALID_ARGUMENT,
+                error=f"写入 {target} 失败: {exc}",
+            )
+        payload["path"] = str(target)
+    return _payload(**payload)
+
+
+@mcp.tool()
+async def session_import(
+    url: str,
+    path: str,
+    session: str = "default",
+    replace: bool = False,
+) -> str:
+    """从本地 JSON 文件导入 cookie 到某站登录态（仅本地文件，不发起网络请求）。
+
+    文件内容支持三种形态：session_export 导出的对象（含 ``cookies``）、
+    Playwright storage_state（含 ``cookies``），或直接是一个 cookie 数组。
+
+    Args:
+        url: 目标站点任一页面 URL（按域名匹配登录态）。
+        path: 本地 JSON 文件路径。
+        session: 会话名（默认 default）；与 web_fetch 使用的会话名保持一致。
+        replace: True 时用文件里的 cookie 整体替换该会话；默认 False 为按
+            （name, domain, path）合并，同名以导入值为准。
+    """
+    host = _url_host(url)
+    if host is None:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
+
+    source = Path(path).expanduser()
+    try:
+        raw = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"读取 {source} 失败: {exc}",
+        )
+    except json.JSONDecodeError as exc:
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"{source} 不是合法 JSON: {exc}",
+        )
+
+    cookies = raw.get("cookies") if isinstance(raw, dict) else raw
+    if not isinstance(cookies, list):
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="文件里没有 cookies 数组（支持 session_export 产物、storage_state 或 cookie 数组）",
+        )
+
+    count = _session_store().import_cookies(host, cookies, session, replace=replace)
+    if count == 0:
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="没有可用的 cookie（每项至少需要 name 字段）",
+        )
+    return _payload(
+        ok=True,
+        url=url,
+        host=host,
+        session=normalize_session(session),
+        imported=count,
+        path=str(source),
+        message="cookie 已写入本地登录态，后续 web_fetch 传同一 session 即可生效",
+    )
 
 
 def main(argv: list[str] | None = None) -> None:

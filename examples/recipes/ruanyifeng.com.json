@@ -1,0 +1,12 @@
+{
+  "host": "ruanyifeng.com",
+  "root_selector": "#main-content",
+  "extract": {
+    "fields": {
+      "title": {"selector": "h1", "required": true},
+      "published": {"selector": ".asset-meta", "regex": "(\\d{4}年\\d{2}月\\d{2}日)"},
+      "paragraphs": {"selector": ".asset-content p", "type": "count"}
+    }
+  },
+  "note": "阮一峰博客：正文在 #main-content，发布日期在 .asset-meta"
+}

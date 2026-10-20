@@ -96,6 +96,8 @@ class Settings(BaseSettings):
     data_dir: str = "~/.scrape_mcp"
     # 站点 recipe 目录；留空用 <data_dir>/recipes
     recipes_dir: str = ""
+    # PDF 单次最多解析页数；超出部分截断（防止超大文件拖住单次调用）
+    pdf_max_pages: int = 200
     # login 工具默认打开带界面的窗口供手动登录；确认后可按需切回无头
     login_timeout: float = 180.0
 

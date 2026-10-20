@@ -5,7 +5,15 @@
 ## [Unreleased]
 
 ### Added
+- **PDF 文本抽取（可选能力）**：`pip install "mcp-scrape[pdf]"` 后，`web_fetch` 直接返回 PDF 文本（`kind="pdf"`，带 `pages` / `pages_parsed`）；按页兜底，扫描件无文字层时返回 `empty`，未装 extra 时返回 `unsupported_content` 并给出安装提示
+- **纯文本直读**：`text/plain`、`text/markdown` 响应按正文返回（`kind="text"`），不再按 HTML 解析
+- **命名会话**：`login` / `web_fetch` / `web_extract` / `web_batch` / `web_crawl` 新增 `session` 参数，默认会话沿用旧路径，命名会话存于 `sessions/<session>/<host>.json`，多身份互不覆盖
+- **`session_list` / `session_export` / `session_import`**：列出本地登录态、导出 cookie 到返回体或本地文件、从本地 JSON 导入（兼容 `storage_state` / 裸 cookie 数组；默认按 name+domain+path 合并，`replace=true` 整体替换）
+- **正文质量**：代码块按 `language-*` / `lang-*` / `highlight-*` / `brush: xxx` 输出语言围栏；表格按 `rowspan`/`colspan` 展开成对齐 CSV；`figure` 输出 `![alt](绝对地址)` 与 `figcaption` 图注
+- `unsupported_content` 错误码（不可重试），用于"内容形态不支持该工具"的场景
+- `PDF_MAX_PAGES` 配置项（默认 200）
 - **站点 recipe**：把渲染交互、正文根、抽取 schema、翻页规则写成 JSON 放入 `RECIPES_DIR`（默认 `~/.scrape_mcp/recipes`），按主机最长后缀匹配，文件变更自动重载；单次调用的显式参数优先
+- **recipes 示例**：`examples/recipes/` 提供三个真实站点 recipe（Python 文档 / GitHub Trending / 阮一峰博客），覆盖正文根、列表抽取与翻页
 - **`web_crawl` 分页模式**：传 `next_selector`（或由 recipe 提供）即按"下一页"顺序翻页，`max_pages` 封顶（默认 5），已访问 URL 去重、不跟随站外链接；返回体新增 `mode` 区分 `links` / `paginate`
 - **`jsonld` 字段类型**：用点号 `path` 从 `<script type="application/ld+json">` 取值，多 script 与 `@graph` 自动聚合，数组自动展开、数字段视为下标
 - **`convert` 类型转换**：支持 `int` / `float` / `date`，自动去掉千分位与货币符号，日期兼容 ISO 与 `2026年10月20日` 等写法；转换失败回落 `default` 并在 `schema_notes` 说明
@@ -15,7 +23,9 @@
 
 ### Changed
 - `web_extract` 返回体新增 `required_missing`；`web_crawl` 返回体新增 `mode`
+- `web_fetch` 对非 HTML 内容新增 `kind` / `content_type` 字段；PDF 响应不截断原始字节，避免破坏文件结构
 - 契约 golden 测试同步锁定新增错误码与载荷键
+- `dev` 依赖加入 `pypdf`，CI 覆盖 PDF 解析路径
 
 ## [0.4.0] - 2026-10-20
 
