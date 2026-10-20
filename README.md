@@ -14,7 +14,24 @@
 
 ## ⚡ 60 秒入门
 
-**第 1 步：一键演示**（拉起库内 MCP 服务，对真实站点自动跑 `web_fetch` + `web_extract`）
+**方式 A：一键安装（推荐，零配置）**
+
+```bash
+pip install scrape-mcp        # 已发布到 PyPI 后
+# 或从源码：cd scrape-mcp && pip install -e .
+```
+
+然后本机任意目录即可：
+
+```bash
+scrape-mcp --version          # 确认装好（应输出 0.x）
+claude                        # 在支持 MCP 的客户端里把它当服务接入
+```
+
+> 不再需要 clone、手动设 `PYTHONPATH` 或 `python -m`；`scrape-mcp` 命令在任意目录可用，
+> 默认 stdio 直接被 MCP 客户端接管。想用 HTTP 直连（Postman/curl），跑 `scrape-mcp --transport streamable-http --port 8000`。
+
+**方式 B：一键演示**（拉源仓库跑 `web_fetch` + `web_extract`，看省 token 效果）
 
 ```bash
 git clone https://github.com/guanyuyan/scrape-mcp.git
@@ -32,7 +49,7 @@ python -m venv .venv && .venv\Scripts\pip install -e .
   ok=True tier=l1 data={"heading": "跨源资源共享（CORS）", "h2_count": 10, "links": 665}
 ```
 
-**第 2 步：作为 MCP 客户端接入**（Claude / Cursor 等，命令指向本仓库）
+**第 2 步：作为 MCP 客户端接入**（Claude / Cursor 等，命令指向已安装的 `scrape-mcp`）
 
 ```bash
 scrape-mcp            # 已安装时；或 python -m scrape_mcp.server
@@ -98,9 +115,12 @@ $env:SCRAPE_MCP_L2_CHANNEL="chrome"   # 或 msedge
 ## 启动（MCP，stdio）
 
 ```bash
-scrape-mcp
-# SSL_DIR 切换协议：stdio（默认）
+scrape-mcp                          # 默认 stdio，被 MCP 客户端接管
+scrape-mcp --transport streamable-http --port 8000   # 切 HTTP 直连
+scrape-mcp --version / --help       # 版本 / 用法
 ```
+
+> 不传参默认 stdio。传 `--transport`/`--port` 由 CLI 显式启动，优先级高于 `.env`/环境变量。
 
 ## 环境变量（前缀 `SCRAPE_MCP_`）
 
@@ -148,7 +168,7 @@ python -m scrape_mcp.server
 
 ## 接入 MCP 客户端（Claude / Cursor 等）
 
-scrape-mcp 是标准 MCP Server，支持 **stdio**（推荐，配置即用，无需起 HTTP 服务）。
+先 `pip install scrape-mcp`（或用项目 `.venv` 跑 `pip install -e .`），使 `scrape-mcp` 命令全局可用；然后按标准 MCP 方式接入。
 
 以 Claude Desktop 为例（`claude_desktop_config.json`）：
 
@@ -156,19 +176,15 @@ scrape-mcp 是标准 MCP Server，支持 **stdio**（推荐，配置即用，无
 {
   "mcpServers": {
     "scrape-mcp": {
-      "command": "python",
-      "args": ["-m", "scrape_mcp.server"],
-      "env": { "PYTHONPATH": "/绝对路径/src" }
+      "command": "scrape-mcp"
     }
   }
 }
 ```
 
-- `command` 用项目 `.venv` 的 `python`（确保已 `pip install -e .`），避免系统解释器报 `ModuleNotFoundError`。
-- 若复用系统浏览器（免下载）：在 `env` 里加 `"SCRAPE_MCP_L2_CHANNEL": "chrome"` 或 `"msedge"`。
-- 配置完重启客户端，即可在会话里直接调用 `web_fetch` / `web_extract` / `web_batch`。
-
-> 其它支持 MCP 的 IDE/客户端（Cursor、Windsurf 等）配置方式同理：把上面的 `mcpServers` 段填进对应配置即可。
+- 用 `command: "scrape-mcp"`（已全局安装），免去 `PYTHONPATH` 与系统解释器导致的 `ModuleNotFoundError`。
+- 若复用系统浏览器（免下载）：设环境变量 `SCRAPE_MCP_L2_CHANNEL` 为 `chrome` 或 `msedge`。
+- 配对成功后重启客户端，即可在会话里直接调用 `web_fetch` / `web_extract` / `web_batch`。
 
 ## MCP 工具
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
@@ -324,20 +325,54 @@ async def login(url: str, timeout: float = 180.0) -> str:
     return _payload(**result)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    """CLI 入口。
+
+    零配置默认即用：不传参按 stdio 运行，可作为 MCP 服务被 Claude/Cursor 等接管。
+    仅当显式指定 --transport=streamable-http 时才走 HTTP。任意目录下
+    ``pip install scrape-mcp`` 后运行 ``scrape-mcp`` 即可，无需 clone/venv/PYTHONPATH。
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        argv = ["--transport", "stdio"]
+    elif argv in (["-h"], ["--help"]):
+        msg = (
+            "scrape-mcp — 反爬感知抓取 + 极省 Token 内容精简的 MCP Server\n\n"
+            "用法: scrape-mcp [--transport stdio|streamable-http] [--port N] [--version]\n\n"
+            "零配置默认作为 stdio MCP 服务运行，供 Claude/Cursor 等客户端接管。\n"
+            "如需 HTTP 直连（Postman/curl），加 --transport streamable-http [--port 8000]。\n"
+            "配置详见 .env / SCRAPE_MCP_* 环境变量。"
+        )
+        print(msg)
+        return
+    if "--version" in argv:
+        import importlib.metadata
+
+        try:
+            version = importlib.metadata.version("scrape-mcp")
+        except importlib.metadata.PackageNotFoundError:
+            version = "unknown (source tree)"
+        print(version)
+        return
+
+    transport = ("--transport" in argv and argv[argv.index("--transport") + 1]) or "stdio"
     settings = get_settings()
-    transport = settings.transport
+    # CLI 优先级高于 env/.env，便于一键切 HTTP
     if transport == "streamable-http":
-        # HTTP 入口（Postman/curl 友好）：JSON 响应 + 无状态会话，免 session 头
+        if "--port" in argv:
+            settings.http_port = int(argv[argv.index("--port") + 1])
+        base = settings.http_port if settings.http_port else 8000
         mcp.run(
             transport="streamable-http",
             host=settings.http_host,
-            port=settings.http_port,
+            port=base,
             json_response=settings.http_json,
             stateless_http=settings.http_stateless,
         )
-    else:
-        mcp.run(transport=transport)
+        return
+    # 默认 stdio
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
