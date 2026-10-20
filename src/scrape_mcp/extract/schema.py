@@ -57,7 +57,9 @@ def parse_schema(schema: Any) -> list[SchemaField]:
     """校验并规范化用户 schema，非法则抛 SchemaValidationError。"""
     raw = schema["fields"] if isinstance(schema, dict) and "fields" in schema else schema
     if not isinstance(raw, dict) or not raw:
-        raise SchemaValidationError("schema 需为 {'fields': {字段名: 规则}} 或字段名的 dict，且非空")
+        raise SchemaValidationError(
+            "schema 需为 {'fields': {字段名: 规则}} 或字段名的 dict，且非空"
+        )
 
     fields: list[SchemaField] = []
     seen: set[str] = set()

@@ -24,12 +24,7 @@ def test_agent_applies():
 
 
 def test_robots_allow_most_specific_wins():
-    text = (
-        "User-agent: *\n"
-        "Disallow: /\n"
-        "User-agent: Scrape-MCP\n"
-        "Allow: /public\n"
-    )
+    text = "User-agent: *\nDisallow: /\nUser-agent: Scrape-MCP\nAllow: /public\n"
     # 通用组 Disallow /，特定组 Allow /public——/public 应被最长前缀命中为允许
     assert _match(_parse_robots(text), "/public/page")
 

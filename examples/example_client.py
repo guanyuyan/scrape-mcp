@@ -24,7 +24,9 @@ async def call(session: ClientSession, name: str, arguments: dict) -> dict:
 
 async def demo_fetch(session: ClientSession) -> None:
     """web_fetch：拿到极省 token 的正文。"""
-    r = await call(session, "web_fetch", {"url": "https://developer.mozilla.org/zh-CN/docs/Web/HTTP/CORS"})
+    r = await call(
+        session, "web_fetch", {"url": "https://developer.mozilla.org/zh-CN/docs/Web/HTTP/CORS"}
+    )
     print("=== web_fetch ===")
     print("ok:", r.get("ok"), "| tier:", r.get("tier"), "| tokens:", r.get("token_estimate"))
     print((r.get("content") or "")[:200])
@@ -35,7 +37,12 @@ async def demo_batch(session: ClientSession) -> None:
     r = await call(
         session,
         "web_batch",
-        {"urls": ["https://developer.mozilla.org/zh-CN/docs/Web/HTTP/CORS", "https://developer.mozilla.org/zh-CN/docs/Web/HTTP"]},
+        {
+            "urls": [
+                "https://developer.mozilla.org/zh-CN/docs/Web/HTTP/CORS",
+                "https://developer.mozilla.org/zh-CN/docs/Web/HTTP",
+            ]
+        },
     )
     print("=== web_batch ===")
     print("total:", r.get("total"), "| ok_count:", r.get("ok_count"))

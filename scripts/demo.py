@@ -75,7 +75,9 @@ async def run_extract(session, url: str) -> None:
     if not r.get("ok"):
         print(f"  [错误] {r.get('error')}")
         return
-    print(f"  ok={r.get('ok')} tier={r.get('tier')} data={json.dumps(r.get('data'), ensure_ascii=False)}")
+    print(
+        f"  ok={r.get('ok')} tier={r.get('tier')} data={json.dumps(r.get('data'), ensure_ascii=False)}"
+    )
 
 
 async def main() -> None:

@@ -24,7 +24,11 @@ def main() -> int:
     schema = {
         "fields": {
             "heading": {"selector": "h1", "type": "text"},
-            "og_title": {"selector": "meta[property='og:title']", "type": "attr", "attr": "content"},
+            "og_title": {
+                "selector": "meta[property='og:title']",
+                "type": "attr",
+                "attr": "content",
+            },
             "h2_list": {"selector": "h2", "type": "list", "list_key": "text"},
             "code_blocks": {"selector": "pre code", "type": "count"},
             "edit_link": {"selector": "a[href*='edit']", "type": "attr", "attr": "href"},
@@ -39,12 +43,16 @@ def main() -> int:
         f"missing={r.get('missing')} elapsed_ms={r.get('elapsed_ms')}"
     )
     if not r.get("ok"):
-        print(f"[smoke] error={r.get('error')} blocked={r.get('blocked')} login_required={r.get('login_required')}")
+        print(
+            f"[smoke] error={r.get('error')} blocked={r.get('blocked')} login_required={r.get('login_required')}"
+        )
         return 2
     print(f"[smoke] heading={r.get('data', {}).get('heading')!r}")
     print(f"[smoke] og_title={r.get('data', {}).get('og_title')!r}")
     print(f"[smoke] h2 前 3 个: {r.get('data', {}).get('h2_list')[:3]}")
-    print(f"[smoke] code_blocks={r.get('data', {}).get('code_blocks')} edit_link={r.get('data', {}).get('edit_link')!r}")
+    print(
+        f"[smoke] code_blocks={r.get('data', {}).get('code_blocks')} edit_link={r.get('data', {}).get('edit_link')!r}"
+    )
     print("[smoke] OK")
     return 0
 
