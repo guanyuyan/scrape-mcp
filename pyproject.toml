@@ -1,6 +1,6 @@
 [project]
 name = "scrape-mcp"
-version = "0.1.0"
+version = "0.2.1"
 description = "反爬感知抓取 + 极省 Token 内容精简的 MCP Server"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,7 +17,7 @@ classifiers = [
 dependencies = [
     "mcp>=2.0.0,<3",
     "curl_cffi>=0.7.0",
-    "selectolax>=0.3.21",
+    "selectolax>=0.4.11",
     "tiktoken>=0.7.0",
     "pydantic-settings>=2.2.0",
     # L2 浏览器渲染。装完还需 playwright install chromium，

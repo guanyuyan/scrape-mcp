@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from dataclasses import field as dcfield
 from typing import Any
 
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 _TYPES = ("text", "attr", "count", "list")
 _LIST_KEYS = ("text", "text_trimmed", "attr", "html")

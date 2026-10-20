@@ -15,7 +15,8 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
-from selectolax.parser import HTMLParser, Node
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
+from selectolax.lexbor import LexborNode as Node
 
 from ..tokenizer import truncate_to_budget
 
