@@ -29,6 +29,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
     "ruff>=0.6.0",
     "pre-commit>=3.8",
 ]
@@ -66,3 +67,12 @@ packages = ["src/scrape_mcp"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+# 只看抓取与抽取核心：CLI/配置/服务装配层的分支靠契约测试覆盖，不拉低门禁
+source = ["src/scrape_mcp/core", "src/scrape_mcp/extract"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true

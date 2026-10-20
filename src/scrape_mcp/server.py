@@ -719,11 +719,13 @@ async def web_crawl(
                     bypass_cache=bypass_cache,
                 )
             except Exception as exc:  # 单页异常不中断整次爬取
+                code = errors.classify_exception(exc)
                 return {
                     "ok": False,
                     "url": u,
-                    "error_code": errors.classify_exception(exc),
+                    "error_code": code,
                     "error": f"{type(exc).__name__}: {exc}",
+                    "retryable": errors.is_retryable(code),
                 }, []
 
     visited: set[str] = {url}

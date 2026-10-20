@@ -13,6 +13,8 @@
 - `web_fetch` / `web_extract` / `web_batch` 新增 `debug` 参数
 - 夜间真实站点回归工作流（每日定时跑 `scripts/demo.py`，失败自动开 issue）
 - 打 tag 自动发版工作流（版本一致性校验 + 构建 + Trusted Publishing + GitHub Release）
+- 契约 golden 测试：锁定各工具载荷键集合与全部错误码取值，防止无意破坏协议
+- 覆盖率门禁：CI 要求 `core` / `extract` 合计覆盖率 ≥ 80%
 
 ### Changed
 - `scripts/demo.py` 全部用例失败时以非零码退出，便于 CI 判定
