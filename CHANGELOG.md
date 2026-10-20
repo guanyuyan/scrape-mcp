@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
 ### Added
 - **诊断载荷**：失败与 `debug=true` 时返回 `diagnostics`（分层决策轨迹 `decisions`、`attempts`、`selector_hits`、`root`、`content_chars`、L2 交互结果），只含计数与决策，不含页面正文
 - **retryable 判定**：所有失败载荷新增布尔字段 `retryable`，便于调用方决定是否重试

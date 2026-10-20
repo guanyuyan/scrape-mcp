@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-import time
+import json
 from typing import ClassVar
 
 import scrape_mcp.core.http_client as hc
 from scrape_mcp.core.cache import HttpCache
 
 URL = "https://a.com/x"
+
+
+def _age(cache: HttpCache, url: str, seconds: float = 10_000) -> None:
+    """把缓存条目的时间戳往前拨，避免依赖 sleep 的时序不稳定。"""
+    fp = cache._file_for(url)
+    entry = json.loads(fp.read_text(encoding="utf-8"))
+    entry["ts"] -= seconds
+    fp.write_text(json.dumps(entry), encoding="utf-8")
 
 
 def test_cache_hit_after_put(tmp_path):
@@ -21,16 +29,16 @@ def test_cache_hit_after_put(tmp_path):
 
 
 def test_cache_expires_after_ttl(tmp_path):
-    c = HttpCache(str(tmp_path), ttl=0.1)
+    c = HttpCache(str(tmp_path), ttl=300)
     c.put(URL, {"status": 200, "text": "hi"})
-    time.sleep(0.15)
+    _age(c, URL, 301)
     assert c.get(URL) is None
 
 
 def test_stale_entry_readable_for_conditional_request(tmp_path):
-    c = HttpCache(str(tmp_path), ttl=0.1)
+    c = HttpCache(str(tmp_path), ttl=300)
     c.put(URL, {"status": 200, "text": "hi", "etag": '"v1"'})
-    time.sleep(0.15)
+    _age(c, URL, 301)
     assert c.get(URL) is None
     stale = c.get(URL, allow_stale=True)
     assert stale is not None and stale["etag"] == '"v1"'
@@ -154,7 +162,7 @@ async def test_conditional_request_reuses_body_on_304(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         response=_FakeResponse(status_code=304, content=b""),
-        cache_ttl=0.05,
+        cache_ttl=300,
     )
     client._cache.put(
         URL,
@@ -167,7 +175,7 @@ async def test_conditional_request_reuses_body_on_304(tmp_path, monkeypatch):
             "last_modified": "Wed, 21 Oct 2015 07:28:00 GMT",
         },
     )
-    time.sleep(0.06)
+    _age(client._cache, URL, 301)
     resp = await client.get(URL)
     assert resp.ok and resp.cached
     assert "old body" in resp.text
