@@ -430,6 +430,7 @@ def compact_html(
     *,
     link_policy: str = "internal",
     max_tokens: int | None = None,
+    root_selector: str | None = None,
 ) -> CompactResult:
     html = _COMMENT.sub("", html or "")
     if not html.strip():
@@ -453,7 +454,15 @@ def compact_html(
     for node in tree.css(DROP_SELECTOR):
         node.decompose()
 
-    root = _pick_root(tree)
+    # recipe 指定的正文根优先；命中失败时回落到密度选根，避免一条失效规则让正文变空
+    root = None
+    if root_selector:
+        try:
+            root = tree.css_first(root_selector)
+        except Exception:
+            root = None
+    if root is None:
+        root = _pick_root(tree)
     renderer = _Renderer(url, link_policy)
     blocks = _dedup(renderer.render(root)) if root is not None else []
     content = "\n".join(blocks)

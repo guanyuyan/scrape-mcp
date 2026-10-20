@@ -18,9 +18,10 @@ from .core.fetcher import Fetcher, FetchOutcome
 from .core.hostlimit import HostLimiter
 from .core.logging import configure, log_event
 from .core.ratelimit import RateLimiter
+from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
 from .extract.compact import LINK_POLICIES, compact_html
-from .extract.links import extract_links
+from .extract.links import extract_links, next_link
 from .extract.render import FORMATS, to_blocks, to_plain_text
 from .tokenizer import count_tokens
 
@@ -60,6 +61,11 @@ def _get_hostlimiter() -> HostLimiter:
 
 def _host_of(url: str) -> str:
     return (urlparse(url).netloc or "").lower().split(":")[0]
+
+
+def _recipe_for(url: str) -> Recipe | None:
+    """按 host 取站点 recipe；没配就是 None（所有行为保持默认）。"""
+    return get_recipe_store().for_url(url)
 
 
 def _denied_payload(url: str, code: str, message: str) -> dict:
@@ -157,7 +163,7 @@ async def _fetch_html(
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
     wait_for: str | None = None,
-    scroll: bool = False,
+    scroll: bool | None = None,
     click: str | None = None,
     bypass_cache: bool = False,
 ) -> tuple[FetchOutcome | None, dict | None]:
@@ -165,7 +171,14 @@ async def _fetch_html(
 
     web_fetch 与 web_extract 共用：先做合规检查，再走分级抓取链路；
     拦截/登录墙统一如实上报，避免把挑战页当正文/当数据。成功时 error 为 None。
+    wait_for/scroll/click 为 None 时套用该站 recipe，显式传值优先。
     """
+    recipe = _recipe_for(url)
+    if recipe is not None:
+        wait_for = wait_for if wait_for is not None else recipe.wait_for
+        click = click if click is not None else recipe.click
+        scroll = scroll if scroll is not None else recipe.scroll
+
     denied = await _compliance_check(url)
     if denied is not None:
         return None, denied
@@ -178,7 +191,7 @@ async def _fetch_html(
             cookies=cookies,
             timeout=timeout,
             wait_for=wait_for,
-            scroll=scroll,
+            scroll=bool(scroll),
             click=click,
             bypass_cache=bypass_cache,
         )
@@ -276,7 +289,7 @@ async def _fetch_dict(
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
     wait_for: str | None = None,
-    scroll: bool = False,
+    scroll: bool | None = None,
     click: str | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
@@ -313,11 +326,13 @@ async def _fetch_dict(
         return error
 
     budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
+    recipe = _recipe_for(url)
     result = compact_html(
         outcome.html,
         outcome.final_url or url,
         link_policy=link_policy,
         max_tokens=budget,
+        root_selector=recipe.root_selector if recipe else None,
     )
 
     payload = {
@@ -383,7 +398,7 @@ async def web_fetch(
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
     wait_for: str | None = None,
-    scroll: bool = False,
+    scroll: bool | None = None,
     click: str | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
@@ -400,9 +415,9 @@ async def web_fetch(
         headers: 自定义请求头，如 {"Referer": "...", "User-Agent": "..."}；传入时不走共享缓存。
         cookies: 自定义 cookie 字典；传入时不走共享缓存。
         timeout: 单次请求超时秒数（默认取配置 request_timeout）。
-        wait_for: 仅 L2 生效，等待该 CSS 选择器出现后再取内容（适合 SPA）。
-        scroll: 仅 L2 生效，滚动页面触发懒加载/无限滚动。
-        click: 仅 L2 生效，渲染后点击一次该 CSS 选择器（如"加载更多"）。
+        wait_for: 仅 L2 生效，等待该 CSS 选择器出现后再取内容（适合 SPA）；不传则套用站点 recipe。
+        scroll: 仅 L2 生效，滚动页面触发懒加载/无限滚动；不传则套用站点 recipe。
+        click: 仅 L2 生效，渲染后点击一次该 CSS 选择器（如"加载更多"）；不传则套用站点 recipe。
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
         debug: 返回 diagnostics（分层决策、L2 交互命中情况、正文根与候选命中数），
             只含计数与决策、不含页面内容；失败时默认也会带精简版决策轨迹。
@@ -434,12 +449,12 @@ async def web_fetch(
 @mcp.tool()
 async def web_extract(
     url: str,
-    schema: dict,
+    schema: dict | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
     wait_for: str | None = None,
-    scroll: bool = False,
+    scroll: bool | None = None,
     click: str | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
@@ -467,19 +482,21 @@ async def web_extract(
       }}
     字段类型：text（默认，节点归一化文本）/ html / attr（需配 attr）/
         count（匹配节点数）/ list（配 fields 返回对象数组，否则按 list_key 取值）/
-        object（在第一个匹配节点内部继续按 fields 抽取）。
+        object（在第一个匹配节点内部继续按 fields 抽取）/
+        jsonld（不写 selector，用 path 从 JSON-LD 取值，如 {"type": "jsonld", "path": "author.name"}）。
     后处理：regex + group（正则提取，未命中回落 default）、abs_url（相对链接转绝对）、
-        strip（去首尾空白，默认 true）。
+        strip（去首尾空白，默认 true）、convert（int / float / date，date 输出 ISO 8601）、
+        required（必填，缺失时整体 ok=false 并返回 missing_required）。
 
     Args:
         url: 目标网页完整 URL。
-        schema: 字段抽取规则字典，见上方示例。
+        schema: 字段抽取规则字典，见上方示例；不传则套用该站 recipe 的 extract 规则。
         headers: 自定义请求头；传入时不走共享缓存。
         cookies: 自定义 cookie 字典；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
-        wait_for: 仅 L2 生效，等待该 CSS 选择器出现后再取内容。
-        scroll: 仅 L2 生效，滚动页面触发懒加载。
-        click: 仅 L2 生效，渲染后点击一次该 CSS 选择器。
+        wait_for: 仅 L2 生效，等待该 CSS 选择器出现后再取内容；不传则套用站点 recipe。
+        scroll: 仅 L2 生效，滚动页面触发懒加载；不传则套用站点 recipe。
+        click: 仅 L2 生效，渲染后点击一次该 CSS 选择器；不传则套用站点 recipe。
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
         debug: 返回 diagnostics（分层决策与 L2 交互命中情况），不含页面内容。
     """
@@ -488,6 +505,29 @@ async def web_extract(
             ok=False,
             error_code=errors.INVALID_URL,
             error="url 必须以 http:// 或 https:// 开头",
+        )
+
+    if schema is None:
+        recipe = _recipe_for(url)
+        schema = recipe.extract if recipe is not None else None
+        if schema is None:
+            return _payload(
+                ok=False,
+                url=url,
+                error_code=errors.INVALID_ARGUMENT,
+                error="缺少 schema，且该站未配置 recipe 抽取规则",
+            )
+
+    try:
+        from .extract.schema import SchemaValidationError, extract_fields, parse_schema
+
+        fields = parse_schema(schema)
+    except SchemaValidationError as exc:
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"schema 非法: {exc}",
         )
 
     outcome, error = await _fetch_html(
@@ -503,18 +543,6 @@ async def web_extract(
     if error is not None:
         return _payload(**error)
 
-    try:
-        from .extract.schema import SchemaValidationError, extract_fields, parse_schema
-
-        fields = parse_schema(schema)
-    except SchemaValidationError as exc:
-        return _payload(
-            ok=False,
-            url=url,
-            error_code=errors.INVALID_ARGUMENT,
-            error=f"schema 非法: {exc}",
-        )
-
     result = extract_fields(outcome.html, fields, base_url=outcome.final_url or url)
     payload = {
         "ok": True,
@@ -527,6 +555,7 @@ async def web_extract(
         "attempts": outcome.attempts,
         "data": result.fields,
         "missing": [k for k, v in result.fields.items() if v is None],
+        "required_missing": result.required_missing,
     }
     if outcome.notes:
         payload["notes"] = outcome.notes
@@ -534,6 +563,11 @@ async def web_extract(
         payload["schema_notes"] = result.errors
     if debug:
         payload["diagnostics"] = _diagnostics(outcome, detail=True)
+    if result.required_missing:
+        payload["ok"] = False
+        payload["error_code"] = errors.MISSING_REQUIRED
+        payload["error"] = "必填字段缺失: " + ", ".join(result.required_missing)
+        payload["retryable"] = False
     return _payload(**payload)
 
 
@@ -625,8 +659,9 @@ async def _crawl_page(
     cookies: dict[str, str] | None,
     timeout: float | None,
     bypass_cache: bool,
-) -> tuple[dict, list[str]]:
-    """抓一页并顺手抽链接；失败页返回错误 payload 和空链接列表。"""
+    next_selector: str | None = None,
+) -> tuple[dict, list[str], str | None]:
+    """抓一页并顺手抽链接/下一页；失败页返回错误 payload 和空链接列表。"""
     outcome, error = await _fetch_html(
         url,
         headers=headers,
@@ -635,11 +670,18 @@ async def _crawl_page(
         bypass_cache=bypass_cache,
     )
     if error is not None:
-        return error, []
+        return error, [], None
 
     base = outcome.final_url or url
     budget = max(200, min(int(max_tokens), get_settings().hard_max_tokens))
-    result = compact_html(outcome.html, base, link_policy=link_policy, max_tokens=budget)
+    recipe = _recipe_for(url)
+    result = compact_html(
+        outcome.html,
+        base,
+        link_policy=link_policy,
+        max_tokens=budget,
+        root_selector=recipe.root_selector if recipe else None,
+    )
     payload = {
         "ok": True,
         "url": url,
@@ -655,7 +697,10 @@ async def _crawl_page(
     if outcome.notes:
         payload["notes"] = outcome.notes
     links = extract_links(outcome.html, base, same_host=same_host, limit=link_limit)
-    return payload, links
+    nxt = (
+        next_link(outcome.html, base, next_selector, same_host=same_host) if next_selector else None
+    )
+    return payload, links, nxt
 
 
 @mcp.tool()
@@ -666,23 +711,31 @@ async def web_crawl(
     same_host: bool = True,
     max_tokens: int = 2000,
     link_policy: str = "internal",
+    next_selector: str | None = None,
+    max_pages: int | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
     bypass_cache: bool = False,
 ) -> str:
-    """从起始页按层发现站内链接并批量抓取，适合"把一个栏目的前 N 篇读进来"。
+    """从起始页发现站内链接并批量抓取，或按"下一页"顺序翻页，适合把一个栏目的前 N 篇读进来。
 
     每页都走完整的分级抓取与合规链路（robots/黑白名单/限流/同域并发），
     单页失败只影响该页，不中断整次爬取；静态资源链接（图片/压缩包等）自动跳过。
 
+    两种模式：
+      - 链接模式（默认）：按 depth 分层发现站内链接，limit 控制总页数。
+      - 分页模式：传 next_selector（或站点 recipe 配置），顺序跟进"下一页"，max_pages 控制页数。
+
     Args:
         url: 起始页 URL。
-        depth: 跳转层数。0=只抓起始页；1=再抓起始页上的链接（默认）；最大 3。
-        limit: 最多抓取的页面总数（含起始页），受配置 crawl_max_pages 上限约束。
+        depth: 链接模式的跳转层数。0=只抓起始页；1=再抓起始页上的链接（默认）；最大 3。
+        limit: 链接模式最多抓取的页面总数（含起始页），受配置 crawl_max_pages 上限约束。
         same_host: 只跟进同主机链接（默认 True）。
         max_tokens: 每页正文 token 预算上限。
         link_policy: 同 web_fetch。
+        next_selector: 分页模式：指向"下一页"的 CSS 选择器；有值时忽略 depth。
+        max_pages: 分页模式最多翻多少页（默认 5），受 crawl_max_pages 上限约束。
         headers: 所有页面共用的自定义请求头；传入时不走共享缓存。
         cookies: 所有页面共用的自定义 cookie；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
@@ -701,10 +754,82 @@ async def web_crawl(
             error_code=errors.INVALID_ARGUMENT,
             error="depth 需在 0~3 之间",
         )
+    if next_selector is not None and (
+        not isinstance(next_selector, str) or not next_selector.strip()
+    ):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="next_selector 必须是非空字符串",
+        )
+    if max_pages is not None and (
+        not isinstance(max_pages, int) or isinstance(max_pages, bool) or max_pages < 1
+    ):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="max_pages 必须是正整数",
+        )
+
+    recipe = _recipe_for(url)
+    if next_selector is None and recipe is not None:
+        next_selector = recipe.next_selector
+    if max_pages is None and recipe is not None:
+        max_pages = recipe.max_pages
+
+    # 分页模式：必须顺序翻页（下一页依赖当前页），因此不复用并发 BFS
+    if next_selector:
+        cap = min(max_pages or 5, settings.crawl_max_pages)
+        results: list[dict] = []
+        visited: set[str] = {url}
+        current: str | None = url
+        while current is not None and len(results) < cap:
+            try:
+                payload, _links, nxt = await _crawl_page(
+                    current,
+                    max_tokens=max_tokens,
+                    link_policy=link_policy,
+                    same_host=same_host,
+                    link_limit=50,
+                    headers=headers,
+                    cookies=cookies,
+                    timeout=timeout,
+                    bypass_cache=bypass_cache,
+                    next_selector=next_selector,
+                )
+            except Exception as exc:  # 单页异常不中断整次爬取
+                code = errors.classify_exception(exc)
+                payload = {
+                    "ok": False,
+                    "url": current,
+                    "error_code": code,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "retryable": errors.is_retryable(code),
+                }
+                nxt = None
+            results.append(payload)
+            if not payload.get("ok") or nxt is None or nxt in visited:
+                break
+            visited.add(nxt)
+            current = nxt
+
+        ok_count = sum(1 for r in results if r.get("ok"))
+        return _payload(
+            ok=True,
+            start=url,
+            depth=0,
+            limit=cap,
+            mode="paginate",
+            pages_fetched=len(results),
+            ok_count=ok_count,
+            links_discovered=len(visited) - 1,
+            results=results,
+        )
+
     cap = min(max(1, int(limit)), settings.crawl_max_pages)
     sem = asyncio.Semaphore(settings.batch_max_concurrency)
 
-    async def one(u: str) -> tuple[dict, list[str]]:
+    async def one(u: str) -> tuple[dict, list[str], str | None]:
         async with sem:
             try:
                 return await _crawl_page(
@@ -720,13 +845,17 @@ async def web_crawl(
                 )
             except Exception as exc:  # 单页异常不中断整次爬取
                 code = errors.classify_exception(exc)
-                return {
-                    "ok": False,
-                    "url": u,
-                    "error_code": code,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "retryable": errors.is_retryable(code),
-                }, []
+                return (
+                    {
+                        "ok": False,
+                        "url": u,
+                        "error_code": code,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "retryable": errors.is_retryable(code),
+                    },
+                    [],
+                    None,
+                )
 
     visited: set[str] = {url}
     frontier: list[str] = [url]
@@ -737,7 +866,7 @@ async def web_crawl(
         frontier = frontier[: cap - len(results)]
         pairs = await asyncio.gather(*(one(u) for u in frontier))
         next_frontier: list[str] = []
-        for payload, links in pairs:
+        for payload, links, _nxt in pairs:
             results.append(payload)
             if level >= depth:
                 continue
@@ -755,6 +884,7 @@ async def web_crawl(
         start=url,
         depth=depth,
         limit=cap,
+        mode="links",
         pages_fetched=len(results),
         ok_count=ok_count,
         links_discovered=len(visited) - 1,

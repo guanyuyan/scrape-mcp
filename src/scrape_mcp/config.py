@@ -94,6 +94,8 @@ class Settings(BaseSettings):
     # ---- M3 登录态持久化 ----
     # 登录态文件（Playwright storage_state）落盘目录，按站点域名各存一份
     data_dir: str = "~/.scrape_mcp"
+    # 站点 recipe 目录；留空用 <data_dir>/recipes
+    recipes_dir: str = ""
     # login 工具默认打开带界面的窗口供手动登录；确认后可按需切回无头
     login_timeout: float = 180.0
 

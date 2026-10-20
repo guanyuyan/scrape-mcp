@@ -194,3 +194,22 @@ def test_empty_html():
     r = compact_html("", URL)
     assert r.content == ""
     assert r.blocks == 0
+
+
+def test_root_selector_overrides_density_pick():
+    html = (
+        "<html><body>"
+        "<article><p>密度选根会拿到的正文。</p></article>"
+        '<div class="picked"><p>recipe 指定的正文。</p></div>'
+        "</body></html>"
+    )
+    r = compact_html(html, URL, root_selector=".picked")
+    assert "recipe 指定的正文" in r.content
+    assert "密度选根" not in r.content
+    assert r.root == "div"
+
+
+def test_invalid_root_selector_falls_back():
+    r = compact_html(SAMPLE, URL, root_selector="div[")
+    assert "# 正文大标题" in r.content
+    assert r.root != ""

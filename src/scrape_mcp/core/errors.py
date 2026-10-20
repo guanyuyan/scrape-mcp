@@ -34,6 +34,7 @@ TLS = "tls"
 CONNECTION = "connection"
 HTTP_4XX = "http_4xx"
 HTTP_5XX = "http_5xx"
+MISSING_REQUIRED = "missing_required"
 EMPTY = "empty"
 UNKNOWN = "unknown"
 
@@ -52,6 +53,7 @@ ALL_CODES = (
     CONNECTION,
     HTTP_4XX,
     HTTP_5XX,
+    MISSING_REQUIRED,
     EMPTY,
     UNKNOWN,
 )

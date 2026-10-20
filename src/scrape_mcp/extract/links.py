@@ -100,3 +100,32 @@ def extract_links(
         if len(out) >= limit:
             break
     return out
+
+
+def next_link(
+    html: str,
+    base_url: str,
+    selector: str,
+    *,
+    same_host: bool = True,
+) -> str | None:
+    """按选择器取"下一页"链接（分页爬取用）；无命中/非法返回 None。"""
+    if not html or not selector:
+        return None
+    try:
+        node = HTMLParser(html).css_first(selector)
+    except Exception:
+        return None
+    if node is None:
+        return None
+
+    href = (node.attributes.get("href") or node.attributes.get("data-href") or "").strip()
+    if not href or href.lower().startswith(_SKIP_PREFIXES):
+        return None
+    target, _fragment = urldefrag(urljoin(base_url, href))
+    parsed = urlparse(target)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    if same_host and parsed.netloc.lower() != urlparse(base_url).netloc.lower():
+        return None
+    return target

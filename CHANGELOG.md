@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### Added
+- **站点 recipe**：把渲染交互、正文根、抽取 schema、翻页规则写成 JSON 放入 `RECIPES_DIR`（默认 `~/.scrape_mcp/recipes`），按主机最长后缀匹配，文件变更自动重载；单次调用的显式参数优先
+- **`web_crawl` 分页模式**：传 `next_selector`（或由 recipe 提供）即按"下一页"顺序翻页，`max_pages` 封顶（默认 5），已访问 URL 去重、不跟随站外链接；返回体新增 `mode` 区分 `links` / `paginate`
+- **`jsonld` 字段类型**：用点号 `path` 从 `<script type="application/ld+json">` 取值，多 script 与 `@graph` 自动聚合，数组自动展开、数字段视为下标
+- **`convert` 类型转换**：支持 `int` / `float` / `date`，自动去掉千分位与货币符号，日期兼容 ISO 与 `2026年10月20日` 等写法；转换失败回落 `default` 并在 `schema_notes` 说明
+- **`required` 必填校验**：缺失字段汇总到 `required_missing`，整次调用返回 `error_code=missing_required`；新增同名错误码（不可重试）
+- `compact_html` 支持 `root_selector` 指定正文根，未命中自动回落内容密度选根
+- `web_extract` 的 `schema` 可省略，命中 recipe 时直接复用其抽取规则
+
+### Changed
+- `web_extract` 返回体新增 `required_missing`；`web_crawl` 返回体新增 `mode`
+- 契约 golden 测试同步锁定新增错误码与载荷键
+
 ## [0.4.0] - 2026-10-20
 
 ### Added

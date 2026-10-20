@@ -101,7 +101,9 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **稳定错误码 + 可诊断**：失败返回 `error_code` 与 `retryable`，`debug=true` 还能看到分层决策、选择器命中数与 L2 交互结果。
 - **登录态持久化**：`login` 工具手动登录并落盘，`web_fetch` 自动带上；过期会提示重登。
 - **缓存与批量**：L1 明文响应按 TTL 磁盘缓存，过期后带 `ETag`/`Last-Modified` 做条件请求；`web_batch` 并发抓取一批 URL。
-- **轻量爬取**：`web_crawl` 按 `depth`/`limit` 发现站内链接并逐页抓取，静态资源自动跳过。
+- **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。
+- **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`。
+- **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
 - **输出格式可选**：`format=markdown|text|json`，正文可按段落数组直接入库。
 - **同域并发闸门**：同一站点默认最多 2 个并发请求，跨站仍可并行，避免批量抓取时把单站打穿。
 - **Stealth 加固**：Wipe `webdriver`、UA 数据、Canvas/WebGL 确定性指纹噪声、时区对齐。
@@ -152,6 +154,7 @@ cp .env.example .env    # 生成配置模板
 | `L2_SCROLL_DELAY_MS` | `400` | L2 每步滚动间隔（毫秒） |
 | `L2_TIMEZONE` | `Asia/Shanghai` | 隐身加固时区 |
 | `DATA_DIR` | `~/.scrape_mcp` | 登录态/缓存放盘目录 |
+| `RECIPES_DIR` | `<DATA_DIR>/recipes` | 站点 recipe 目录；留空用默认路径 |
 | `CACHE_TTL` | `300` | L1 缓存 TTL（秒），`0` 关闭；过期后带 `ETag`/`Last-Modified` 做条件请求 |
 | `RETRY_TIMES` | `2` | 网络异常/5xx 重试次数（429/403 不重试） |
 | `RETRY_BACKOFF` | `0.5` | 重试退避基数（秒，指数增长） |
@@ -209,15 +212,20 @@ python -m scrape_mcp.server
   - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
   - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）
   - 诊断参数：`debug=true` 时返回 `diagnostics`（决策轨迹、选择器命中数、L2 交互结果），不含页面内容
-- **`web_extract(url, schema={...}, ...)`** → 按字段 schema 抽取结构化 JSON（可入库）
-  - 字段类型：`text`（默认）/ `html` / `attr`（需配 `attr`）/ `count` / `list` / `object`
+- **`web_extract(url, schema=None, ...)`** → 按字段 schema 抽取结构化 JSON（可入库）
+  - `schema` 可省略：命中站点 recipe 时直接用 recipe 里的 schema，否则返回 `invalid_argument`
+  - 字段类型：`text`（默认）/ `html` / `attr`（需配 `attr`）/ `count` / `list` / `object` / `jsonld`（需配 `path`）
   - 嵌套：`list` 配 `fields` 返回对象数组，`object` 在匹配节点内部继续抽取
   - 后处理：`regex` + `group`（正则提取，未命中回落 `default`）、`abs_url`（相对链接转绝对）、`strip`
+  - 类型转换：`convert` 可设 `int` / `float` / `date`（去千分位与货币符号；日期兼容 ISO 与 `2026年10月20日` 这类写法）
+  - 必填校验：字段设 `required: true`，缺失时整次调用 `ok=false`、`error_code=missing_required`，并在 `required_missing` 列出字段名
+  - `jsonld` 用点号路径从 `<script type="application/ld+json">` 取值（多个 script / `@graph` 自动聚合，数组自动展开、数字段视为下标）
   - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
   - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug`（对该批所有 URL 生效）
-- **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → 从起始页按层发现站内链接并逐页抓取
-  - `depth`：跳转层数，`0` 只抓起始页，最大 `3`；`limit`：总页数上限（受 `CRAWL_MAX_PAGES` 约束）
+- **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → 从一个入口逐页抓取，返回带 `mode` 标明模式
+  - `mode=links`（默认）：按 `depth`/`limit` 发现站内链接逐层抓取；`depth` 最大 `3`，`limit` 受 `CRAWL_MAX_PAGES` 约束
+  - `mode=paginate`：传 `next_selector` 即启用分页模式，按"下一页"链接顺序翻页，`max_pages` 封顶（默认 `5`），已访问 URL 自动去重，默认不跟随站外链接（`same_host=false` 可放开）
   - 单页失败只影响该页；图片/压缩包等静态资源链接自动跳过
 - **`login(url, timeout=180)`** → 打开带界面浏览器手动登录并持久化登录态
 
@@ -236,6 +244,7 @@ python -m scrape_mcp.server
 | `blocked` | ❌ | 被反爬拦截（Cloudflare/WAF/限流），换时段或人工确认 |
 | `login_required` | ❌ | 需要登录态，先调用 `login` |
 | `denied` / `robots_disallowed` | ❌ | 黑白名单或 robots.txt 拒绝 |
+| `missing_required` | ❌ | 必填字段缺失，见 `required_missing`；补齐 schema 或放宽 `required` |
 | `invalid_url` / `invalid_argument` | ❌ | 参数问题 |
 
 失败时默认带精简 `diagnostics.decisions`（如 `["retry:5xx", "escalate_l2:cloudflare", "l2_ok"]`）；
@@ -259,18 +268,84 @@ python -m scrape_mcp.server
 
 ```bash
 schema='{"fields": {
-  "title":     {"selector": "h1"},
-  "price":     {"selector": ".price", "regex": "￥([\\d.]+)", "group": 1},
+  "title":     {"selector": "h1", "required": true},
+  "price":     {"selector": ".price", "regex": "￥([\\d,.]+)", "group": 1,
+                "convert": "float", "required": true},
+  "published": {"selector": "time", "type": "attr", "attr": "datetime", "convert": "date"},
   "main_link": {"selector": "a", "type": "attr", "attr": "href", "abs_url": true},
   "tag_count": {"selector": ".tag", "type": "count"},
   "tags":      {"selector": ".tag", "type": "list", "list_key": "text"},
+  "author":    {"type": "jsonld", "path": "author.name"},
   "items":     {"selector": ".item", "type": "list", "fields": {
     "name": {"selector": ".name"},
     "url":  {"selector": "a", "type": "attr", "attr": "href", "abs_url": true}
   }}
 }}'
-# → {"ok":true, "data": {"title":"…","price":"299.00","main_link":"https://…",
-#    "tag_count":3,"tags":["a","b","c"],"items":[{"name":"…","url":"https://…"}]}, "missing":[]}
+# → {"ok":true, "data": {"title":"…","price":299.0,"published":"2026-10-20",
+#    "main_link":"https://…","tag_count":3,"tags":["a","b","c"],
+#    "author":"…","items":[{"name":"…","url":"https://…"}]},
+#    "missing":[], "required_missing":[]}
+```
+
+必填字段缺失时返回 `ok=false` + `error_code=missing_required`，`required_missing` 里是缺失的字段名：
+
+```json
+{"ok": false, "error_code": "missing_required", "error": "必填字段缺失: title, price",
+ "retryable": false, "required_missing": ["title", "price"], "data": {"title": null, ...}}
+```
+
+### 站点 recipe
+
+把"这个站怎么抓、取哪块、抽哪些字段、怎么翻页"写成一份 JSON 放进 `RECIPES_DIR`
+（默认 `~/.scrape_mcp/recipes`），之后同一站点免参数复用。文件名即主机名，
+也可用 `host` 字段覆盖；匹配按最长后缀（`m.example.com` 能命中 `example.com`），
+单次调用的显式参数优先于 recipe。
+
+`~/.scrape_mcp/recipes/example.com.json`：
+
+```json
+{
+  "host": "example.com",
+  "wait_for": "main article",
+  "scroll": true,
+  "root_selector": "main article",
+  "extract": {
+    "fields": {
+      "title": {"selector": "h1", "required": true},
+      "author": {"type": "jsonld", "path": "author.name"},
+      "published": {"selector": "time", "type": "attr", "attr": "datetime", "convert": "date"},
+      "items": {
+        "selector": ".item",
+        "type": "list",
+        "fields": {
+          "name": {"selector": ".name"},
+          "url": {"selector": "a", "type": "attr", "attr": "href", "abs_url": true}
+        }
+      }
+    }
+  },
+  "crawl": {"next_selector": "a.next", "max_pages": 5}
+}
+```
+
+| 字段 | 作用 | 生效范围 |
+|---|---|---|
+| `host` | 匹配的主机（缺省用文件名） | 全部 |
+| `wait_for` / `scroll` / `click` | L2 渲染交互，缺省则用调用参数 | `web_fetch` / `web_extract` / `web_batch` / `web_crawl` |
+| `root_selector` | 指定正文根，命中失败自动回落密度选根 | 同上 |
+| `extract` | `web_extract` 省略 `schema` 时的默认 schema | `web_extract` |
+| `crawl.next_selector` / `crawl.max_pages` | 分页翻页规则，`next_selector` 一旦生效即进入 `mode=paginate` | `web_crawl` |
+| `note` | 备注，仅供人读 | — |
+
+改完 JSON 无需重启：按文件 mtime 自动重载。写坏的 JSON 会被跳过，不影响其他 recipe。
+
+```bash
+# 用 recipe 抽取（不传 schema）
+web_extract(url="https://example.com/post/1")
+# 按 recipe 翻页抓取（不传 max_pages 时默认翻 5 页）
+web_crawl(url="https://example.com/list", max_pages=3)
+# 单次覆盖：显式参数优先于 recipe
+web_fetch(url="https://example.com/post/1", wait_for=".comments")
 ```
 
 ## Docker

@@ -97,6 +97,7 @@ EXTRACT_OK_PAYLOAD = {
     "attempts",
     "data",
     "missing",
+    "required_missing",
 }
 
 CRAWL_PAGE_PAYLOAD = {
@@ -117,6 +118,7 @@ CRAWL_OK_PAYLOAD = {
     "start",
     "depth",
     "limit",
+    "mode",
     "pages_fetched",
     "ok_count",
     "links_discovered",
@@ -181,6 +183,7 @@ def test_error_code_values_are_locked():
         "connection",
         "http_4xx",
         "http_5xx",
+        "missing_required",
         "empty",
         "unknown",
     )
@@ -325,3 +328,34 @@ def test_web_crawl_zero_depth_keys(monkeypatch):
     assert set(out) == CRAWL_OK_PAYLOAD
     assert set(out["results"][0]) == CRAWL_PAGE_PAYLOAD
     assert out["pages_fetched"] == 1
+    assert out["mode"] == "links"
+
+
+def test_web_crawl_paginate_keys(monkeypatch):
+    _patch_fetch(monkeypatch, _outcome())
+    out = _run(server.web_crawl(URL, next_selector="a.next", max_pages=3))
+    assert set(out) == CRAWL_OK_PAYLOAD
+    assert set(out["results"][0]) == CRAWL_PAGE_PAYLOAD
+    assert out["mode"] == "paginate"
+
+
+def test_web_extract_required_missing_payload(monkeypatch):
+    _patch_fetch(monkeypatch, _outcome())
+    out = _run(
+        server.web_extract(
+            URL,
+            {"fields": {"absent": {"selector": ".nope", "required": True}}},
+        )
+    )
+    assert set(out) == EXTRACT_OK_PAYLOAD | {"error_code", "error", "retryable"}
+    assert out["ok"] is False
+    assert out["error_code"] == errors.MISSING_REQUIRED
+    assert out["retryable"] is False
+    assert out["required_missing"] == ["absent"]
+
+
+def test_web_extract_without_schema_or_recipe(monkeypatch):
+    _patch_fetch(monkeypatch, _outcome())
+    out = _run(server.web_extract(URL))
+    assert set(out) == INVALID_PAYLOAD | {"url"}
+    assert out["error_code"] == errors.INVALID_ARGUMENT

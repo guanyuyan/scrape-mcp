@@ -29,25 +29,41 @@
     count  —— 取匹配节点数量
     list   —— 取所有匹配节点；配 fields 时返回对象数组，否则按 list_key 取值
     object —— 取第一个匹配节点的子树，按 fields 在其内部继续抽取
+    jsonld —— 从页面 <script type="application/ld+json"> 里按 path 取值，
+              路径用点号分隔（如 "author.name"），遇到数组自动展开，无需 selector
 
-后处理（对字符串结果生效，按 regex → abs_url → strip 顺序）：
+后处理（对字符串结果生效，按 regex → abs_url → strip → convert 顺序）：
     regex / group —— 正则提取，未命中时回落到 default（无 default 则 None）
     abs_url       —— 把相对链接拼成绝对 URL（以页面 final_url 为基准）
     strip         —— 是否去除首尾空白，默认 true
+    convert       —— 类型转换：int / float / date（date 统一输出 ISO 8601）
+    required      —— 必填字段；最终值为空时记入 required_missing，由上层整体判失败
 """
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from dataclasses import field as dcfield
+from datetime import datetime
 from typing import Any
 from urllib.parse import urljoin
 
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
-_TYPES = ("text", "html", "attr", "count", "list", "object")
+_TYPES = ("text", "html", "attr", "count", "list", "object", "jsonld")
 _LIST_KEYS = ("text", "text_trimmed", "attr", "html")
+_CONVERT_TYPES = ("int", "float", "date")
+_DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%Y年%m月%d日",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+)
 
 
 @dataclass
@@ -63,12 +79,17 @@ class SchemaField:
     regex: str | None = None
     group: int = 0
     strip: bool = True
+    # jsonld 专用：点号分隔的取值路径，数组自动展开
+    path: str | None = None
+    convert: str | None = None
+    required: bool = False
 
 
 @dataclass
 class SchemaResult:
     fields: dict[str, Any]
     errors: list[str] = dcfield(default_factory=list)
+    required_missing: list[str] = dcfield(default_factory=list)
 
 
 class SchemaValidationError(ValueError):
@@ -111,10 +132,16 @@ def _parse_rule(key: str, rule: Any, *, path: str) -> SchemaField:
         raise SchemaValidationError(f"字段 {label} 的 type 必须是 {_TYPES} 之一")
 
     selector = rule.get("selector") or rule.get("select")
-    if not selector:
-        raise SchemaValidationError(f"字段 {label} 缺少 selector")
-    if not isinstance(selector, str):
-        raise SchemaValidationError(f"字段 {label} 的 selector 必须是字符串")
+    path = rule.get("path")
+    if ftype == "jsonld":
+        if not isinstance(path, str) or not path.strip():
+            raise SchemaValidationError(f"字段 {label} 的 type=jsonld 必须提供 path")
+        selector = selector or ""
+    else:
+        if not selector:
+            raise SchemaValidationError(f"字段 {label} 缺少 selector")
+        if not isinstance(selector, str):
+            raise SchemaValidationError(f"字段 {label} 的 selector 必须是字符串")
 
     attr = rule.get("attr")
     if ftype == "attr" and not attr:
@@ -147,6 +174,14 @@ def _parse_rule(key: str, rule: Any, *, path: str) -> SchemaField:
     if not isinstance(group, int) or isinstance(group, bool) or group < 0:
         raise SchemaValidationError(f"字段 {label} 的 group 必须是非负整数")
 
+    convert = rule.get("convert")
+    if convert is not None and convert not in _CONVERT_TYPES:
+        raise SchemaValidationError(f"字段 {label} 的 convert 必须是 {_CONVERT_TYPES} 之一")
+
+    required = rule.get("required", False)
+    if not isinstance(required, bool):
+        raise SchemaValidationError(f"字段 {label} 的 required 必须是布尔值")
+
     return SchemaField(
         key=key,
         selector=selector,
@@ -159,6 +194,9 @@ def _parse_rule(key: str, rule: Any, *, path: str) -> SchemaField:
         regex=regex,
         group=group,
         strip=bool(rule.get("strip", True)),
+        path=path,
+        convert=convert,
+        required=required,
     )
 
 
@@ -204,17 +242,162 @@ def _apply(value: Any, f: SchemaField, base_url: str) -> Any:
     return value.strip() if f.strip else value
 
 
+# ---------- JSON-LD ----------
+
+
+def _collect_jsonld(data: Any, out: list[Any]) -> None:
+    """把单个 script 的内容展开成对象列表（含 @graph）。"""
+    if isinstance(data, list):
+        for item in data:
+            _collect_jsonld(item, out)
+    elif isinstance(data, dict):
+        out.append(data)
+        graph = data.get("@graph")
+        if isinstance(graph, list):
+            for item in graph:
+                _collect_jsonld(item, out)
+
+
+def _walk_path(value: Any, parts: list[str]) -> Any:
+    """按点号路径取值；数组自动展开（数字段表示下标）。"""
+    if not parts:
+        return value
+    head, rest = parts[0], parts[1:]
+    if isinstance(value, list):
+        if head.isdigit():
+            index = int(head)
+            return _walk_path(value[index], rest) if 0 <= index < len(value) else None
+        collected: list[Any] = []
+        for item in value:
+            sub = _walk_path(item, parts)
+            if isinstance(sub, list):
+                collected.extend(sub)
+            elif sub is not None:
+                collected.append(sub)
+        return collected or None
+    if isinstance(value, dict):
+        if head not in value:
+            return None
+        return _walk_path(value[head], rest)
+    return None
+
+
+def _jsonld_value(scope: Any, f: SchemaField) -> Any:
+    docs: list[Any] = []
+    try:
+        nodes = scope.css('script[type="application/ld+json"]')
+    except Exception:
+        nodes = []
+    for node in nodes:
+        try:
+            data = json.loads(node.text() or "")
+        except (json.JSONDecodeError, ValueError):
+            continue
+        _collect_jsonld(data, docs)
+    if not docs:
+        return f.default
+
+    results: list[Any] = []
+    for doc in docs:
+        value = _walk_path(doc, (f.path or "").split("."))
+        if value is None:
+            continue
+        if isinstance(value, list):
+            results.extend(item for item in value if item is not None)
+        else:
+            results.append(value)
+    if not results:
+        return f.default
+    return results[0] if len(results) == 1 else results
+
+
+# ---------- 类型转换与必填 ----------
+
+
+def _clean_number(text: str) -> str | None:
+    match = re.search(r"-?\d[\d,]*(?:\.\d+)?", text)
+    return match.group(0).replace(",", "") if match else None
+
+
+def _to_date(text: str) -> str | None:
+    raw = text.strip()
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        for fmt in _DATE_FORMATS:
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+    if dt.tzinfo is None and (dt.hour, dt.minute, dt.second) == (0, 0, 0):
+        return dt.date().isoformat()
+    return dt.isoformat()
+
+
+def _convert_value(value: Any, target: str) -> Any:
+    if target == "date":
+        return _to_date(value) if isinstance(value, str) else None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) if target == "int" else float(value)
+    if not isinstance(value, str):
+        return None
+    raw = _clean_number(value)
+    if raw is None:
+        return None
+    try:
+        return int(float(raw)) if target == "int" else float(raw)
+    except ValueError:
+        return None
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _finalize(value: Any, f: SchemaField, base_url: str, errors: list[str], label: str) -> Any:
+    if isinstance(value, list):
+        return [_finalize_one(item, f, base_url, errors, label) for item in value]
+    return _finalize_one(value, f, base_url, errors, label)
+
+
+def _finalize_one(value: Any, f: SchemaField, base_url: str, errors: list[str], label: str) -> Any:
+    value = _apply(value, f, base_url)
+    if not f.convert or _is_missing(value):
+        return value
+    converted = _convert_value(value, f.convert)
+    if converted is None:
+        errors.append(f"字段 {label}: 无法转换为 {f.convert}: {value!r}")
+        return f.default
+    return converted
+
+
 def _run(scope: Any, schema: list[SchemaField], base_url: str, path: str = "") -> SchemaResult:
     fields: dict[str, Any] = {}
     errors: list[str] = []
+    required_missing: list[str] = []
 
     for f in schema:
         label = f"{path}{f.key}"
+
+        if f.type == "jsonld":
+            value = _finalize(_jsonld_value(scope, f), f, base_url, errors, label)
+            fields[f.key] = value
+            if f.required and _is_missing(value):
+                required_missing.append(label)
+            continue
+
         try:
             nodes = scope.css(f.selector)
         except Exception as exc:  # selectolax 对非法 CSS 的兜底
             errors.append(f"字段 {label}: 选择器非法: {exc}")
             fields[f.key] = f.default
+            if f.required:
+                required_missing.append(label)
             continue
 
         if f.type == "count":
@@ -223,12 +406,15 @@ def _run(scope: Any, schema: list[SchemaField], base_url: str, path: str = "") -
 
         if not nodes:
             fields[f.key] = f.default
+            if f.required:
+                required_missing.append(label)
             continue
 
         if f.type == "object":
             sub = _run(nodes[0], f.fields or [], base_url, path=f"{label}.")
             fields[f.key] = sub.fields if sub.fields else None
             errors.extend(sub.errors)
+            required_missing.extend(sub.required_missing)
             continue
 
         if f.type == "list":
@@ -238,14 +424,22 @@ def _run(scope: Any, schema: list[SchemaField], base_url: str, path: str = "") -
                     sub = _run(node, f.fields, base_url, path=f"{label}.")
                     items.append(sub.fields)
                     errors.extend(sub.errors)
+                    required_missing.extend(sub.required_missing)
                 fields[f.key] = items
             else:
-                fields[f.key] = [_apply(_raw_value(node, f), f, base_url) for node in nodes]
+                fields[f.key] = [
+                    _finalize(_raw_value(node, f), f, base_url, errors, label) for node in nodes
+                ]
+            if f.required and _is_missing(fields[f.key]):
+                required_missing.append(label)
             continue
 
-        fields[f.key] = _apply(_raw_value(nodes[0], f), f, base_url)
+        value = _finalize(_raw_value(nodes[0], f), f, base_url, errors, label)
+        fields[f.key] = value
+        if f.required and _is_missing(value):
+            required_missing.append(label)
 
-    return SchemaResult(fields=fields, errors=errors)
+    return SchemaResult(fields=fields, errors=errors, required_missing=required_missing)
 
 
 def extract_fields(html: str, schema: list[SchemaField], *, base_url: str = "") -> SchemaResult:

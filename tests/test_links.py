@@ -1,6 +1,6 @@
 """链接发现：过滤外链/静态资源/伪协议并去重。"""
 
-from scrape_mcp.extract.links import extract_links
+from scrape_mcp.extract.links import extract_links, next_link
 
 _HTML = """
 <html><body>
@@ -34,3 +34,37 @@ def test_limit_caps_result():
 
 def test_empty_html_returns_empty():
     assert extract_links("", "https://example.com/") == []
+
+
+_PAGER = """
+<html><body>
+  <a class="next" href="/list?page=2">下一页</a>
+</body></html>
+"""
+
+
+def test_next_link_resolves_relative_and_strips_fragment():
+    assert next_link(_PAGER, "https://example.com/list", "a.next") == (
+        "https://example.com/list?page=2"
+    )
+
+
+def test_next_link_missing_selector_returns_none():
+    assert next_link(_PAGER, "https://example.com/list", "a.more") is None
+    assert next_link("", "https://example.com/list", "a.next") is None
+
+
+def test_next_link_rejects_pseudo_and_external():
+    html = '<a class="next" href="javascript:void(0)">x</a>'
+    assert next_link(html, "https://example.com/list", "a.next") is None
+
+    html = '<a class="next" href="https://other.com/p2">x</a>'
+    assert next_link(html, "https://example.com/list", "a.next") is None
+    assert next_link(html, "https://example.com/list", "a.next", same_host=False) == (
+        "https://other.com/p2"
+    )
+
+
+def test_next_link_reads_data_href():
+    html = '<button class="next" data-href="/p2">下一页</button>'
+    assert next_link(html, "https://example.com/list", "button.next") == "https://example.com/p2"
