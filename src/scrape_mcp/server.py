@@ -330,7 +330,7 @@ def main(argv: list[str] | None = None) -> None:
 
     零配置默认即用：不传参按 stdio 运行，可作为 MCP 服务被 Claude/Cursor 等接管。
     仅当显式指定 --transport=streamable-http 时才走 HTTP。任意目录下
-    ``pip install scrape-mcp`` 后运行 ``scrape-mcp`` 即可，无需 clone/venv/PYTHONPATH。
+    ``pip install mcp-scrape`` 后运行 ``scrape-mcp`` 即可，无需 clone/venv/PYTHONPATH。
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -350,7 +350,7 @@ def main(argv: list[str] | None = None) -> None:
         import importlib.metadata
 
         try:
-            version = importlib.metadata.version("scrape-mcp")
+            version = importlib.metadata.version("mcp-scrape")
         except importlib.metadata.PackageNotFoundError:
             version = "unknown (source tree)"
         print(version)

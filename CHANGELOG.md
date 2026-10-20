@@ -14,6 +14,9 @@
 ### Fixed
 - 修复全新安装时 `selectolax>=1.0` 废弃 modest 后端导致 `ImportError`、命令无法启动的问题；改用官方推荐的 lexbor 后端（`LexborHTMLParser`/`LexborNode`），依赖下限改为 `selectolax>=0.4.11`
 
+### Changed
+- PyPI 发行包名调整为 `mcp-scrape`（因与已有项目 `scrapemcp` 名称相似被拒）；命令行工具名仍为 `scrape-mcp`
+
 ## [0.2.0] - 2026-09-18
 
 在 v0.1.0 基础上新增结构化抽取与合规限流，并完善上手体验。

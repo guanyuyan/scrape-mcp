@@ -17,7 +17,7 @@
 **方式 A：一键安装（推荐，零配置）**
 
 ```bash
-pip install scrape-mcp        # 已发布到 PyPI 后
+pip install mcp-scrape
 # 或从源码：cd scrape-mcp && pip install -e .
 ```
 
@@ -168,7 +168,7 @@ python -m scrape_mcp.server
 
 ## 接入 MCP 客户端（Claude / Cursor 等）
 
-先 `pip install scrape-mcp`（或用项目 `.venv` 跑 `pip install -e .`），使 `scrape-mcp` 命令全局可用；然后按标准 MCP 方式接入。
+先 `pip install mcp-scrape`（或用项目 `.venv` 跑 `pip install -e .`），使 `scrape-mcp` 命令全局可用；然后按标准 MCP 方式接入。
 
 以 Claude Desktop 为例（`claude_desktop_config.json`）：
 

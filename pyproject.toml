@@ -1,5 +1,5 @@
 [project]
-name = "scrape-mcp"
+name = "mcp-scrape"
 version = "0.2.1"
 description = "反爬感知抓取 + 极省 Token 内容精简的 MCP Server"
 readme = "README.md"
