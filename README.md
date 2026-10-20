@@ -7,6 +7,8 @@
 > 自动化分三层应对：默认 curl_cffi（伪装 TLS/JA3 + HTTP2）低成本打头阵，命中 Cloudflare/验证码/WAF 才升级 Playwright 真浏览器渲染；遇到"登录才给内容"的站，先弹窗手动登录一次、登录态落盘，之后自动带上、过期会提示重登。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/mcp-scrape?color=blue&label=pypi)](https://pypi.org/project/mcp-scrape/)
+[![Python](https://img.shields.io/pypi/pyversions/mcp-scrape)](https://pypi.org/project/mcp-scrape/)
 [![Release](https://img.shields.io/github/v/release/guanyuyan/scrape-mcp?color=blue&label=release)](https://github.com/guanyuyan/scrape-mcp/releases)
 [![CI](https://github.com/guanyuyan/scrape-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/guanyuyan/scrape-mcp/actions)
 
