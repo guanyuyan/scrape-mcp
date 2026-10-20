@@ -214,6 +214,20 @@ async def _fetch_html(
             payload["login_hint"] = f'可调用 login(url="{url}", timeout=180) 打开浏览器手动登录'
         return None, payload
 
+    # 4xx（401/403/429 已在上面按拦截/限流处理）：404/410 这类不是有效内容，
+    # 不当作成功返回，否则调用方会把错误页当正文/数据。
+    if outcome.status >= 400:
+        return None, {
+            "ok": False,
+            "url": url,
+            "final_url": outcome.final_url,
+            "status": outcome.status,
+            "tier": outcome.tier,
+            "elapsed_ms": outcome.elapsed_ms,
+            "error_code": errors.HTTP_5XX if outcome.status >= 500 else errors.HTTP_4XX,
+            "error": f"目标返回 HTTP {outcome.status}，该页不是有效内容",
+        }
+
     return outcome, None
 
 
