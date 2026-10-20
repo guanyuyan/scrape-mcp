@@ -86,7 +86,17 @@ def _payload(**kwargs) -> str:
     return json.dumps(kwargs, ensure_ascii=False, indent=None)
 
 
-async def _fetch_html(url: str) -> tuple[FetchOutcome | None, dict | None]:
+async def _fetch_html(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    timeout: float | None = None,
+    wait_for: str | None = None,
+    scroll: bool = False,
+    click: str | None = None,
+    bypass_cache: bool = False,
+) -> tuple[FetchOutcome | None, dict | None]:
     """抓取单个 URL，返回 (outcome, 错误 payload)。
 
     web_fetch 与 web_extract 共用：先做合规检查，再走分级抓取链路；
@@ -96,7 +106,16 @@ async def _fetch_html(url: str) -> tuple[FetchOutcome | None, dict | None]:
     if denied is not None:
         return None, denied
 
-    outcome: FetchOutcome = await _get_fetcher().fetch(url)
+    outcome: FetchOutcome = await _get_fetcher().fetch(
+        url,
+        headers=headers,
+        cookies=cookies,
+        timeout=timeout,
+        wait_for=wait_for,
+        scroll=scroll,
+        click=click,
+        bypass_cache=bypass_cache,
+    )
 
     if outcome.error:
         return None, {
@@ -143,14 +162,35 @@ async def _fetch_html(url: str) -> tuple[FetchOutcome | None, dict | None]:
     return outcome, None
 
 
-async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
+async def _fetch_dict(
+    url: str,
+    max_tokens: int,
+    link_policy: str,
+    *,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    timeout: float | None = None,
+    wait_for: str | None = None,
+    scroll: bool = False,
+    click: str | None = None,
+    bypass_cache: bool = False,
+) -> dict:
     """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
     settings = get_settings()
 
     if link_policy not in LINK_POLICIES:
         return {"ok": False, "error": f"link_policy 必须是 {LINK_POLICIES} 之一"}
 
-    outcome, error = await _fetch_html(url)
+    outcome, error = await _fetch_html(
+        url,
+        headers=headers,
+        cookies=cookies,
+        timeout=timeout,
+        wait_for=wait_for,
+        scroll=scroll,
+        click=click,
+        bypass_cache=bypass_cache,
+    )
     if error is not None:
         return error
 
@@ -178,7 +218,10 @@ async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
         "html_bytes": len(outcome.html),
         "elapsed_ms": outcome.elapsed_ms,
         "cached": outcome.cached,
+        "attempts": outcome.attempts,
     }
+    if outcome.notes:
+        payload["notes"] = outcome.notes
 
     # 大页面却榨不出正文，多半是 JS 登录墙/骨架页：正文本身可能是真实内容，故不判失败，只如实提示
     if (
@@ -195,7 +238,18 @@ async def _fetch_dict(url: str, max_tokens: int, link_policy: str) -> dict:
 
 
 @mcp.tool()
-async def web_fetch(url: str, max_tokens: int = 4000, link_policy: str = "internal") -> str:
+async def web_fetch(
+    url: str,
+    max_tokens: int = 4000,
+    link_policy: str = "internal",
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    timeout: float | None = None,
+    wait_for: str | None = None,
+    scroll: bool = False,
+    click: str | None = None,
+    bypass_cache: bool = False,
+) -> str:
     """抓取网页并返回极省 token 的紧凑正文（自动辨别反爬拦截页并如实上报）。
 
     Args:
@@ -203,14 +257,44 @@ async def web_fetch(url: str, max_tokens: int = 4000, link_policy: str = "intern
         max_tokens: 正文 token 预算上限，超出时保留头尾、省略中段。
         link_policy: 链接处理策略。internal=站内链接保留为相对路径、站外降级为纯文本（默认，最省）；
             all=站内外链接全保留；none=全部降级为纯文本。
+        headers: 自定义请求头，如 {"Referer": "...", "User-Agent": "..."}；传入时不走共享缓存。
+        cookies: 自定义 cookie 字典；传入时不走共享缓存。
+        timeout: 单次请求超时秒数（默认取配置 request_timeout）。
+        wait_for: 仅 L2 生效，等待该 CSS 选择器出现后再取内容（适合 SPA）。
+        scroll: 仅 L2 生效，滚动页面触发懒加载/无限滚动。
+        click: 仅 L2 生效，渲染后点击一次该 CSS 选择器（如"加载更多"）。
+        bypass_cache: 跳过并绕过响应缓存，强制走网络。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(ok=False, error="url 必须以 http:// 或 https:// 开头")
-    return _payload(**await _fetch_dict(url, max_tokens, link_policy))
+    return _payload(
+        **await _fetch_dict(
+            url,
+            max_tokens,
+            link_policy,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            wait_for=wait_for,
+            scroll=scroll,
+            click=click,
+            bypass_cache=bypass_cache,
+        )
+    )
 
 
 @mcp.tool()
-async def web_extract(url: str, schema: dict) -> str:
+async def web_extract(
+    url: str,
+    schema: dict,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    timeout: float | None = None,
+    wait_for: str | None = None,
+    scroll: bool = False,
+    click: str | None = None,
+    bypass_cache: bool = False,
+) -> str:
     """抓取网页并按字段 schema 抽取结构化 JSON（字段级数据，可入库）。
 
     适合需要"数据而非整页正文"的场景：给 URL 和字段规则，直接返回字段值，
@@ -231,11 +315,27 @@ async def web_extract(url: str, schema: dict) -> str:
     Args:
         url: 目标网页完整 URL。
         schema: 字段抽取规则字典，见上方示例。
+        headers: 自定义请求头；传入时不走共享缓存。
+        cookies: 自定义 cookie 字典；传入时不走共享缓存。
+        timeout: 单次请求超时秒数。
+        wait_for: 仅 L2 生效，等待该 CSS 选择器出现后再取内容。
+        scroll: 仅 L2 生效，滚动页面触发懒加载。
+        click: 仅 L2 生效，渲染后点击一次该 CSS 选择器。
+        bypass_cache: 跳过并绕过响应缓存，强制走网络。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(ok=False, error="url 必须以 http:// 或 https:// 开头")
 
-    outcome, error = await _fetch_html(url)
+    outcome, error = await _fetch_html(
+        url,
+        headers=headers,
+        cookies=cookies,
+        timeout=timeout,
+        wait_for=wait_for,
+        scroll=scroll,
+        click=click,
+        bypass_cache=bypass_cache,
+    )
     if error is not None:
         return _payload(**error)
 
@@ -255,22 +355,37 @@ async def web_extract(url: str, schema: dict) -> str:
         "tier": outcome.tier,
         "cached": outcome.cached,
         "elapsed_ms": outcome.elapsed_ms,
+        "attempts": outcome.attempts,
         "data": result.fields,
         "missing": [k for k, v in result.fields.items() if v is None],
     }
+    if outcome.notes:
+        payload["notes"] = outcome.notes
     if result.errors:
         payload["schema_notes"] = result.errors
     return _payload(**payload)
 
 
 @mcp.tool()
-async def web_batch(urls: list[str], max_tokens: int = 3000, link_policy: str = "internal") -> str:
+async def web_batch(
+    urls: list[str],
+    max_tokens: int = 3000,
+    link_policy: str = "internal",
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    timeout: float | None = None,
+    bypass_cache: bool = False,
+) -> str:
     """并发抓取一批 URL，各自走完整分级链路，返回逐个结果。
 
     Args:
         urls: 目标 URL 列表（最多 batch_max_urls 个，默认 20）。
         max_tokens: 每个 URL 的正文 token 预算上限。
         link_policy: 同 web_fetch。
+        headers: 所有 URL 共用的自定义请求头；传入时不走共享缓存。
+        cookies: 所有 URL 共用的自定义 cookie；传入时不走共享缓存。
+        timeout: 单次请求超时秒数。
+        bypass_cache: 跳过并绕过响应缓存。
     """
     import asyncio
 
@@ -288,7 +403,15 @@ async def web_batch(urls: list[str], max_tokens: int = 3000, link_policy: str = 
     async def one(u: str) -> dict:
         async with sem:
             try:
-                return await _fetch_dict(u, max_tokens, link_policy)
+                return await _fetch_dict(
+                    u,
+                    max_tokens,
+                    link_policy,
+                    headers=headers,
+                    cookies=cookies,
+                    timeout=timeout,
+                    bypass_cache=bypass_cache,
+                )
             except Exception as exc:  # 单条意外异常不应拖垮整批
                 return {"ok": False, "url": u, "error": f"{type(exc).__name__}: {exc}"}
 

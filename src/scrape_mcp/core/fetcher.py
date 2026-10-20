@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import asyncio
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlparse
 
 from ..config import Settings
@@ -36,6 +37,8 @@ class FetchOutcome:
     session_loaded: bool = False
     login_required: bool = False
     cached: bool = False
+    attempts: int = 1
+    notes: list[str] = field(default_factory=list)
 
 
 class Fetcher:
@@ -60,11 +63,48 @@ class Fetcher:
         *,
         headers: dict[str, str] | None = None,
         cookies: dict[str, str] | None = None,
+        timeout: float | None = None,
+        wait_for: str | None = None,
+        scroll: bool = False,
+        click: str | None = None,
+        bypass_cache: bool = False,
     ) -> FetchOutcome:
-        outcome = await self._fetch_l1(url, headers=headers, cookies=cookies)
+        outcome = await self._fetch_l1_with_retry(
+            url,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            bypass_cache=bypass_cache,
+        )
         if not self._should_escalate(outcome):
             return outcome
-        return await self._fetch_l2(url, outcome)
+        return await self._fetch_l2(url, outcome, wait_for=wait_for, scroll=scroll, click=click)
+
+    async def _fetch_l1_with_retry(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None,
+        cookies: dict[str, str] | None,
+        timeout: float | None,
+        bypass_cache: bool,
+    ) -> FetchOutcome:
+        """网络异常/5xx 指数退避重试；429/403 属反爬信号，同层重试无效故不重试。"""
+        attempts = max(1, int(self._settings.retry_times) + 1)
+        outcome: FetchOutcome | None = None
+        for i in range(1, attempts + 1):
+            outcome = await self._fetch_l1(
+                url,
+                headers=headers,
+                cookies=cookies,
+                timeout=timeout,
+                bypass_cache=bypass_cache,
+            )
+            outcome.attempts = i
+            if i >= attempts or not _is_retryable(outcome):
+                return outcome
+            await asyncio.sleep(self._settings.retry_backoff * (2 ** (i - 1)))
+        return outcome
 
     def _should_escalate(self, outcome: FetchOutcome) -> bool:
         if not self._settings.l2_enabled or outcome.error:
@@ -81,8 +121,16 @@ class Fetcher:
         *,
         headers: dict[str, str] | None,
         cookies: dict[str, str] | None,
+        timeout: float | None = None,
+        bypass_cache: bool = False,
     ) -> FetchOutcome:
-        resp = await self._http.get(url, headers=headers, cookies=cookies)
+        resp = await self._http.get(
+            url,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            bypass_cache=bypass_cache,
+        )
         if not resp.ok:
             return FetchOutcome(
                 url=url,
@@ -110,10 +158,18 @@ class Fetcher:
             cached=resp.cached,
         )
 
-    async def _fetch_l2(self, url: str, l1: FetchOutcome) -> FetchOutcome:
+    async def _fetch_l2(
+        self,
+        url: str,
+        l1: FetchOutcome,
+        *,
+        wait_for: str | None = None,
+        scroll: bool = False,
+        click: str | None = None,
+    ) -> FetchOutcome:
         host = urlparse(l1.final_url or url).netloc.lower()
         browser = self._get_browser()
-        result = await browser.render(url, host)
+        result = await browser.render(url, host, wait_for=wait_for, scroll=scroll, click=click)
         elapsed = l1.elapsed_ms + result.elapsed_ms
 
         if not result.ok:
@@ -123,6 +179,7 @@ class Fetcher:
                 block_reason=f"{l1.block_reason}；L2 渲染失败: {result.error}",
                 elapsed_ms=elapsed,
                 session_loaded=browser.has_session(host),
+                notes=[*l1.notes, *result.notes],
             )
 
         blocked, reason = detect_block(result.status, result.html)
@@ -139,6 +196,7 @@ class Fetcher:
             elapsed_ms=elapsed,
             session_loaded=browser.has_session(host),
             login_required=login_required,
+            notes=result.notes,
         )
 
     async def login(self, url: str, timeout: float | None = None) -> dict:
@@ -149,3 +207,10 @@ class Fetcher:
     def has_session(self, url: str) -> bool:
         host = urlparse(url).netloc.lower()
         return self._get_browser().has_session(host)
+
+
+def _is_retryable(outcome: FetchOutcome) -> bool:
+    """可重试：传输层异常或服务端 5xx；429/403 是反爬信号，重试会加重封禁。"""
+    if outcome.error:
+        return True
+    return 500 <= outcome.status < 600

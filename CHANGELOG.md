@@ -4,7 +4,15 @@
 
 ## [Unreleased]
 
-(暂无)
+### Added
+- `web_fetch` / `web_extract` 新增抓取参数：`headers`、`cookies`、`timeout`、`bypass_cache`
+- `web_fetch` / `web_extract` 新增 L2 渲染参数：`wait_for`（等待选择器）、`scroll`（滚动懒加载）、`click`（点"加载更多"）
+- `web_batch` 支持批级 `headers` / `cookies` / `timeout` / `bypass_cache`
+- 传输层指数退避重试：网络异常与 5xx 自动重试（`retry_times` / `retry_backoff`），429/403 不重试
+- 返回体新增 `attempts`（实际尝试次数）与 `notes`（L2 交互未命中提示）
+
+### Changed
+- 带自定义 `headers` / `cookies` 的请求不再读写共享缓存，避免把个性化响应缓存给其他调用
 
 ## [0.2.1] - 2026-09-18
 

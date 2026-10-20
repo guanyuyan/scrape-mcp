@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     batch_max_concurrency: int = 4
     batch_max_urls: int = 20
 
+    # ---- 传输层重试 ----
+    # 仅对网络异常与 5xx 生效；429/403 属反爬信号，同层重试通常无效，交给分级降级处理
+    retry_times: int = 2
+    retry_backoff: float = 0.5
+
     # ---- 阶段 0 合规（责任边界）----
     # 默认遵循目标站 robots.txt；拉取不到规则时视为允许（不因拿不到而阻断可用性）
     respect_robots: bool = True
@@ -72,6 +77,9 @@ class Settings(BaseSettings):
     l2_locale: str = "zh-CN"
     # 隐身加固：context 统一时区，避免 headless 默认 UTC 与 UA/语言穿帮
     l2_timezone: str = "Asia/Shanghai"
+    # L2 交互：滚动步数与每步间隔，用于触发无限滚动/懒加载
+    l2_scroll_steps: int = 5
+    l2_scroll_delay_ms: int = 400
 
     # ---- M3 登录态持久化 ----
     # 登录态文件（Playwright storage_state）落盘目录，按站点域名各存一份

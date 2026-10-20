@@ -62,7 +62,7 @@ class FakeBrowser:
     def has_session(self, host: str) -> bool:
         return self._has
 
-    async def render(self, url: str, host: str | None = None) -> BrowserOutcome:
+    async def render(self, url: str, host: str | None = None, **kwargs) -> BrowserOutcome:
         return self.outcome
 
     async def aclose(self) -> None:

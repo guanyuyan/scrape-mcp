@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -97,6 +97,7 @@ class BrowserOutcome:
     html: str
     elapsed_ms: int
     error: str | None = None
+    notes: list[str] = field(default_factory=list)
 
 
 class BrowserRenderer:
@@ -213,7 +214,15 @@ class BrowserRenderer:
 
     # ---------- 渲染 ----------
 
-    async def render(self, url: str, host: str | None = None) -> BrowserOutcome:
+    async def render(
+        self,
+        url: str,
+        host: str | None = None,
+        *,
+        wait_for: str | None = None,
+        scroll: bool = False,
+        click: str | None = None,
+    ) -> BrowserOutcome:
         t0 = time.perf_counter()
         host = host or urlparse(url).netloc.lower()
         try:
@@ -230,6 +239,7 @@ class BrowserRenderer:
             )
 
         page = await context.new_page()
+        notes: list[str] = []
         try:
             resp = await page.goto(
                 url,
@@ -237,6 +247,7 @@ class BrowserRenderer:
                 timeout=self._s.l2_navigate_timeout * 1000,
             )
             status = resp.status if resp is not None else 0
+            await self._interact(page, wait_for=wait_for, scroll=scroll, click=click, notes=notes)
             html = await self._settle(page)
             return BrowserOutcome(
                 ok=True,
@@ -245,6 +256,7 @@ class BrowserRenderer:
                 status=status,
                 html=html,
                 elapsed_ms=_ms(t0),
+                notes=notes,
             )
         except Exception as exc:
             return BrowserOutcome(
@@ -255,10 +267,43 @@ class BrowserRenderer:
                 html="",
                 elapsed_ms=_ms(t0),
                 error=f"{type(exc).__name__}: {exc}",
+                notes=notes,
             )
         finally:
             with contextlib.suppress(Exception):
                 await page.close()
+
+    async def _interact(
+        self,
+        page: Any,
+        *,
+        wait_for: str | None,
+        scroll: bool,
+        click: str | None,
+        notes: list[str],
+    ) -> None:
+        """渲染后的可选交互：等节点、点"加载更多"、滚动触发懒加载。
+
+        每一环失败都不致命：只记录到 notes 并继续，避免因页面改版导致整次抓取失败。
+        """
+        if wait_for:
+            try:
+                await page.wait_for_selector(wait_for, timeout=self._s.l2_navigate_timeout * 1000)
+            except Exception:
+                notes.append(f"wait_for 未命中: {wait_for}")
+        if click:
+            try:
+                await page.click(click, timeout=5000)
+                await page.wait_for_timeout(300)
+            except Exception:
+                notes.append(f"click 未命中: {click}")
+        if scroll:
+            for _ in range(max(0, int(self._s.l2_scroll_steps))):
+                try:
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    break
+                await page.wait_for_timeout(self._s.l2_scroll_delay_ms)
 
     # ---------- 登录（M3） ----------
 

@@ -60,18 +60,22 @@ class HttpClient:
         impersonate: str | None = None,
         timeout: float | None = None,
         proxy: str | None = None,
+        bypass_cache: bool = False,
     ) -> HttpResponse:
-        saved = self._cache.get(url)
-        if saved is not None:
-            return HttpResponse(
-                ok=True,
-                status=saved.get("status", 200),
-                url=saved.get("url", url),
-                content_type=saved.get("content_type", ""),
-                text=saved.get("text", ""),
-                elapsed_ms=0,
-                cached=True,
-            )
+        # 带自定义头/凭证的响应可能因人而异，既不读也不写共享缓存
+        use_cache = not bypass_cache and not headers and not cookies
+        if use_cache:
+            saved = self._cache.get(url)
+            if saved is not None:
+                return HttpResponse(
+                    ok=True,
+                    status=saved.get("status", 200),
+                    url=saved.get("url", url),
+                    content_type=saved.get("content_type", ""),
+                    text=saved.get("text", ""),
+                    elapsed_ms=0,
+                    cached=True,
+                )
 
         t0 = time.perf_counter()
         merged = {"Accept-Language": self._s.accept_language}
@@ -112,7 +116,7 @@ class HttpClient:
             elapsed_ms=int((time.perf_counter() - t0) * 1000),
         )
         # 只缓存可判定的正常 HTML；拦截/错误响应不缓存，避免把挑战页当作有效内容缓存
-        if out.status == 200 and "text/html" in content_type:
+        if use_cache and out.status == 200 and "text/html" in content_type:
             self._cache.put(
                 url,
                 {"status": out.status, "url": out.url, "content_type": content_type, "text": text},

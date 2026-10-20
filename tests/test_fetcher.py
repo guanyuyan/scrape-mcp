@@ -52,7 +52,7 @@ class FakeBrowser:
         )
         self.calls = 0
 
-    async def render(self, url: str, host: str | None = None) -> BrowserOutcome:
+    async def render(self, url: str, host: str | None = None, **kwargs) -> BrowserOutcome:
         self.calls += 1
         return self.outcome
 
@@ -164,8 +164,110 @@ async def test_transport_error_is_not_escalated():
             )
 
     browser = FakeBrowser()
-    fetcher = Fetcher(Settings())
+    fetcher = Fetcher(Settings(retry_backoff=0))
     fetcher._http = FailingHttp()
     fetcher._browser = browser
     outcome = await fetcher.fetch(URL)
     assert browser.calls == 0 and outcome.error == "超时"
+    # 默认重试 2 次，共 3 次尝试后仍失败
+    assert outcome.attempts == 3
+
+
+async def test_transport_error_retries_then_succeeds():
+    class FlakyHttp:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get(self, url, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return HttpResponse(
+                    ok=False,
+                    status=0,
+                    url=url,
+                    content_type="",
+                    text="",
+                    elapsed_ms=5,
+                    error="连接重置",
+                )
+            return HttpResponse(
+                ok=True,
+                status=200,
+                url=url,
+                content_type="text/html",
+                text=f"<html><body><p>{LONG_TEXT}</p></body></html>",
+                elapsed_ms=10,
+            )
+
+    fetcher = Fetcher(Settings(retry_backoff=0))
+    fetcher._http = FlakyHttp()
+    outcome = await fetcher.fetch(URL)
+    assert outcome.error is None
+    assert outcome.attempts == 2
+    assert fetcher._http.calls == 2
+
+
+async def test_5xx_retries_up_to_configured_limit():
+    fetcher, http = make_fetcher(
+        status=500, text="<html><body>server error</body></html>", l2_enabled=False, retry_backoff=0
+    )
+    outcome = await fetcher.fetch(URL)
+    assert outcome.attempts == 3
+    assert http.calls == 3
+
+
+async def test_rate_limit_is_not_retried():
+    fetcher, http = make_fetcher(
+        status=429, text="<html><body>too many requests</body></html>", retry_backoff=0
+    )
+    outcome = await fetcher.fetch(URL)
+    assert outcome.attempts == 1
+    assert http.calls == 1
+
+
+async def test_request_options_forwarded_to_http():
+    class RecordingHttp:
+        def __init__(self) -> None:
+            self.kwargs: dict = {}
+
+        async def get(self, url, **kwargs):
+            self.kwargs = kwargs
+            return HttpResponse(
+                ok=True,
+                status=200,
+                url=url,
+                content_type="text/html",
+                text=f"<html><body><p>{LONG_TEXT}</p></body></html>",
+                elapsed_ms=1,
+            )
+
+    fetcher = Fetcher(Settings())
+    fetcher._http = RecordingHttp()
+    await fetcher.fetch(
+        URL,
+        headers={"Referer": "https://ref.example"},
+        cookies={"sid": "1"},
+        timeout=7,
+        bypass_cache=True,
+    )
+    recorded = fetcher._http.kwargs
+    assert recorded["headers"] == {"Referer": "https://ref.example"}
+    assert recorded["cookies"] == {"sid": "1"}
+    assert recorded["timeout"] == 7
+    assert recorded["bypass_cache"] is True
+
+
+async def test_l2_interaction_options_forwarded():
+    class RecordingBrowser(FakeBrowser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.kwargs: dict = {}
+
+        async def render(self, url, host=None, **kwargs):
+            self.kwargs = kwargs
+            return await super().render(url, host, **kwargs)
+
+    browser = RecordingBrowser()
+    fetcher, _ = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
+    await fetcher.fetch(URL, wait_for="main", scroll=True, click="#more")
+    assert browser.kwargs == {"wait_for": "main", "scroll": True, "click": "#more"}

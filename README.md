@@ -144,9 +144,13 @@ cp .env.example .env    # 生成配置模板
 | `L2_ENABLED` | `true` | 是否启用 Playwright 升级链 |
 | `L2_CHANNEL` | — | 关联浏览器：空=自带 Chromium，`chrome`/`msedge`=系统 |
 | `L2_SETTLE_TIMEOUT` | `8` | 挑战页等待窗口（秒） |
+| `L2_SCROLL_STEPS` | `5` | L2 滚动步数（触发懒加载） |
+| `L2_SCROLL_DELAY_MS` | `400` | L2 每步滚动间隔（毫秒） |
 | `L2_TIMEZONE` | `Asia/Shanghai` | 隐身加固时区 |
 | `DATA_DIR` | `~/.scrape_mcp` | 登录态/缓存放盘目录 |
 | `CACHE_TTL` | `300` | L1 缓存 TTL（秒），`0` 关闭 |
+| `RETRY_TIMES` | `2` | 网络异常/5xx 重试次数（429/403 不重试） |
+| `RETRY_BACKOFF` | `0.5` | 重试退避基数（秒，指数增长） |
 | `BATCH_MAX_CONCURRENCY` | `4` | `web_batch` 并发上限 |
 | `BATCH_MAX_URLS` | `20` | `web_batch` 单批上限 |
 | `RESPECT_ROBOTS` | `true` | 默认遵循目标站 robots.txt；`false` 忽略（仅建议自用合规场景关闭） |
@@ -190,14 +194,19 @@ python -m scrape_mcp.server
 
 ## MCP 工具
 
-- **`web_fetch(url, max_tokens=4000, link_policy="internal")`** → 状态 + 极省正文
+- **`web_fetch(url, max_tokens=4000, link_policy="internal", ...)`** → 状态 + 极省正文
   - `link_policy`: `internal`（站内相对链接+站外降级）/ `all` / `none`
-- **`web_extract(url, schema={...})`** → 按字段 schema 抽取结构化 JSON（可入库）
+  - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
+  - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）
+- **`web_extract(url, schema={...}, ...)`** → 按字段 schema 抽取结构化 JSON（可入库）
   - 字段类型：`text`（默认）/ `attr`（需配 `attr` 取属性）/ `count` / `list`（`list_key` 取值）
-- **`web_batch(urls, max_tokens=3000, link_policy="internal")`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
+  - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`）
+- **`web_batch(urls, max_tokens=3000, link_policy="internal", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
+  - 支持 `headers` / `cookies` / `timeout` / `bypass_cache`（对该批所有 URL 生效）
 - **`login(url, timeout=180)`** → 打开带界面浏览器手动登录并持久化登录态
 
 返回为 JSON 字符串（落在 `content[0].text`，请解析文本，勿依赖 `structured_content`）。
+传输失败/5xx 会自动指数退避重试，`attempts` 字段为实际尝试次数；L2 交互未命中（如选择器不存在）只在 `notes` 中提示，不判失败。
 
 ### web_extract 示例
 

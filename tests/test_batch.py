@@ -29,7 +29,7 @@ def test_web_batch_too_many_urls():
 
 
 def test_web_batch_gathers_and_counts(monkeypatch):
-    async def fake_fetch(url, max_tokens, link_policy):
+    async def fake_fetch(url, max_tokens, link_policy, **kwargs):
         return {"ok": True, "url": url, "content": "x"}
 
     monkeypatch.setattr(server, "_fetch_dict", fake_fetch)
@@ -44,7 +44,7 @@ def test_web_batch_gathers_and_counts(monkeypatch):
 
 
 def test_web_batch_isolates_single_failure(monkeypatch):
-    async def fake_fetch(url, max_tokens, link_policy):
+    async def fake_fetch(url, max_tokens, link_policy, **kwargs):
         if url == "https://bad/b":
             raise RuntimeError("boom")
         return {"ok": True, "url": url}
