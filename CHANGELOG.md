@@ -4,7 +4,16 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
 ### Added
+- **web_crawl**：从起始页按 `depth` 分层发现站内链接并逐页抓取，`limit` 控制总页数，静态资源链接自动跳过
+- **结构化抽取深化**：`object` 类型与 `list` + `fields` 对象数组；`regex`/`group` 后处理、`abs_url` 相对链接转绝对、`strip` 开关
+- **输出格式**：`web_fetch` / `web_batch` 新增 `format=markdown|text|json`
+- **稳定错误码**：所有失败返回 `error_code`（`timeout`/`dns`/`tls`/`connection`/`blocked`/`login_required`/`http_4xx`/`http_5xx`/`empty`/`denied`/`robots_disallowed`/`invalid_argument`）
+- **同域并发闸门**：同一主机并发上限 `host_max_concurrency`（默认 2），跨主机仍并行
+- **/healthz**：HTTP 传输模式下的健康检查端点
+- **Dockerfile**：默认仅 L1；`--build-arg INSTALL_BROWSER=1` 可打包 L2 浏览器
 - `web_fetch` / `web_extract` 新增抓取参数：`headers`、`cookies`、`timeout`、`bypass_cache`
 - `web_fetch` / `web_extract` 新增 L2 渲染参数：`wait_for`（等待选择器）、`scroll`（滚动懒加载）、`click`（点"加载更多"）
 - `web_batch` 支持批级 `headers` / `cookies` / `timeout` / `bypass_cache`
@@ -13,6 +22,7 @@
 
 ### Changed
 - 带自定义 `headers` / `cookies` 的请求不再读写共享缓存，避免把个性化响应缓存给其他调用
+- 嵌套 schema 的非法选择器现在会把对应字段置空并带上完整字段路径提示，而不是整字段缺失
 
 ## [0.2.1] - 2026-09-18
 

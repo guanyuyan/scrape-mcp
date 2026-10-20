@@ -98,8 +98,12 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **compact 精简**：属性剥离、模板块丢弃、站外链接降级、表格转 CSV、token 预算截断，
   压缩率可达 1~20% 数量级（如 MDN 214KB → 数百 token）。
 - **拦截如实上报**：不把挑战页/空壳页当正文喂给模型，返回 `blocked`/`block_reason`。
+- **稳定错误码**：`error_code`（`timeout`/`dns`/`tls`/`connection`/`blocked`/`login_required`/`http_4xx`…），调用方可程序化决策。
 - **登录态持久化**：`login` 工具手动登录并落盘，`web_fetch` 自动带上；过期会提示重登。
 - **缓存与批量**：L1 明文响应按 TTL 磁盘缓存；`web_batch` 并发抓取一批 URL。
+- **轻量爬取**：`web_crawl` 按 `depth`/`limit` 发现站内链接并逐页抓取，静态资源自动跳过。
+- **输出格式可选**：`format=markdown|text|json`，正文可按段落数组直接入库。
+- **同域并发闸门**：同一站点默认最多 2 个并发请求，跨站仍可并行，避免批量抓取时把单站打穿。
 - **Stealth 加固**：Wipe `webdriver`、UA 数据、Canvas/WebGL 确定性指纹噪声、时区对齐。
 
 ## 安装
@@ -153,6 +157,8 @@ cp .env.example .env    # 生成配置模板
 | `RETRY_BACKOFF` | `0.5` | 重试退避基数（秒，指数增长） |
 | `BATCH_MAX_CONCURRENCY` | `4` | `web_batch` 并发上限 |
 | `BATCH_MAX_URLS` | `20` | `web_batch` 单批上限 |
+| `HOST_MAX_CONCURRENCY` | `2` | 同一主机的并发上限（`web_batch`/`web_crawl` 共用） |
+| `CRAWL_MAX_PAGES` | `20` | `web_crawl` 单次最多抓取页数硬上限 |
 | `RESPECT_ROBOTS` | `true` | 默认遵循目标站 robots.txt；`false` 忽略（仅建议自用合规场景关闭） |
 | `ALLOWED_HOSTS` | — | 主机白名单（逗号分隔）；非空时仅允许名单内主机 |
 | `DENIED_HOSTS` | — | 主机黑名单（逗号分隔），优先于白名单 |
@@ -169,6 +175,7 @@ python -m scrape_mcp.server
 ```
 
 以 `json_response=1`（默认）启动，请求/响应都是普通 JSON（非事件流）。**stateless 模式无需先 `initialize`，直接发 `tools/call` 即可。**
+健康检查：`GET /healthz` 返回版本与关键开关，可用于容器探针/网关巡检。
 
 必需项：请求头 `MCP-Method`、`Mcp-Name`；body 内 `params` 需带 `_meta`（`protocolVersion` + `clientCapabilities`）。完整示例见下。
 
@@ -190,41 +197,66 @@ python -m scrape_mcp.server
 
 - 用 `command: "scrape-mcp"`（已全局安装），免去 `PYTHONPATH` 与系统解释器导致的 `ModuleNotFoundError`。
 - 若复用系统浏览器（免下载）：设环境变量 `SCRAPE_MCP_L2_CHANNEL` 为 `chrome` 或 `msedge`。
-- 配对成功后重启客户端，即可在会话里直接调用 `web_fetch` / `web_extract` / `web_batch`。
+- 配对成功后重启客户端，即可在会话里直接调用 `web_fetch` / `web_extract` / `web_batch` / `web_crawl`。
 
 ## MCP 工具
 
-- **`web_fetch(url, max_tokens=4000, link_policy="internal", ...)`** → 状态 + 极省正文
+- **`web_fetch(url, max_tokens=4000, link_policy="internal", format="markdown", ...)`** → 状态 + 极省正文
   - `link_policy`: `internal`（站内相对链接+站外降级）/ `all` / `none`
+  - `format`: `markdown`（默认，保留标题/列表/链接）/ `text`（剥掉标记的纯文本）/ `json`（`content` 为段落数组）
   - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
   - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）
 - **`web_extract(url, schema={...}, ...)`** → 按字段 schema 抽取结构化 JSON（可入库）
-  - 字段类型：`text`（默认）/ `attr`（需配 `attr` 取属性）/ `count` / `list`（`list_key` 取值）
-  - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`）
-- **`web_batch(urls, max_tokens=3000, link_policy="internal", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
+  - 字段类型：`text`（默认）/ `html` / `attr`（需配 `attr`）/ `count` / `list` / `object`
+  - 嵌套：`list` 配 `fields` 返回对象数组，`object` 在匹配节点内部继续抽取
+  - 后处理：`regex` + `group`（正则提取，未命中回落 `default`）、`abs_url`（相对链接转绝对）、`strip`
+  - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）
+- **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
   - 支持 `headers` / `cookies` / `timeout` / `bypass_cache`（对该批所有 URL 生效）
+- **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → 从起始页按层发现站内链接并逐页抓取
+  - `depth`：跳转层数，`0` 只抓起始页，最大 `3`；`limit`：总页数上限（受 `CRAWL_MAX_PAGES` 约束）
+  - 单页失败只影响该页；图片/压缩包等静态资源链接自动跳过
 - **`login(url, timeout=180)`** → 打开带界面浏览器手动登录并持久化登录态
 
 返回为 JSON 字符串（落在 `content[0].text`，请解析文本，勿依赖 `structured_content`）。
-传输失败/5xx 会自动指数退避重试，`attempts` 字段为实际尝试次数；L2 交互未命中（如选择器不存在）只在 `notes` 中提示，不判失败。
+失败时带稳定 `error_code`；传输失败/5xx 会自动指数退避重试，`attempts` 为实际尝试次数；L2 交互未命中（如选择器不存在）只在 `notes` 中提示，不判失败。
 
 ### web_extract 示例
 
 ```bash
 schema='{"fields": {
-  "title":    {"selector": "h1", "type": "text"},
-  "main_link":{"selector": "a", "type": "attr", "attr": "href"},
-  "tag_count":{"selector": ".tag", "type": "count"},
-  "tags":     {"selector": ".tag", "type": "list", "list_key": "text"}
+  "title":     {"selector": "h1"},
+  "price":     {"selector": ".price", "regex": "￥([\\d.]+)", "group": 1},
+  "main_link": {"selector": "a", "type": "attr", "attr": "href", "abs_url": true},
+  "tag_count": {"selector": ".tag", "type": "count"},
+  "tags":      {"selector": ".tag", "type": "list", "list_key": "text"},
+  "items":     {"selector": ".item", "type": "list", "fields": {
+    "name": {"selector": ".name"},
+    "url":  {"selector": "a", "type": "attr", "attr": "href", "abs_url": true}
+  }}
 }}'
-# → {"ok":true, "data": {"title":"…","main_link":"…","tag_count":3,"tags":["a","b","c"]}, "missing":[]}
+# → {"ok":true, "data": {"title":"…","price":"299.00","main_link":"https://…",
+#    "tag_count":3,"tags":["a","b","c"],"items":[{"name":"…","url":"https://…"}]}, "missing":[]}
+```
+
+## Docker
+
+```bash
+# 仅 L1（镜像小，覆盖大多数页面）
+docker build -t scrape-mcp .
+
+# 带 L2 真浏览器（Cloudflare/验证码/SPA）
+docker build --build-arg INSTALL_BROWSER=1 -t scrape-mcp:l2 .
+
+docker run -p 8002:8002 scrape-mcp
+curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 ```
 
 ## 目录结构
 
 ```
 src/scrape_mcp
-├── server.py          # MCP 入口 + 工具（web_fetch/web_batch/login）
+├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/login）
 ├── config.py          # 环境变量配置
 ├── tokenizer.py       # tiktoken 计数 + 预算截断
 ├── core/
@@ -233,10 +265,14 @@ src/scrape_mcp
 │   ├── detector.py    # 拦截/骨架页判定
 │   ├── browser.py     # L2 Playwright + stealth
 │   ├── session.py     # 登录态持久化
-│   └── cache.py       # HTTP 响应缓存
+│   ├── cache.py       # HTTP 响应缓存
+│   ├── errors.py      # 统一错误码
+│   └── hostlimit.py   # 同域并发闸门
 └── extract/
     ├── compact.py     # DOM 剪枝 → 极省 token 正文
-    └── schema.py      # 结构化抽取（按字段 schema 出 JSON）
+    ├── schema.py      # 结构化抽取（按字段 schema 出 JSON）
+    ├── links.py       # 链接发现（web_crawl 用）
+    └── render.py      # markdown → 纯文本 / 分块
 ```
 
 ## 开发

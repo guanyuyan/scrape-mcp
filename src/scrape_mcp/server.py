@@ -1,24 +1,32 @@
-"""MCP Server 入口（M1：L1 抓取 + compact 输出；M2：命中拦截升级 L2 浏览器渲染）。"""
+"""MCP Server 入口：分级抓取 + compact 输出 + 结构化抽取 + 轻量爬取。"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 from mcp.server.mcpserver import MCPServer
+from starlette.responses import JSONResponse
 
+from . import __version__
 from .config import get_settings
+from .core import errors
 from .core.fetcher import Fetcher, FetchOutcome
+from .core.hostlimit import HostLimiter
 from .core.ratelimit import RateLimiter
 from .core.robots import RobotsChecker
 from .extract.compact import LINK_POLICIES, compact_html
+from .extract.links import extract_links
+from .extract.render import FORMATS, to_blocks, to_plain_text
 from .tokenizer import count_tokens
 
 _fetcher: Fetcher | None = None
 _ratelimiter: RateLimiter | None = None
 _robots: RobotsChecker | None = None
+_hostlimiter: HostLimiter | None = None
 
 
 def _get_fetcher() -> Fetcher:
@@ -42,23 +50,49 @@ def _get_robots() -> RobotsChecker:
     return _robots
 
 
+def _get_hostlimiter() -> HostLimiter:
+    global _hostlimiter
+    if _hostlimiter is None:
+        _hostlimiter = HostLimiter(get_settings().host_max_concurrency)
+    return _hostlimiter
+
+
+def _host_of(url: str) -> str:
+    return (urlparse(url).netloc or "").lower().split(":")[0]
+
+
 async def _compliance_check(url: str) -> dict | None:
     """阶段 0 合规：白/黑名单 → 全局限流 → robots.txt。
 
     通过返回 None；被拦返回结构化错误 payload（拒绝抓取，不发起任何请求）。
     """
     settings = get_settings()
-    host = (urlparse(url).netloc or "").lower().split(":")[0]
+    host = _host_of(url)
 
     if host in settings.denied_host_set:
-        return {"ok": False, "url": url, "error": f"主机 {host} 在黑名单内，已拒绝请求"}
+        return {
+            "ok": False,
+            "url": url,
+            "error_code": errors.DENIED,
+            "error": f"主机 {host} 在黑名单内，已拒绝请求",
+        }
     if settings.allowed_host_set and host not in settings.allowed_host_set:
-        return {"ok": False, "url": url, "error": f"主机 {host} 不在白名单内，已拒绝请求"}
+        return {
+            "ok": False,
+            "url": url,
+            "error_code": errors.DENIED,
+            "error": f"主机 {host} 不在白名单内，已拒绝请求",
+        }
 
     await _get_ratelimiter().acquire()
 
     if settings.respect_robots and not await _get_robots().is_allowed(url):
-        return {"ok": False, "url": url, "error": "目标路径被该站 robots.txt 禁止抓取"}
+        return {
+            "ok": False,
+            "url": url,
+            "error_code": errors.ROBOTS_DISALLOWED,
+            "error": "目标路径被该站 robots.txt 禁止抓取",
+        }
 
     return None
 
@@ -75,6 +109,22 @@ async def _lifespan(_app):
 
 
 mcp = MCPServer("scrape-mcp", lifespan=_lifespan)
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(_request) -> JSONResponse:
+    """HTTP 传输模式下的存活探针（Docker/反向代理用），不触发任何抓取。"""
+    settings = get_settings()
+    return JSONResponse(
+        {
+            "ok": True,
+            "name": "scrape-mcp",
+            "version": __version__,
+            "l2_enabled": settings.l2_enabled,
+            "respect_robots": settings.respect_robots,
+        }
+    )
+
 
 # 大页面 + 极小正文 → 疑似 JS 登录墙/骨架页，加 note 提示（不判失败，避免误杀超短正文）。
 # 与 detector._SHELL_MIN_HTML 对齐到 30KB：60KB 澎湃首页这类"挺大却榨不出正文"也要能提示。
@@ -106,16 +156,18 @@ async def _fetch_html(
     if denied is not None:
         return None, denied
 
-    outcome: FetchOutcome = await _get_fetcher().fetch(
-        url,
-        headers=headers,
-        cookies=cookies,
-        timeout=timeout,
-        wait_for=wait_for,
-        scroll=scroll,
-        click=click,
-        bypass_cache=bypass_cache,
-    )
+    # 同域并发闸门：批量/爬取时避免瞬间对同一站点打多个请求
+    async with _get_hostlimiter().slot(_host_of(url)):
+        outcome: FetchOutcome = await _get_fetcher().fetch(
+            url,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            wait_for=wait_for,
+            scroll=scroll,
+            click=click,
+            bypass_cache=bypass_cache,
+        )
 
     if outcome.error:
         return None, {
@@ -123,10 +175,12 @@ async def _fetch_html(
             "url": url,
             "tier": outcome.tier,
             "elapsed_ms": outcome.elapsed_ms,
+            "error_code": errors.classify_outcome(outcome),
             "error": outcome.error,
         }
 
     if outcome.blocked != "none":
+        code = errors.LOGIN_REQUIRED if outcome.login_required else errors.BLOCKED
         hint = (
             "命中反爬拦截"
             if outcome.blocked in ("cloudflare", "captcha", "waf", "rate_limit")
@@ -146,6 +200,7 @@ async def _fetch_html(
             "blocked": outcome.blocked,
             "block_reason": outcome.block_reason,
             "elapsed_ms": outcome.elapsed_ms,
+            "error_code": code,
             "error": f"{hint}；{explain}",
         }
         if outcome.login_required:
@@ -167,6 +222,7 @@ async def _fetch_dict(
     max_tokens: int,
     link_policy: str,
     *,
+    fmt: str = "markdown",
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
@@ -179,7 +235,17 @@ async def _fetch_dict(
     settings = get_settings()
 
     if link_policy not in LINK_POLICIES:
-        return {"ok": False, "error": f"link_policy 必须是 {LINK_POLICIES} 之一"}
+        return {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": f"link_policy 必须是 {LINK_POLICIES} 之一",
+        }
+    if fmt not in FORMATS:
+        return {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": f"format 必须是 {FORMATS} 之一",
+        }
 
     outcome, error = await _fetch_html(
         url,
@@ -220,6 +286,14 @@ async def _fetch_dict(
         "cached": outcome.cached,
         "attempts": outcome.attempts,
     }
+    if fmt != "markdown":
+        payload["format"] = fmt
+        if fmt == "text":
+            payload["content"] = to_plain_text(result.content)
+            payload["token_estimate"] = count_tokens(payload["content"])
+        else:  # json：按行分块，方便调用方逐段入库/切片
+            payload["content"] = to_blocks(result.content)
+            payload["token_estimate"] = sum(count_tokens(b) for b in payload["content"])
     if outcome.notes:
         payload["notes"] = outcome.notes
 
@@ -242,6 +316,7 @@ async def web_fetch(
     url: str,
     max_tokens: int = 4000,
     link_policy: str = "internal",
+    format: str = "markdown",
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
@@ -257,6 +332,8 @@ async def web_fetch(
         max_tokens: 正文 token 预算上限，超出时保留头尾、省略中段。
         link_policy: 链接处理策略。internal=站内链接保留为相对路径、站外降级为纯文本（默认，最省）；
             all=站内外链接全保留；none=全部降级为纯文本。
+        format: 输出格式。markdown=保留标题/列表/链接标记（默认）；
+            text=剥掉 markdown 标记的纯文本；json=按行切分的块数组（content 为字符串列表）。
         headers: 自定义请求头，如 {"Referer": "...", "User-Agent": "..."}；传入时不走共享缓存。
         cookies: 自定义 cookie 字典；传入时不走共享缓存。
         timeout: 单次请求超时秒数（默认取配置 request_timeout）。
@@ -266,12 +343,17 @@ async def web_fetch(
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
     """
     if not url.startswith(("http://", "https://")):
-        return _payload(ok=False, error="url 必须以 http:// 或 https:// 开头")
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
     return _payload(
         **await _fetch_dict(
             url,
             max_tokens,
             link_policy,
+            fmt=format,
             headers=headers,
             cookies=cookies,
             timeout=timeout,
@@ -302,15 +384,25 @@ async def web_extract(
 
     字段规则示例：
       {"fields": {
-        "title": {"selector": "h1", "type": "text"},
-        "first_heading": {"selector": "h1", "type": "text"},
-        "main_link":     {"selector": "a", "type": "attr", "attr": "href"},
-        "link_count":    {"selector": "a", "type": "count"},
-        "tags":          {"selector": ".tag", "type": "list", "list_key": "text"}
+        "title": {"selector": "h1"},
+        "price": {"selector": ".price", "regex": "(\\d+(?:\\.\\d+)?)", "group": 1},
+        "main_link": {"selector": "a", "type": "attr", "attr": "href", "abs_url": true},
+        "link_count": {"selector": "a", "type": "count"},
+        "tags": {"selector": ".tag", "type": "list", "list_key": "text"},
+        "items": {"selector": ".item", "type": "list", "fields": {
+            "name": {"selector": ".name"},
+            "url": {"selector": "a", "type": "attr", "attr": "href", "abs_url": true}
+        }},
+        "author": {"selector": ".author", "type": "object", "fields": {
+            "name": {"selector": ".name"},
+            "bio": {"selector": ".bio"}
+        }}
       }}
-    字段类型：text（默认，节点归一化文本）/ attr（需配 attr，取属性值）/
-        count（匹配节点数）/ list（取所有匹配节点，list_key 决定取值方式：
-        text / text_trimmed / attr / html）。
+    字段类型：text（默认，节点归一化文本）/ html / attr（需配 attr）/
+        count（匹配节点数）/ list（配 fields 返回对象数组，否则按 list_key 取值）/
+        object（在第一个匹配节点内部继续按 fields 抽取）。
+    后处理：regex + group（正则提取，未命中回落 default）、abs_url（相对链接转绝对）、
+        strip（去首尾空白，默认 true）。
 
     Args:
         url: 目标网页完整 URL。
@@ -324,7 +416,11 @@ async def web_extract(
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
     """
     if not url.startswith(("http://", "https://")):
-        return _payload(ok=False, error="url 必须以 http:// 或 https:// 开头")
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
 
     outcome, error = await _fetch_html(
         url,
@@ -344,9 +440,14 @@ async def web_extract(
 
         fields = parse_schema(schema)
     except SchemaValidationError as exc:
-        return _payload(ok=False, url=url, error=f"schema 非法: {exc}")
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"schema 非法: {exc}",
+        )
 
-    result = extract_fields(outcome.html, fields)
+    result = extract_fields(outcome.html, fields, base_url=outcome.final_url or url)
     payload = {
         "ok": True,
         "url": url,
@@ -371,6 +472,7 @@ async def web_batch(
     urls: list[str],
     max_tokens: int = 3000,
     link_policy: str = "internal",
+    format: str = "markdown",
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
@@ -382,21 +484,32 @@ async def web_batch(
         urls: 目标 URL 列表（最多 batch_max_urls 个，默认 20）。
         max_tokens: 每个 URL 的正文 token 预算上限。
         link_policy: 同 web_fetch。
+        format: 同 web_fetch（markdown / text / json）。
         headers: 所有 URL 共用的自定义请求头；传入时不走共享缓存。
         cookies: 所有 URL 共用的自定义 cookie；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
         bypass_cache: 跳过并绕过响应缓存。
     """
-    import asyncio
-
     settings = get_settings()
     if link_policy not in LINK_POLICIES:
-        return _payload(ok=False, error=f"link_policy 必须是 {LINK_POLICIES} 之一")
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"link_policy 必须是 {LINK_POLICIES} 之一",
+        )
     urls = [u for u in (urls or []) if isinstance(u, str) and u.startswith(("http://", "https://"))]
     if not urls:
-        return _payload(ok=False, error="urls 需为至少一个 http/https 的 URL 列表")
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="urls 需为至少一个 http/https 的 URL 列表",
+        )
     if len(urls) > settings.batch_max_urls:
-        return _payload(ok=False, error=f"urls 数量超过上限 {settings.batch_max_urls}，请分批")
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"urls 数量超过上限 {settings.batch_max_urls}，请分批",
+        )
 
     sem = asyncio.Semaphore(settings.batch_max_concurrency)
 
@@ -407,17 +520,169 @@ async def web_batch(
                     u,
                     max_tokens,
                     link_policy,
+                    fmt=format,
                     headers=headers,
                     cookies=cookies,
                     timeout=timeout,
                     bypass_cache=bypass_cache,
                 )
             except Exception as exc:  # 单条意外异常不应拖垮整批
-                return {"ok": False, "url": u, "error": f"{type(exc).__name__}: {exc}"}
+                return {
+                    "ok": False,
+                    "url": u,
+                    "error_code": errors.classify_exception(exc),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
 
     results = await asyncio.gather(*(one(u) for u in urls))
     ok_count = sum(1 for r in results if r.get("ok"))
     return _payload(ok=True, total=len(results), ok_count=ok_count, results=results)
+
+
+async def _crawl_page(
+    url: str,
+    *,
+    max_tokens: int,
+    link_policy: str,
+    same_host: bool,
+    link_limit: int,
+    headers: dict[str, str] | None,
+    cookies: dict[str, str] | None,
+    timeout: float | None,
+    bypass_cache: bool,
+) -> tuple[dict, list[str]]:
+    """抓一页并顺手抽链接；失败页返回错误 payload 和空链接列表。"""
+    outcome, error = await _fetch_html(
+        url,
+        headers=headers,
+        cookies=cookies,
+        timeout=timeout,
+        bypass_cache=bypass_cache,
+    )
+    if error is not None:
+        return error, []
+
+    base = outcome.final_url or url
+    budget = max(200, min(int(max_tokens), get_settings().hard_max_tokens))
+    result = compact_html(outcome.html, base, link_policy=link_policy, max_tokens=budget)
+    payload = {
+        "ok": True,
+        "url": url,
+        "final_url": outcome.final_url,
+        "status": outcome.status,
+        "tier": outcome.tier,
+        "title": result.title,
+        "content": result.content,
+        "token_estimate": count_tokens(result.content),
+        "truncated": result.truncated,
+        "cached": outcome.cached,
+    }
+    if outcome.notes:
+        payload["notes"] = outcome.notes
+    links = extract_links(outcome.html, base, same_host=same_host, limit=link_limit)
+    return payload, links
+
+
+@mcp.tool()
+async def web_crawl(
+    url: str,
+    depth: int = 1,
+    limit: int = 10,
+    same_host: bool = True,
+    max_tokens: int = 2000,
+    link_policy: str = "internal",
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    timeout: float | None = None,
+    bypass_cache: bool = False,
+) -> str:
+    """从起始页按层发现站内链接并批量抓取，适合"把一个栏目的前 N 篇读进来"。
+
+    每页都走完整的分级抓取与合规链路（robots/黑白名单/限流/同域并发），
+    单页失败只影响该页，不中断整次爬取；静态资源链接（图片/压缩包等）自动跳过。
+
+    Args:
+        url: 起始页 URL。
+        depth: 跳转层数。0=只抓起始页；1=再抓起始页上的链接（默认）；最大 3。
+        limit: 最多抓取的页面总数（含起始页），受配置 crawl_max_pages 上限约束。
+        same_host: 只跟进同主机链接（默认 True）。
+        max_tokens: 每页正文 token 预算上限。
+        link_policy: 同 web_fetch。
+        headers: 所有页面共用的自定义请求头；传入时不走共享缓存。
+        cookies: 所有页面共用的自定义 cookie；传入时不走共享缓存。
+        timeout: 单次请求超时秒数。
+        bypass_cache: 跳过并绕过响应缓存。
+    """
+    if not url.startswith(("http://", "https://")):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    settings = get_settings()
+    if depth < 0 or depth > 3:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="depth 需在 0~3 之间",
+        )
+    cap = min(max(1, int(limit)), settings.crawl_max_pages)
+    sem = asyncio.Semaphore(settings.batch_max_concurrency)
+
+    async def one(u: str) -> tuple[dict, list[str]]:
+        async with sem:
+            try:
+                return await _crawl_page(
+                    u,
+                    max_tokens=max_tokens,
+                    link_policy=link_policy,
+                    same_host=same_host,
+                    link_limit=max(cap * 5, 50),
+                    headers=headers,
+                    cookies=cookies,
+                    timeout=timeout,
+                    bypass_cache=bypass_cache,
+                )
+            except Exception as exc:  # 单页异常不中断整次爬取
+                return {
+                    "ok": False,
+                    "url": u,
+                    "error_code": errors.classify_exception(exc),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }, []
+
+    visited: set[str] = {url}
+    frontier: list[str] = [url]
+    results: list[dict] = []
+    level = 0
+
+    while frontier and len(results) < cap:
+        frontier = frontier[: cap - len(results)]
+        pairs = await asyncio.gather(*(one(u) for u in frontier))
+        next_frontier: list[str] = []
+        for payload, links in pairs:
+            results.append(payload)
+            if level >= depth:
+                continue
+            for link in links:
+                if link in visited or len(visited) >= cap:
+                    continue
+                visited.add(link)
+                next_frontier.append(link)
+        frontier = next_frontier
+        level += 1
+
+    ok_count = sum(1 for r in results if r.get("ok"))
+    return _payload(
+        ok=True,
+        start=url,
+        depth=depth,
+        limit=cap,
+        pages_fetched=len(results),
+        ok_count=ok_count,
+        links_discovered=len(visited) - 1,
+        results=results,
+    )
 
 
 @mcp.tool()
@@ -432,10 +697,12 @@ async def login(url: str, timeout: float = 180.0) -> str:
         url: 目标站点任一页面 URL（按域名区分登录态）。
         timeout: 等待手动登录完成的秒数，超时也会保存当前状态便于下次继续。
     """
-    from urllib.parse import urlparse
-
     if not url.startswith(("http://", "https://")):
-        return _payload(ok=False, error="url 必须以 http:// 或 https:// 开头")
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
 
     result = await _get_fetcher().login(url, timeout)
     result["host"] = urlparse(url).netloc.lower()

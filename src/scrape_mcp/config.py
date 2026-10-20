@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # web_batch 单批并发上限
     batch_max_concurrency: int = 4
     batch_max_urls: int = 20
+    # 同一主机的并发上限（web_fetch / web_batch / web_crawl 共用）；跨主机仍可并行
+    host_max_concurrency: int = 2
+    # web_crawl 单次最多抓取的页面数硬上限
+    crawl_max_pages: int = 20
 
     # ---- 传输层重试 ----
     # 仅对网络异常与 5xx 生效；429/403 属反爬信号，同层重试通常无效，交给分级降级处理
