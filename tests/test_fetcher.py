@@ -271,3 +271,76 @@ async def test_l2_interaction_options_forwarded():
     fetcher, _ = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
     await fetcher.fetch(URL, wait_for="main", scroll=True, click="#more")
     assert browser.kwargs == {"wait_for": "main", "scroll": True, "click": "#more"}
+
+
+async def test_rate_limit_waits_retry_after_when_allowed():
+    """Retry-After 在配置的等待上限内时，补一次有界重试。"""
+
+    class RetryAfterHttp:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get(self, url, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return HttpResponse(
+                    ok=True,
+                    status=429,
+                    url=url,
+                    content_type="text/html",
+                    text="<html><body>too many requests</body></html>",
+                    elapsed_ms=5,
+                    retry_after=0.0,
+                )
+            return HttpResponse(
+                ok=True,
+                status=200,
+                url=url,
+                content_type="text/html",
+                text=f"<html><body><p>{LONG_TEXT}</p></body></html>",
+                elapsed_ms=10,
+            )
+
+    fetcher = Fetcher(Settings(retry_backoff=0, retry_after_max_wait=1))
+    fetcher._http = RetryAfterHttp()
+    outcome = await fetcher.fetch(URL)
+    assert outcome.error is None and outcome.blocked == "none"
+    assert outcome.attempts == 2
+    assert any(d.startswith("retry:retry_after") for d in outcome.decisions)
+
+
+async def test_rate_limit_does_not_wait_by_default():
+    fetcher, http = make_fetcher(
+        status=429, text="<html><body>too many requests</body></html>", retry_backoff=0
+    )
+    outcome = await fetcher.fetch(URL)
+    assert outcome.attempts == 1 and http.calls == 1
+    assert "no_escalate:rate_limit" in outcome.decisions
+
+
+async def test_decisions_track_escalation_and_l2_result():
+    blocked_page = BrowserOutcome(
+        ok=True,
+        url=URL,
+        final_url=URL,
+        status=200,
+        html=RENDERED_HTML,
+        elapsed_ms=300,
+        wait_for_hit=False,
+        clicked=True,
+        scroll_rounds=3,
+    )
+    browser = FakeBrowser(blocked_page)
+    fetcher, _ = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
+    outcome = await fetcher.fetch(URL)
+    assert "escalate_l2:cloudflare" in outcome.decisions
+    assert "l2_ok" in outcome.decisions
+    assert outcome.l2["wait_for_hit"] is False
+    assert outcome.l2["clicked"] is True
+    assert outcome.l2["scroll_rounds"] == 3
+
+
+async def test_shell_escalation_reason_recorded():
+    fetcher, _ = make_fetcher(text=SHELL_HTML, browser=FakeBrowser())
+    outcome = await fetcher.fetch(URL)
+    assert "escalate_l2:shell" in outcome.decisions

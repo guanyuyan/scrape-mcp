@@ -98,9 +98,9 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **compact 精简**：属性剥离、模板块丢弃、站外链接降级、表格转 CSV、token 预算截断，
   压缩率可达 1~20% 数量级（如 MDN 214KB → 数百 token）。
 - **拦截如实上报**：不把挑战页/空壳页当正文喂给模型，返回 `blocked`/`block_reason`。
-- **稳定错误码**：`error_code`（`timeout`/`dns`/`tls`/`connection`/`blocked`/`login_required`/`http_4xx`…），调用方可程序化决策。
+- **稳定错误码 + 可诊断**：失败返回 `error_code` 与 `retryable`，`debug=true` 还能看到分层决策、选择器命中数与 L2 交互结果。
 - **登录态持久化**：`login` 工具手动登录并落盘，`web_fetch` 自动带上；过期会提示重登。
-- **缓存与批量**：L1 明文响应按 TTL 磁盘缓存；`web_batch` 并发抓取一批 URL。
+- **缓存与批量**：L1 明文响应按 TTL 磁盘缓存，过期后带 `ETag`/`Last-Modified` 做条件请求；`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 按 `depth`/`limit` 发现站内链接并逐页抓取，静态资源自动跳过。
 - **输出格式可选**：`format=markdown|text|json`，正文可按段落数组直接入库。
 - **同域并发闸门**：同一站点默认最多 2 个并发请求，跨站仍可并行，避免批量抓取时把单站打穿。
@@ -152,9 +152,11 @@ cp .env.example .env    # 生成配置模板
 | `L2_SCROLL_DELAY_MS` | `400` | L2 每步滚动间隔（毫秒） |
 | `L2_TIMEZONE` | `Asia/Shanghai` | 隐身加固时区 |
 | `DATA_DIR` | `~/.scrape_mcp` | 登录态/缓存放盘目录 |
-| `CACHE_TTL` | `300` | L1 缓存 TTL（秒），`0` 关闭 |
+| `CACHE_TTL` | `300` | L1 缓存 TTL（秒），`0` 关闭；过期后带 `ETag`/`Last-Modified` 做条件请求 |
 | `RETRY_TIMES` | `2` | 网络异常/5xx 重试次数（429/403 不重试） |
 | `RETRY_BACKOFF` | `0.5` | 重试退避基数（秒，指数增长） |
+| `RETRY_AFTER_MAX_WAIT` | `0` | 429/503 带 `Retry-After` 时最多等待秒数；`0` 只上报不等待 |
+| `LOG_LEVEL` | `WARNING` | 日志级别，JSON 行写 stderr（stdout 留给 MCP 协议） |
 | `BATCH_MAX_CONCURRENCY` | `4` | `web_batch` 并发上限 |
 | `BATCH_MAX_URLS` | `20` | `web_batch` 单批上限 |
 | `HOST_MAX_CONCURRENCY` | `2` | 同一主机的并发上限（`web_batch`/`web_crawl` 共用） |
@@ -206,20 +208,52 @@ python -m scrape_mcp.server
   - `format`: `markdown`（默认，保留标题/列表/链接）/ `text`（剥掉标记的纯文本）/ `json`（`content` 为段落数组）
   - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
   - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）
+  - 诊断参数：`debug=true` 时返回 `diagnostics`（决策轨迹、选择器命中数、L2 交互结果），不含页面内容
 - **`web_extract(url, schema={...}, ...)`** → 按字段 schema 抽取结构化 JSON（可入库）
   - 字段类型：`text`（默认）/ `html` / `attr`（需配 `attr`）/ `count` / `list` / `object`
   - 嵌套：`list` 配 `fields` 返回对象数组，`object` 在匹配节点内部继续抽取
   - 后处理：`regex` + `group`（正则提取，未命中回落 `default`）、`abs_url`（相对链接转绝对）、`strip`
   - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
-  - 支持 `headers` / `cookies` / `timeout` / `bypass_cache`（对该批所有 URL 生效）
+  - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug`（对该批所有 URL 生效）
 - **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → 从起始页按层发现站内链接并逐页抓取
   - `depth`：跳转层数，`0` 只抓起始页，最大 `3`；`limit`：总页数上限（受 `CRAWL_MAX_PAGES` 约束）
   - 单页失败只影响该页；图片/压缩包等静态资源链接自动跳过
 - **`login(url, timeout=180)`** → 打开带界面浏览器手动登录并持久化登录态
 
 返回为 JSON 字符串（落在 `content[0].text`，请解析文本，勿依赖 `structured_content`）。
-失败时带稳定 `error_code`；传输失败/5xx 会自动指数退避重试，`attempts` 为实际尝试次数；L2 交互未命中（如选择器不存在）只在 `notes` 中提示，不判失败。
+失败时带稳定 `error_code` 与 `retryable`；传输失败/5xx 会自动指数退避重试，`attempts` 为实际尝试次数；L2 交互未命中（如选择器不存在）只在 `notes` 中提示，不判失败。
+
+### 错误码与诊断
+
+`error_code` 是协议的一部分（只增不改），`retryable` 直接告诉你"过一会儿重试是否有意义"：
+
+| error_code | retryable | 含义 / 下一步 |
+|---|---|---|
+| `timeout` / `dns` / `tls` / `connection` / `unknown` | ✅ | 网络层问题，稍后重试或检查代理 |
+| `http_5xx` | ✅ | 目标服务端异常，可退避重试 |
+| `http_4xx` | ❌ | 404/410 等，页面本身无效 |
+| `blocked` | ❌ | 被反爬拦截（Cloudflare/WAF/限流），换时段或人工确认 |
+| `login_required` | ❌ | 需要登录态，先调用 `login` |
+| `denied` / `robots_disallowed` | ❌ | 黑白名单或 robots.txt 拒绝 |
+| `invalid_url` / `invalid_argument` | ❌ | 参数问题 |
+
+失败时默认带精简 `diagnostics.decisions`（如 `["retry:5xx", "escalate_l2:cloudflare", "l2_ok"]`）；
+传 `debug=true` 会展开更多计数：
+
+```json
+{"diagnostics": {
+  "decisions": ["escalate_l2:shell", "l2_ok"],
+  "attempts": 1,
+  "html_bytes": 348210,
+  "root": "div",
+  "selector_hits": {"article": 0, "main": 1, "div": 812},
+  "content_chars": 5820,
+  "l2": {"wait_for_hit": null, "clicked": null, "scroll_rounds": 0, "error": null}
+}}
+```
+
+429/503 带 `Retry-After` 时返回 `retry_after_s`；配置 `RETRY_AFTER_MAX_WAIT` 后可在上限内自动补一次重试。
 
 ### web_extract 示例
 

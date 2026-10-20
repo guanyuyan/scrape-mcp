@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 from curl_cffi.requests import AsyncSession
 
@@ -25,6 +27,26 @@ class HttpResponse:
     elapsed_ms: int
     error: str | None = None
     cached: bool = False
+    # 服务端要求的下次请求间隔（秒），来自 Retry-After；没有则为 None
+    retry_after: float | None = None
+
+
+def _parse_retry_after(raw: str) -> float | None:
+    """Retry-After 支持两种写法：秒数，或 HTTP 日期。解析不了就返回 None。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
 def _decode(raw: bytes, content_type: str) -> str:
@@ -64,6 +86,7 @@ class HttpClient:
     ) -> HttpResponse:
         # 带自定义头/凭证的响应可能因人而异，既不读也不写共享缓存
         use_cache = not bypass_cache and not headers and not cookies
+        saved = None
         if use_cache:
             saved = self._cache.get(url)
             if saved is not None:
@@ -81,6 +104,13 @@ class HttpClient:
         merged = {"Accept-Language": self._s.accept_language}
         if headers:
             merged.update(headers)
+        # 过期缓存不直接丢：带 ETag/Last-Modified 去问一次，304 就复用正文
+        stale = self._cache.get(url, allow_stale=True) if use_cache else None
+        if stale:
+            if stale.get("etag"):
+                merged["If-None-Match"] = stale["etag"]
+            if stale.get("last_modified"):
+                merged["If-Modified-Since"] = stale["last_modified"]
         try:
             async with AsyncSession(impersonate=impersonate or self._s.impersonate) as session:
                 resp = await session.get(
@@ -102,10 +132,26 @@ class HttpClient:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+        resp_headers = {k.lower(): v for k, v in (resp.headers or {}).items()}
+        content_type = resp_headers.get("content-type", "") or ""
+
+        # 304：内容未变，直接复用旧正文，并刷新缓存时间戳
+        if resp.status_code == 304 and stale is not None:
+            self._cache.put(url, stale)
+            return HttpResponse(
+                ok=True,
+                status=stale.get("status", 200),
+                url=stale.get("url", url),
+                content_type=stale.get("content_type", content_type),
+                text=stale.get("text", ""),
+                elapsed_ms=int((time.perf_counter() - t0) * 1000),
+                cached=True,
+                retry_after=_parse_retry_after(resp_headers.get("retry-after", "")),
+            )
+
         raw = resp.content or b""
         if len(raw) > self._s.max_response_bytes:
             raw = raw[: self._s.max_response_bytes]
-        content_type = resp.headers.get("content-type", "") or ""
         text = _decode(raw, content_type)
         out = HttpResponse(
             ok=True,
@@ -114,11 +160,19 @@ class HttpClient:
             content_type=content_type,
             text=text,
             elapsed_ms=int((time.perf_counter() - t0) * 1000),
+            retry_after=_parse_retry_after(resp_headers.get("retry-after", "")),
         )
         # 只缓存可判定的正常 HTML；拦截/错误响应不缓存，避免把挑战页当作有效内容缓存
         if use_cache and out.status == 200 and "text/html" in content_type:
             self._cache.put(
                 url,
-                {"status": out.status, "url": out.url, "content_type": content_type, "text": text},
+                {
+                    "status": out.status,
+                    "url": out.url,
+                    "content_type": content_type,
+                    "text": text,
+                    "etag": resp_headers.get("etag", ""),
+                    "last_modified": resp_headers.get("last-modified", ""),
+                },
             )
         return out

@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
@@ -122,6 +122,9 @@ class CompactResult:
     links_kept: int
     links_dropped: int
     truncated: bool
+    # 诊断：最终选中的正文根标签，以及主要候选容器的命中数
+    root: str = ""
+    selector_hits: dict[str, int] = field(default_factory=dict)
 
 
 def _norm(text: str) -> str:
@@ -433,6 +436,11 @@ def compact_html(
         return CompactResult("", "", 0, 0, 0, False)
     tree = HTMLParser(html)
 
+    # 诊断用：正文根候选的命中数，帮助判断"选择器没命中"还是"页面确实没正文"
+    selector_hits = {
+        sel: len(tree.css(sel)) for sel in ("article", "main", "[role=main]", "section", "div")
+    }
+
     title = ""
     title_node = tree.css_first("title")
     if title_node is not None:
@@ -461,4 +469,6 @@ def compact_html(
         links_kept=renderer.links_kept,
         links_dropped=renderer.links_dropped,
         truncated=truncated,
+        root=root.tag if root is not None else "",
+        selector_hits=selector_hits,
     )

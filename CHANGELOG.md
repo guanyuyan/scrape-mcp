@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### Added
+- **诊断载荷**：失败与 `debug=true` 时返回 `diagnostics`（分层决策轨迹 `decisions`、`attempts`、`selector_hits`、`root`、`content_chars`、L2 交互结果），只含计数与决策，不含页面正文
+- **retryable 判定**：所有失败载荷新增布尔字段 `retryable`，便于调用方决定是否重试
+- **Retry-After 有界等待**：429/503 带 `Retry-After` 时，可在 `RETRY_AFTER_MAX_WAIT` 上限内等待后重试，并在 `decisions` 记录 `retry:retry_after_Ns`
+- **条件请求缓存**：缓存过期后带 `ETag` / `Last-Modified` 发起条件请求，命中 `304` 复用本地正文并刷新时间戳
+- **结构化日志**：日志统一走 stderr 输出 JSON 行（避免污染 stdio 协议通道），通过 `SCRAPE_MCP_LOG_LEVEL` 控制级别
+- `web_fetch` / `web_extract` / `web_batch` 新增 `debug` 参数
+- 夜间真实站点回归工作流（每日定时跑 `scripts/demo.py`，失败自动开 issue）
+- 打 tag 自动发版工作流（版本一致性校验 + 构建 + Trusted Publishing + GitHub Release）
+
+### Changed
+- `scripts/demo.py` 全部用例失败时以非零码退出，便于 CI 判定
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

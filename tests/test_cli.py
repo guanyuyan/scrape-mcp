@@ -61,7 +61,11 @@ def test_http_transport_port_override(monkeypatch):
     dummy = _DummyMCP()
     monkeypatch.setattr(server, "mcp", dummy)
     stub = SimpleNamespace(
-        http_port=8000, http_host="127.0.0.1", http_json=False, http_stateless=True
+        http_port=8000,
+        http_host="127.0.0.1",
+        http_json=False,
+        http_stateless=True,
+        log_level="WARNING",
     )
     monkeypatch.setattr(server, "get_settings", lambda: stub)
     server.main(["--transport", "streamable-http", "--port", "8123"])

@@ -1,0 +1,70 @@
+name: Release
+
+# 打 tag 即发布：先校验版本号，再构建，最后通过 PyPI Trusted Publishing（OIDC）上传，
+# 全程不需要在仓库里存放 API Token。
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify tag matches package version
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          pyproject = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          version = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE).group(1)
+          init = pathlib.Path("src/scrape_mcp/__init__.py").read_text(encoding="utf-8")
+          init_version = re.search(r'__version__\s*=\s*"([^"]+)"', init).group(1)
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          assert version == init_version == tag, (
+              f"tag={tag} pyproject={version} __init__={init_version} 版本不一致"
+          )
+          print(f"version ok: {tag}")
+          PY
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # Trusted Publishing 必需
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes

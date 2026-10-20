@@ -16,6 +16,7 @@ from .config import get_settings
 from .core import errors
 from .core.fetcher import Fetcher, FetchOutcome
 from .core.hostlimit import HostLimiter
+from .core.logging import configure, log_event
 from .core.ratelimit import RateLimiter
 from .core.robots import RobotsChecker
 from .extract.compact import LINK_POLICIES, compact_html
@@ -61,6 +62,31 @@ def _host_of(url: str) -> str:
     return (urlparse(url).netloc or "").lower().split(":")[0]
 
 
+def _denied_payload(url: str, code: str, message: str) -> dict:
+    """合规拒绝的统一载荷：不发请求，但同样给出稳定错误码与是否值得重试。"""
+    log_event("denied", url=url, code=code)
+    return {
+        "ok": False,
+        "url": url,
+        "error_code": code,
+        "error": message,
+        "retryable": errors.is_retryable(code),
+    }
+
+
+def _diagnostics(outcome: FetchOutcome, *, detail: bool = False) -> dict:
+    """分层决策轨迹。失败时给精简版，debug=true 时给完整版（不含页面内容）。"""
+    diag: dict = {"decisions": list(outcome.decisions), "attempts": outcome.attempts}
+    if detail:
+        diag["html_bytes"] = len(outcome.html)
+        diag["l2"] = outcome.l2
+        if outcome.notes:
+            diag["notes"] = list(outcome.notes)
+        if outcome.retry_after is not None:
+            diag["retry_after_s"] = outcome.retry_after
+    return diag
+
+
 async def _compliance_check(url: str) -> dict | None:
     """阶段 0 合规：白/黑名单 → 全局限流 → robots.txt。
 
@@ -70,29 +96,14 @@ async def _compliance_check(url: str) -> dict | None:
     host = _host_of(url)
 
     if host in settings.denied_host_set:
-        return {
-            "ok": False,
-            "url": url,
-            "error_code": errors.DENIED,
-            "error": f"主机 {host} 在黑名单内，已拒绝请求",
-        }
+        return _denied_payload(url, errors.DENIED, f"主机 {host} 在黑名单内，已拒绝请求")
     if settings.allowed_host_set and host not in settings.allowed_host_set:
-        return {
-            "ok": False,
-            "url": url,
-            "error_code": errors.DENIED,
-            "error": f"主机 {host} 不在白名单内，已拒绝请求",
-        }
+        return _denied_payload(url, errors.DENIED, f"主机 {host} 不在白名单内，已拒绝请求")
 
     await _get_ratelimiter().acquire()
 
     if settings.respect_robots and not await _get_robots().is_allowed(url):
-        return {
-            "ok": False,
-            "url": url,
-            "error_code": errors.ROBOTS_DISALLOWED,
-            "error": "目标路径被该站 robots.txt 禁止抓取",
-        }
+        return _denied_payload(url, errors.ROBOTS_DISALLOWED, "目标路径被该站 robots.txt 禁止抓取")
 
     return None
 
@@ -133,6 +144,9 @@ LOW_CONTENT_TOKENS = 250
 
 
 def _payload(**kwargs) -> str:
+    # 失败载荷统一补 retryable，避免调用方为了一个布尔值去解析错误文本
+    if kwargs.get("ok") is False and "error_code" in kwargs and "retryable" not in kwargs:
+        kwargs["retryable"] = errors.is_retryable(kwargs["error_code"])
     return json.dumps(kwargs, ensure_ascii=False, indent=None)
 
 
@@ -169,14 +183,28 @@ async def _fetch_html(
             bypass_cache=bypass_cache,
         )
 
+    log_event(
+        "fetch",
+        url=url,
+        tier=outcome.tier,
+        status=outcome.status,
+        ms=outcome.elapsed_ms,
+        attempts=outcome.attempts,
+        cached=outcome.cached,
+        code=errors.classify_outcome(outcome),
+    )
+
     if outcome.error:
+        code = errors.classify_outcome(outcome)
         return None, {
             "ok": False,
             "url": url,
             "tier": outcome.tier,
             "elapsed_ms": outcome.elapsed_ms,
-            "error_code": errors.classify_outcome(outcome),
+            "error_code": code,
             "error": outcome.error,
+            "retryable": errors.is_retryable(code),
+            "diagnostics": _diagnostics(outcome),
         }
 
     if outcome.blocked != "none":
@@ -202,7 +230,11 @@ async def _fetch_html(
             "elapsed_ms": outcome.elapsed_ms,
             "error_code": code,
             "error": f"{hint}；{explain}",
+            "retryable": errors.is_retryable(code),
+            "diagnostics": _diagnostics(outcome, detail=True),
         }
+        if outcome.retry_after is not None:
+            payload["retry_after_s"] = outcome.retry_after
         if outcome.login_required:
             state = (
                 "已带登录态仍失败，登录态可能过期，请重新 login"
@@ -217,6 +249,7 @@ async def _fetch_html(
     # 4xx（401/403/429 已在上面按拦截/限流处理）：404/410 这类不是有效内容，
     # 不当作成功返回，否则调用方会把错误页当正文/数据。
     if outcome.status >= 400:
+        code = errors.HTTP_5XX if outcome.status >= 500 else errors.HTTP_4XX
         return None, {
             "ok": False,
             "url": url,
@@ -224,8 +257,10 @@ async def _fetch_html(
             "status": outcome.status,
             "tier": outcome.tier,
             "elapsed_ms": outcome.elapsed_ms,
-            "error_code": errors.HTTP_5XX if outcome.status >= 500 else errors.HTTP_4XX,
+            "error_code": code,
             "error": f"目标返回 HTTP {outcome.status}，该页不是有效内容",
+            "retryable": errors.is_retryable(code),
+            "diagnostics": _diagnostics(outcome),
         }
 
     return outcome, None
@@ -244,6 +279,7 @@ async def _fetch_dict(
     scroll: bool = False,
     click: str | None = None,
     bypass_cache: bool = False,
+    debug: bool = False,
 ) -> dict:
     """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
     settings = get_settings()
@@ -253,12 +289,14 @@ async def _fetch_dict(
             "ok": False,
             "error_code": errors.INVALID_ARGUMENT,
             "error": f"link_policy 必须是 {LINK_POLICIES} 之一",
+            "retryable": False,
         }
     if fmt not in FORMATS:
         return {
             "ok": False,
             "error_code": errors.INVALID_ARGUMENT,
             "error": f"format 必须是 {FORMATS} 之一",
+            "retryable": False,
         }
 
     outcome, error = await _fetch_html(
@@ -310,6 +348,16 @@ async def _fetch_dict(
             payload["token_estimate"] = sum(count_tokens(b) for b in payload["content"])
     if outcome.notes:
         payload["notes"] = outcome.notes
+    if debug:
+        diag = _diagnostics(outcome, detail=True)
+        diag.update(
+            {
+                "root": result.root,
+                "selector_hits": result.selector_hits,
+                "content_chars": len(result.content),
+            }
+        )
+        payload["diagnostics"] = diag
 
     # 大页面却榨不出正文，多半是 JS 登录墙/骨架页：正文本身可能是真实内容，故不判失败，只如实提示
     if (
@@ -338,6 +386,7 @@ async def web_fetch(
     scroll: bool = False,
     click: str | None = None,
     bypass_cache: bool = False,
+    debug: bool = False,
 ) -> str:
     """抓取网页并返回极省 token 的紧凑正文（自动辨别反爬拦截页并如实上报）。
 
@@ -355,6 +404,8 @@ async def web_fetch(
         scroll: 仅 L2 生效，滚动页面触发懒加载/无限滚动。
         click: 仅 L2 生效，渲染后点击一次该 CSS 选择器（如"加载更多"）。
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
+        debug: 返回 diagnostics（分层决策、L2 交互命中情况、正文根与候选命中数），
+            只含计数与决策、不含页面内容；失败时默认也会带精简版决策轨迹。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -375,6 +426,7 @@ async def web_fetch(
             scroll=scroll,
             click=click,
             bypass_cache=bypass_cache,
+            debug=debug,
         )
     )
 
@@ -390,6 +442,7 @@ async def web_extract(
     scroll: bool = False,
     click: str | None = None,
     bypass_cache: bool = False,
+    debug: bool = False,
 ) -> str:
     """抓取网页并按字段 schema 抽取结构化 JSON（字段级数据，可入库）。
 
@@ -428,6 +481,7 @@ async def web_extract(
         scroll: 仅 L2 生效，滚动页面触发懒加载。
         click: 仅 L2 生效，渲染后点击一次该 CSS 选择器。
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
+        debug: 返回 diagnostics（分层决策与 L2 交互命中情况），不含页面内容。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -478,6 +532,8 @@ async def web_extract(
         payload["notes"] = outcome.notes
     if result.errors:
         payload["schema_notes"] = result.errors
+    if debug:
+        payload["diagnostics"] = _diagnostics(outcome, detail=True)
     return _payload(**payload)
 
 
@@ -491,6 +547,7 @@ async def web_batch(
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
     bypass_cache: bool = False,
+    debug: bool = False,
 ) -> str:
     """并发抓取一批 URL，各自走完整分级链路，返回逐个结果。
 
@@ -503,6 +560,7 @@ async def web_batch(
         cookies: 所有 URL 共用的自定义 cookie；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
         bypass_cache: 跳过并绕过响应缓存。
+        debug: 每条结果附带 diagnostics（决策轨迹与计数，不含页面内容）。
     """
     settings = get_settings()
     if link_policy not in LINK_POLICIES:
@@ -539,13 +597,16 @@ async def web_batch(
                     cookies=cookies,
                     timeout=timeout,
                     bypass_cache=bypass_cache,
+                    debug=debug,
                 )
             except Exception as exc:  # 单条意外异常不应拖垮整批
+                code = errors.classify_exception(exc)
                 return {
                     "ok": False,
                     "url": u,
-                    "error_code": errors.classify_exception(exc),
+                    "error_code": code,
                     "error": f"{type(exc).__name__}: {exc}",
+                    "retryable": errors.is_retryable(code),
                 }
 
     results = await asyncio.gather(*(one(u) for u in urls))
@@ -762,6 +823,8 @@ def main(argv: list[str] | None = None) -> None:
 
     transport = ("--transport" in argv and argv[argv.index("--transport") + 1]) or "stdio"
     settings = get_settings()
+    # 日志只写 stderr：stdio 模式下 stdout 是 MCP 协议通道
+    configure(settings.log_level)
     # CLI 优先级高于 env/.env，便于一键切 HTTP
     if transport == "streamable-http":
         if "--port" in argv:

@@ -1,0 +1,37 @@
+name: Nightly real-site regression
+
+# 每天跑一遍真实站点，尽早发现"站点改版 / 我们的链路退化"。
+# 只有全部站点都失败才判失败（多为整条链路问题）；个别站点失败只记录在日志里。
+on:
+  schedule:
+    - cron: "0 16 * * *" # UTC 16:00 = 北京时间次日 00:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  real-sites:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and browser
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          python -m playwright install --with-deps chromium
+      - name: Run demo against real sites
+        run: python scripts/demo.py
+      - name: Open issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "夜间真实站点回归失败 $(date -u +%F)" \
+            --body "所有演示站点均未取到正文，请检查抓取链路。运行日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

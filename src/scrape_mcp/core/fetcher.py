@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
+from typing import Any
 from urllib.parse import urlparse
 
 from ..config import Settings
@@ -39,6 +40,12 @@ class FetchOutcome:
     cached: bool = False
     attempts: int = 1
     notes: list[str] = field(default_factory=list)
+    # 服务端要求的下次请求间隔（秒），来自 Retry-After
+    retry_after: float | None = None
+    # 分层决策轨迹（如 l1_shell / escalate_l2 / l2_failed），供调用方诊断
+    decisions: list[str] = field(default_factory=list)
+    # L2 交互细节：wait_for 是否命中、点击是否成功、实际滚动轮数
+    l2: dict[str, Any] = field(default_factory=dict)
 
 
 class Fetcher:
@@ -76,8 +83,16 @@ class Fetcher:
             timeout=timeout,
             bypass_cache=bypass_cache,
         )
-        if not self._should_escalate(outcome):
+        reason = self._escalation_reason(outcome)
+        if reason is None:
+            if outcome.blocked == "rate_limit":
+                outcome.decisions.append("no_escalate:rate_limit")
+            elif outcome.error:
+                outcome.decisions.append("no_escalate:transport_error")
+            elif not self._settings.l2_enabled and outcome.blocked != "none":
+                outcome.decisions.append("no_escalate:l2_disabled")
             return outcome
+        outcome.decisions.append(f"escalate_l2:{reason}")
         return await self._fetch_l2(url, outcome, wait_for=wait_for, scroll=scroll, click=click)
 
     async def _fetch_l1_with_retry(
@@ -89,8 +104,11 @@ class Fetcher:
         timeout: float | None,
         bypass_cache: bool,
     ) -> FetchOutcome:
-        """网络异常/5xx 指数退避重试；429/403 属反爬信号，同层重试无效故不重试。"""
+        """网络异常/5xx 指数退避重试；429/503 带 Retry-After 时按配置做一次有界等待。"""
         attempts = max(1, int(self._settings.retry_times) + 1)
+        retry_after_used = False
+        # 每次重试都是一次新的 L1 结果，决策轨迹要跨尝试累积，否则调用方只看到最后一次
+        trail: list[str] = []
         outcome: FetchOutcome | None = None
         for i in range(1, attempts + 1):
             outcome = await self._fetch_l1(
@@ -100,20 +118,46 @@ class Fetcher:
                 timeout=timeout,
                 bypass_cache=bypass_cache,
             )
+            if trail:
+                outcome.decisions = [*trail, *outcome.decisions]
             outcome.attempts = i
-            if i >= attempts or not _is_retryable(outcome):
+            if i >= attempts:
                 return outcome
+
+            # 服务端明确要求"稍后再来"：先看 Retry-After，比通用 5xx 退避更准确
+            wait = outcome.retry_after
+            cap = self._settings.retry_after_max_wait
+            if (
+                not retry_after_used
+                and wait is not None
+                and cap > 0
+                and wait <= cap
+                and (outcome.blocked == "rate_limit" or outcome.status == 503)
+            ):
+                retry_after_used = True
+                outcome.decisions.append(f"retry:retry_after_{wait:g}s")
+                trail = list(outcome.decisions)
+                await asyncio.sleep(wait)
+                continue
+
+            if not _is_retryable(outcome):
+                return outcome
+            outcome.decisions.append("retry:transport" if outcome.error else "retry:5xx")
+            trail = list(outcome.decisions)
             await asyncio.sleep(self._settings.retry_backoff * (2 ** (i - 1)))
         return outcome
 
-    def _should_escalate(self, outcome: FetchOutcome) -> bool:
+    def _escalation_reason(self, outcome: FetchOutcome) -> str | None:
+        """需要升级 L2 时返回原因标签；不需要返回 None。"""
         if not self._settings.l2_enabled or outcome.error:
-            return False
+            return None
         if outcome.blocked == "none":
             # 没被判成拦截页，但大 HTML 榨不出可见文本时仍是骨架页/登录墙：
             # 这类页面（如 LinkedIn）只有浏览器把 JS 跑起来才有正文
-            return looks_like_shell(outcome.html)
-        return outcome.blocked not in _NO_ESCALATE
+            return "shell" if looks_like_shell(outcome.html) else None
+        if outcome.blocked in _NO_ESCALATE:
+            return None
+        return outcome.blocked
 
     async def _fetch_l1(
         self,
@@ -156,6 +200,7 @@ class Fetcher:
             html=resp.text,
             elapsed_ms=resp.elapsed_ms,
             cached=resp.cached,
+            retry_after=resp.retry_after,
         )
 
     async def _fetch_l2(
@@ -171,6 +216,12 @@ class Fetcher:
         browser = self._get_browser()
         result = await browser.render(url, host, wait_for=wait_for, scroll=scroll, click=click)
         elapsed = l1.elapsed_ms + result.elapsed_ms
+        l2_diag = {
+            "wait_for_hit": result.wait_for_hit,
+            "clicked": result.clicked,
+            "scroll_rounds": result.scroll_rounds,
+            "error": result.error,
+        }
 
         if not result.ok:
             # 浏览器没跑起来/渲染失败：正文仍是 L1 的，只把原因如实挂上去，tier 保持 l1
@@ -180,6 +231,8 @@ class Fetcher:
                 elapsed_ms=elapsed,
                 session_loaded=browser.has_session(host),
                 notes=[*l1.notes, *result.notes],
+                decisions=[*l1.decisions, "l2_failed"],
+                l2=l2_diag,
             )
 
         blocked, reason = detect_block(result.status, result.html)
@@ -196,7 +249,11 @@ class Fetcher:
             elapsed_ms=elapsed,
             session_loaded=browser.has_session(host),
             login_required=login_required,
+            attempts=l1.attempts,
             notes=result.notes,
+            retry_after=l1.retry_after,
+            decisions=[*l1.decisions, "l2_ok"],
+            l2=l2_diag,
         )
 
     async def login(self, url: str, timeout: float | None = None) -> dict:

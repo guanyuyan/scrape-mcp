@@ -44,11 +44,11 @@ async def call(session: ClientSession, name: str, arguments: dict) -> dict:
     return json.loads(res.content[0].text)
 
 
-async def run_fetch(session, url: str) -> None:
+async def run_fetch(session, url: str) -> bool:
     r = await call(session, "web_fetch", {"url": url, "max_tokens": 4000})
     if not r.get("ok"):
         print(f"  [错误] {r.get('error')} blocked={r.get('blocked')}")
-        return
+        return False
     ratio = 0.0
     if r.get("html_bytes"):
         ratio = 1.0 * r.get("token_estimate", 0) * 4 / r["html_bytes"]
@@ -61,9 +61,10 @@ async def run_fetch(session, url: str) -> None:
         print(f"  标题: {title}")
     snippet = (r.get("content") or "").replace("\n", " ").strip()
     print(f"  正文预览: {snippet[:90]}...")
+    return True
 
 
-async def run_extract(session, url: str) -> None:
+async def run_extract(session, url: str) -> bool:
     schema = {
         "fields": {
             "heading": {"selector": "h1", "type": "text"},
@@ -74,10 +75,11 @@ async def run_extract(session, url: str) -> None:
     r = await call(session, "web_extract", {"url": url, "schema": schema})
     if not r.get("ok"):
         print(f"  [错误] {r.get('error')}")
-        return
+        return False
     print(
         f"  ok={r.get('ok')} tier={r.get('tier')} data={json.dumps(r.get('data'), ensure_ascii=False)}"
     )
+    return True
 
 
 async def main() -> None:
@@ -86,13 +88,19 @@ async def main() -> None:
         args=["-m", "scrape_mcp.server"],
         env={"PYTHONPATH": "src", "SCRAPE_MCP_TRANSPORT": "stdio"},  # stdio，无需手工起 HTTP 服务
     )
+    ok_count = 0
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         for page in DEMO_PAGES:
             print(f"\n=== {page['label']} | {page['url']}")
-            await run_fetch(session, page["url"])
+            if await run_fetch(session, page["url"]):
+                ok_count += 1
             # 顺便演示 web_extract（同一页面）
             await run_extract(session, page["url"])
+    # 全部站点都失败说明整条链路有问题（夜间回归据此报错）；个别失败多半是站点改版/临时风控
+    if ok_count == 0:
+        print("\n[失败] 所有演示站点均未取到正文")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

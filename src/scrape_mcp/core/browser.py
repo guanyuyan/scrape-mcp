@@ -98,6 +98,10 @@ class BrowserOutcome:
     elapsed_ms: int
     error: str | None = None
     notes: list[str] = field(default_factory=list)
+    # 交互诊断：None 表示未请求该项，False 表示请求了但没成功
+    wait_for_hit: bool | None = None
+    clicked: bool | None = None
+    scroll_rounds: int = 0
 
 
 class BrowserRenderer:
@@ -240,6 +244,9 @@ class BrowserRenderer:
 
         page = await context.new_page()
         notes: list[str] = []
+        wait_for_hit: bool | None = None
+        clicked: bool | None = None
+        scroll_rounds = 0
         try:
             resp = await page.goto(
                 url,
@@ -247,7 +254,9 @@ class BrowserRenderer:
                 timeout=self._s.l2_navigate_timeout * 1000,
             )
             status = resp.status if resp is not None else 0
-            await self._interact(page, wait_for=wait_for, scroll=scroll, click=click, notes=notes)
+            wait_for_hit, clicked, scroll_rounds = await self._interact(
+                page, wait_for=wait_for, scroll=scroll, click=click, notes=notes
+            )
             html = await self._settle(page)
             return BrowserOutcome(
                 ok=True,
@@ -257,6 +266,9 @@ class BrowserRenderer:
                 html=html,
                 elapsed_ms=_ms(t0),
                 notes=notes,
+                wait_for_hit=wait_for_hit,
+                clicked=clicked,
+                scroll_rounds=scroll_rounds,
             )
         except Exception as exc:
             return BrowserOutcome(
@@ -268,6 +280,9 @@ class BrowserRenderer:
                 elapsed_ms=_ms(t0),
                 error=f"{type(exc).__name__}: {exc}",
                 notes=notes,
+                wait_for_hit=wait_for_hit,
+                clicked=clicked,
+                scroll_rounds=scroll_rounds,
             )
         finally:
             with contextlib.suppress(Exception):
@@ -281,20 +296,29 @@ class BrowserRenderer:
         scroll: bool,
         click: str | None,
         notes: list[str],
-    ) -> None:
+    ) -> tuple[bool | None, bool | None, int]:
         """渲染后的可选交互：等节点、点"加载更多"、滚动触发懒加载。
 
         每一环失败都不致命：只记录到 notes 并继续，避免因页面改版导致整次抓取失败。
+        返回 (wait_for 是否命中, 是否点击成功, 实际滚动轮数) 供诊断使用。
         """
+        wait_for_hit: bool | None = None
+        clicked: bool | None = None
+        scroll_rounds = 0
+
         if wait_for:
+            wait_for_hit = False
             try:
                 await page.wait_for_selector(wait_for, timeout=self._s.l2_navigate_timeout * 1000)
+                wait_for_hit = True
             except Exception:
                 notes.append(f"wait_for 未命中: {wait_for}")
         if click:
+            clicked = False
             try:
                 await page.click(click, timeout=5000)
                 await page.wait_for_timeout(300)
+                clicked = True
             except Exception:
                 notes.append(f"click 未命中: {click}")
         if scroll:
@@ -303,7 +327,9 @@ class BrowserRenderer:
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 except Exception:
                     break
+                scroll_rounds += 1
                 await page.wait_for_timeout(self._s.l2_scroll_delay_ms)
+        return wait_for_hit, clicked, scroll_rounds
 
     # ---------- 登录（M3） ----------
 

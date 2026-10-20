@@ -19,14 +19,15 @@ class HttpCache:
         self._path = Path(os.path.expanduser(data_dir)).resolve() / "http"
         self._ttl = ttl
 
-    def get(self, url: str) -> dict[str, Any] | None:
+    def get(self, url: str, *, allow_stale: bool = False) -> dict[str, Any] | None:
+        """读取缓存。allow_stale=True 时忽略 TTL，用于拿过期条目的 ETag/Last-Modified 做条件请求。"""
         if self._ttl <= 0:
             return None
         rec = self._read(url)
         if not rec:
             return None
         # 过期即视作未命中（不做主动清理，靠写入覆盖）
-        if time.time() - rec["ts"] > self._ttl:
+        if not allow_stale and time.time() - rec["ts"] > self._ttl:
             return None
         return rec["data"]
 

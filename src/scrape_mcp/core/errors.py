@@ -37,6 +37,33 @@ HTTP_5XX = "http_5xx"
 EMPTY = "empty"
 UNKNOWN = "unknown"
 
+# 协议中对外承诺的全部错误码（只增不改），用于契约测试与文档同步
+ALL_CODES = (
+    OK,
+    INVALID_URL,
+    INVALID_ARGUMENT,
+    DENIED,
+    ROBOTS_DISALLOWED,
+    LOGIN_REQUIRED,
+    BLOCKED,
+    TIMEOUT,
+    DNS,
+    TLS,
+    CONNECTION,
+    HTTP_4XX,
+    HTTP_5XX,
+    EMPTY,
+    UNKNOWN,
+)
+
+# "过一会儿再试可能成功"的错误码。拦截/登录墙/被拒绝重试无意义，不计入
+_RETRYABLE_CODES = frozenset({TIMEOUT, DNS, CONNECTION, TLS, HTTP_5XX, UNKNOWN})
+
+
+def is_retryable(code: str) -> bool:
+    """调用方是否值得稍后重试。与抓取层内部的重试策略分开表达，避免调用方猜。"""
+    return code in _RETRYABLE_CODES
+
 
 def classify_message(message: str | None) -> str:
     """按异常文本推断错误码（网络异常没有结构化类型，只能靠关键词）。"""

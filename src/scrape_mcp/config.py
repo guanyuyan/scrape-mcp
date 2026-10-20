@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # ---- M4 缓存与批量 ----
     # L1 明文响应磁盘缓存 TTL（秒）；0 表示关闭。只缓存判定的正常 HTML 页
-    cache_ttl: int = 300
+    cache_ttl: float = 300
     # web_batch 单批并发上限
     batch_max_concurrency: int = 4
     batch_max_urls: int = 20
@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     # 仅对网络异常与 5xx 生效；429/403 属反爬信号，同层重试通常无效，交给分级降级处理
     retry_times: int = 2
     retry_backoff: float = 0.5
+    # 429/503 带 Retry-After 时，最多等多少秒再做一次有界重试；0=不等待，仅在载荷中返回 retry_after_s
+    retry_after_max_wait: float = 0.0
+
+    # ---- 可观测 ----
+    # 日志级别（JSON 行输出到 stderr；stdio 模式下 stdout 必须保持干净）
+    log_level: str = "WARNING"
 
     # ---- 阶段 0 合规（责任边界）----
     # 默认遵循目标站 robots.txt；拉取不到规则时视为允许（不因拿不到而阻断可用性）
