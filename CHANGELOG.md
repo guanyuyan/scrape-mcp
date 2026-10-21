@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.7.0] - 2026-10-21
 
 ### Added
 - **正文与抽取结果缓存**：`web_fetch` / `web_extract` 在 HTTP 缓存之外再加一层结果缓存（`<DATA_DIR>/results/`），命中后网络、渲染、解析全部跳过，只读缓存返回；`bypass_cache=true` 同时绕过两层，`debug=true` 与自定义 `headers`/`cookies` 不入缓存。两层共用 `CACHE_TTL`（默认 300 秒，`0` 全关）
