@@ -7,7 +7,13 @@
         "selector": "article.Box-row",
         "type": "list",
         "fields": {
-          "name": {"selector": "h2 a"},
+          "name": {
+            "selector": "h2 a",
+            "type": "attr",
+            "attr": "href",
+            "regex": "(?:https?://[^/]+)?/([^/?]+/[^/?]+)/?$",
+            "group": 1
+          },
           "url": {"selector": "h2 a", "type": "attr", "attr": "href", "abs_url": true},
           "stars_today": {"selector": "span.d-inline-block.float-sm-right"},
           "language": {"selector": "span[itemprop=\"programmingLanguage\"]"},
