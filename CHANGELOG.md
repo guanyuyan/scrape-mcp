@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.5.0] - 2026-10-21
 
 ### Added
 - **PDF 文本抽取（可选能力）**：`pip install "mcp-scrape[pdf]"` 后，`web_fetch` 直接返回 PDF 文本（`kind="pdf"`，带 `pages` / `pages_parsed`）；按页兜底，扫描件无文字层时返回 `empty`，未装 extra 时返回 `unsupported_content` 并给出安装提示
