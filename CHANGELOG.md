@@ -7,6 +7,8 @@
 ### Added
 - **正文与抽取结果缓存**：`web_fetch` / `web_extract` 在 HTTP 缓存之外再加一层结果缓存（`<DATA_DIR>/results/`），命中后网络、渲染、解析全部跳过，只读缓存返回；`bypass_cache=true` 同时绕过两层，`debug=true` 与自定义 `headers`/`cookies` 不入缓存。两层共用 `CACHE_TTL`（默认 300 秒，`0` 全关）
 - **基准套件**：`scripts/bench.py` 输出冷/热 p50/p95、加速比与 token 数，`--l2` 额外测量浏览器冷启动与复用；README 增加可复现的实测表
+- **L1 连接复用**：同一指纹模板在进程内共享 `curl_cffi` 会话与连接池，省掉每次请求重复的 TLS 握手与 DNS 解析；换事件循环自动重建，`aclose()` 统一释放
+- **`/stats` 端点**：HTTP 模式下 `GET /stats` 返回进程内计数（总请求、分层/错误码/内容形态分布、两层缓存命中、返回 token 与入站字节），只接受回环地址访问；只记计数不记 URL 与页面内容
 
 ## [0.6.0] - 2026-10-21
 

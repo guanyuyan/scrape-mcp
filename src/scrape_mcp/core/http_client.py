@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -74,6 +76,29 @@ class HttpClient:
     def __init__(self, settings: Settings) -> None:
         self._s = settings
         self._cache = HttpCache(settings.data_dir, settings.cache_ttl)
+        # 指纹模板 → (创建时的事件循环, 会话)。同一指纹共用连接池，省 TLS 握手与 DNS 解析
+        self._sessions: dict[str, tuple[asyncio.AbstractEventLoop, AsyncSession]] = {}
+
+    def _session(self, impersonate: str) -> AsyncSession:
+        """取复用会话；换事件循环（多次 asyncio.run）时丢弃旧会话重建。
+
+        curl_cffi 的 AsyncSession 绑定创建时的事件循环，跨循环复用会报错，
+        因此这里以"同一循环内复用"为边界。
+        """
+        loop = asyncio.get_running_loop()
+        cached = self._sessions.get(impersonate)
+        if cached is not None and cached[0] is loop:
+            return cached[1]
+        session = AsyncSession(impersonate=impersonate)
+        self._sessions[impersonate] = (loop, session)
+        return session
+
+    async def aclose(self) -> None:
+        """关闭所有连接池；可重复调用，关闭失败不影响进程退出。"""
+        sessions, self._sessions = self._sessions, {}
+        for _loop, session in sessions.values():
+            with suppress(Exception):
+                await session.close()
 
     async def get(
         self,
@@ -114,15 +139,15 @@ class HttpClient:
             if stale.get("last_modified"):
                 merged["If-Modified-Since"] = stale["last_modified"]
         try:
-            async with AsyncSession(impersonate=impersonate or self._s.impersonate) as session:
-                resp = await session.get(
-                    url,
-                    headers=merged,
-                    cookies=cookies or None,
-                    timeout=timeout or self._s.request_timeout,
-                    proxy=proxy or self._s.proxy,
-                    allow_redirects=True,
-                )
+            session = self._session(impersonate or self._s.impersonate)
+            resp = await session.get(
+                url,
+                headers=merged,
+                cookies=cookies or None,
+                timeout=timeout or self._s.request_timeout,
+                proxy=proxy or self._s.proxy,
+                allow_redirects=True,
+            )
         except Exception as exc:  # 网络层是系统边界，需要兜住所有传输异常
             return HttpResponse(
                 ok=False,

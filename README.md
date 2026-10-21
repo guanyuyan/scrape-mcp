@@ -96,6 +96,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 ## 特性
 
 - **分级抓取**：L1 `curl_cffi` → L2 Playwright，拦截才升级，不误伤正常页面。
+- **L1 连接复用**：同一指纹模板在进程内共享连接池，省掉重复的 TLS 握手与 DNS 解析；换事件循环自动重建，进程退出或 `aclose()` 统一释放。
 - **内容密度选根**：从 article/main/div 中挑出"恰好装住正文的最紧容器"，避开导航/侧栏。
 - **compact 精简**：属性剥离、模板块丢弃、站外链接降级、表格转 CSV（合并单元格自动补齐空位）、
   代码块带语言标记、`figure` 输出图片地址与图注，压缩率可达 1~20% 数量级（如 MDN 214KB → 数百 token）。
@@ -190,6 +191,17 @@ python -m scrape_mcp.server
 
 以 `json_response=1`（默认）启动，请求/响应都是普通 JSON（非事件流）。**stateless 模式无需先 `initialize`，直接发 `tools/call` 即可。**
 健康检查：`GET /healthz` 返回版本与关键开关，可用于容器探针/网关巡检。
+
+本地统计：`GET /stats` 返回进程内计数，只接受回环地址访问（其它来源返回 403）：
+
+```bash
+curl http://127.0.0.1:8000/stats
+# {"ok":true,"uptime_s":42,"requests":7,"fetches":5,"result_cache_hits":2,
+#  "http_cache_hits":1,"cache_hit_rate":0.286,"by_tier":{"l1":4,"l2":1},
+#  "by_code":{"ok":5},"by_kind":{"html":5},"tokens_returned":8120,"bytes_in":1048576}
+```
+
+`by_tier` 是实际生效的层级分布，`by_code` 复用工具返回的错误码（成功为 `ok`），`cache_hit_rate` 是结果缓存命中数 ÷ 总请求数。统计只记计数与字节数，不记 URL、不记页面内容，进程重启后归零。
 
 必需项：请求头 `MCP-Method`、`Mcp-Name`；body 内 `params` 需带 `_meta`（`protocolVersion` + `clientCapabilities`）。完整示例见下。
 
@@ -475,12 +487,12 @@ python scripts/bench.py --l2 https://news.qq.com/    # 额外看浏览器开销
 ```
 
 "冷" = `bypass_cache=true`（走网络 + 精简），"热" = 普通调用（命中正文缓存）。
-2026-10 实测（Windows 11 / 家宽直连，`rounds=3`，`max_tokens=4000`）：
+2026-10 实测（Windows 11 / 家宽直连，`rounds=5`，`max_tokens=4000`）：
 
 | 页面 | 层级 | 冷 p50 | 热 p50 | 提升 | token |
 | --- | --- | --- | --- | --- | --- |
-| example.com | L2 | 974 ms | 1.2 ms | ~840× | 330 |
-| docs.python.org（asyncio-task） | L1 | 1.67 s | 1.2 ms | ~1340× | 3588 |
+| example.com | L2 | 495 ms | 1.4 ms | ~360× | 330 |
+| docs.python.org（asyncio-task） | L1 | 681 ms | 1.0 ms | ~650× | 3588 |
 
 L2 浏览器：进程内首次调用 ≈3.5 s（含启动），复用 p50 ≈1.8 s。
 网络与目标站状态会明显影响绝对值，重点看同一台机器上的冷热对比。
@@ -515,6 +527,7 @@ src/scrape_mcp
 │   ├── session.py     # 登录态持久化（多会话 + cookie 导入导出）
 │   ├── recipes.py     # 站点 recipe（按 host 最长后缀匹配、mtime 重载）
 │   ├── cache.py       # HTTP 响应缓存 + 正文/抽取结果缓存
+│   ├── stats.py       # 进程内计数（/stats 端点数据源）
 │   ├── errors.py      # 统一错误码
 │   └── hostlimit.py   # 同域并发闸门
 └── extract/

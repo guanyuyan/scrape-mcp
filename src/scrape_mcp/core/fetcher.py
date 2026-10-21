@@ -67,6 +67,7 @@ class Fetcher:
         if self._browser is not None:
             await self._browser.aclose()
             self._browser = None
+        await self._http.aclose()
 
     async def fetch(
         self,

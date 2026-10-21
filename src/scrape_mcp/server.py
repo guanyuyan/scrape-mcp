@@ -24,6 +24,7 @@ from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
 from .core.session import SessionStore, normalize_session
+from .core.stats import get_stats
 from .extract.compact import LINK_POLICIES, compact_html
 from .extract.links import extract_links, next_link
 from .extract.pdf import PdfError, pdf_pages
@@ -107,6 +108,7 @@ def _cache_hit(cache: ResultCache, key: str) -> dict | None:
     payload = cache.get(key)
     if payload is None:
         return None
+    get_stats().record_result_hit()
     payload["cached"] = True
     payload["elapsed_ms"] = max(1, int((time.perf_counter() - started) * 1000))
     return payload
@@ -216,6 +218,19 @@ async def healthz(_request) -> JSONResponse:
     )
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
+
+
+@mcp.custom_route("/stats", methods=["GET"])
+async def stats_endpoint(request) -> JSONResponse:
+    """进程内统计：请求数、分层/错误码分布、缓存命中率。只接受本机回环访问。"""
+    client = getattr(request, "client", None)
+    host = (getattr(client, "host", "") or "").lower()
+    if host not in _LOOPBACK_HOSTS:
+        return JSONResponse({"ok": False, "error": "仅允许本机访问"}, status_code=403)
+    return JSONResponse(get_stats().snapshot())
+
+
 # 大页面 + 极小正文 → 疑似 JS 登录墙/骨架页，加 note 提示（不判失败，避免误杀超短正文）。
 # 与 detector._SHELL_MIN_HTML 对齐到 30KB：60KB 澎湃首页这类"挺大却榨不出正文"也要能提示。
 LOW_CONTENT_HTML_BYTES = 30_000
@@ -271,6 +286,7 @@ async def _fetch_html(
             session=session,
         )
 
+    code = errors.classify_outcome(outcome)
     log_event(
         "fetch",
         url=url,
@@ -279,11 +295,17 @@ async def _fetch_html(
         ms=outcome.elapsed_ms,
         attempts=outcome.attempts,
         cached=outcome.cached,
-        code=errors.classify_outcome(outcome),
+        code=code,
+    )
+    get_stats().record_fetch(
+        tier=outcome.tier,
+        code=code,
+        kind=outcome.kind,
+        cached=outcome.cached,
+        html_bytes=len(outcome.html),
     )
 
     if outcome.error:
-        code = errors.classify_outcome(outcome)
         return None, {
             "ok": False,
             "url": url,
@@ -504,8 +526,10 @@ async def _fetch_dict(
     budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
     if outcome.kind != "html":
         payload = _plain_payload(outcome, url, budget, fmt)
-        if cache is not None and payload.get("ok"):
-            cache.put(key, payload)
+        if payload.get("ok"):
+            get_stats().record_tokens(payload.get("token_estimate", 0))
+            if cache is not None:
+                cache.put(key, payload)
         return payload
     result = compact_html(
         outcome.html,
@@ -567,6 +591,8 @@ async def _fetch_dict(
 
     if cache is not None and payload.get("ok"):
         cache.put(key, payload)
+    if payload.get("ok"):
+        get_stats().record_tokens(payload["token_estimate"])
     return payload
 
 

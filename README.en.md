@@ -93,6 +93,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 ## Features
 
 - **Tiered fetching**: L1 `curl_cffi` → L2 Playwright, escalating only when blocked.
+- **L1 connection reuse**: one connection pool per fingerprint template inside the process, skipping repeated TLS handshakes and DNS lookups; rebuilt automatically when the event loop changes, released on shutdown or `aclose()`.
 - **Content-density root picking**: chooses the tightest container that still holds the whole body, avoiding nav/sidebars.
 - **Compact output**: attribute stripping, boilerplate removal, off-site link demotion, tables to CSV (merged cells padded), fenced code blocks with language tags, `figure` images with absolute URLs plus captions. Compression typically 1%–20% (e.g. MDN 214 KB → a few hundred tokens).
 - **Honest blocking reports**: challenge pages and empty shells are never treated as content; you get `blocked` / `block_reason`.
@@ -185,6 +186,17 @@ python -m scrape_mcp.server
 It starts with `json_response=1` (the default), so requests and responses are plain JSON rather than streams. **In stateless mode there is no `initialize` handshake — send `tools/call` directly.**
 
 Health check: `GET /healthz` returns the version and key switches, suitable for container probes.
+
+Local stats: `GET /stats` returns in-process counters and only answers loopback clients (anything else gets 403):
+
+```bash
+curl http://127.0.0.1:8000/stats
+# {"ok":true,"uptime_s":42,"requests":7,"fetches":5,"result_cache_hits":2,
+#  "http_cache_hits":1,"cache_hit_rate":0.286,"by_tier":{"l1":4,"l2":1},
+#  "by_code":{"ok":5},"by_kind":{"html":5},"tokens_returned":8120,"bytes_in":1048576}
+```
+
+`by_tier` is the tier that actually ran, `by_code` reuses the tool error codes (`ok` on success), and `cache_hit_rate` is result-cache hits over total requests. Only counters and byte sizes are kept — no URLs, no page content — and everything resets on restart.
 
 Required: headers `MCP-Method`, `Mcp-Name`; the body's `params` must include `_meta` (`protocolVersion` + `clientCapabilities`).
 
@@ -467,12 +479,12 @@ python scripts/bench.py --l2 https://news.qq.com/    # also measure browser cost
 ```
 
 "Cold" means `bypass_cache=true` (network + compaction); "warm" is a normal call that hits the content cache.
-Measured in 2026-10 on Windows 11 over a home connection (`rounds=3`, `max_tokens=4000`):
+Measured in 2026-10 on Windows 11 over a home connection (`rounds=5`, `max_tokens=4000`):
 
 | Page | Tier | Cold p50 | Warm p50 | Speedup | Tokens |
 | --- | --- | --- | --- | --- | --- |
-| example.com | L2 | 974 ms | 1.2 ms | ~840× | 330 |
-| docs.python.org (asyncio-task) | L1 | 1.67 s | 1.2 ms | ~1340× | 3588 |
+| example.com | L2 | 495 ms | 1.4 ms | ~360× | 330 |
+| docs.python.org (asyncio-task) | L1 | 681 ms | 1.0 ms | ~650× | 3588 |
 
 L2 browser: first call in a process ≈3.5 s (including launch), reused p50 ≈1.8 s.
 Absolute numbers depend heavily on network and target site; the cold-vs-warm ratio on one machine is what matters.
@@ -507,6 +519,7 @@ src/scrape_mcp
 │   ├── session.py     # Session persistence (named sessions + cookie import/export)
 │   ├── recipes.py     # Site recipes (longest-suffix match, mtime reload)
 │   ├── cache.py       # HTTP response cache + content/extraction result cache
+│   ├── stats.py       # In-process counters (source for /stats)
 │   ├── errors.py      # Stable error codes
 │   └── hostlimit.py   # Per-host concurrency gate
 └── extract/
