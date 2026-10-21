@@ -535,6 +535,7 @@ python scripts/bench_sites.py --nightly                # 夜间回归子集
 python scripts/bench_sites.py --category docs,list     # 按分类过滤
 python scripts/bench_sites.py --json out.json --md out.md
 python scripts/bench_sites.py --baseline out.json      # 与上次结果对比
+python scripts/bench_sites.py --nightly --baseline benchmarks/baseline.json  # 与仓库基线对比
 pip install trafilatura                                # 可选：对照第三方正文抽取器
 python scripts/bench_sites.py --reference trafilatura
 ```
@@ -548,9 +549,12 @@ python scripts/bench_sites.py --reference trafilatura
 输出包含通过率、取正文率、拦截符合率、完整度、token、p50/p95 延迟与分层分布，可写 JSON / Markdown 留档。
 `--baseline` 会按站点对比上次结果，并把正文字符下降超过 20% 的站点标为退化。
 
+仓库里保留一份夜间子集基线 [benchmarks/baseline.json](benchmarks/baseline.json)，首次记录于 2026-10-21（10/10 通过，p50 453 ms / p95 2813 ms）。它只覆盖夜间子集，用于看趋势，不代表全量站点通过率；每月挑一次夜间结果更新：下载当次 `bench-sites.json`，把 `sites_file` 改为相对路径、补上 `source` 字段后替换该文件。
+
 **本机实测（2026-10-21，24 站）**：通过 18/24，完整度 17/19，拦截符合 3/3，延迟 p50 2809 ms / p95 9294 ms。
 未通过的 6 项里，5 项是本机网络不可达（MDN / GitHub / Hacker News / V2EX / arXiv 超时），1 项被站点拦截（Stack Overflow 返回 `blocked`）；
 这些站点在 GitHub 网络的夜间任务里会重新跑，结果以 `site-quality-<run_id>` 工件为准。
+CI 夜间基线（2026-10-21，修复 PDF 依赖后）：通过 10/10，取正文 9/9，完整度 10/10，p50 453 ms / p95 2813 ms。
 
 | 站点 | 分类 | 层级 | 结果 | 字符 | token | 完整度 | 耗时 |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
@@ -598,7 +602,8 @@ curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 
 ```
 benchmarks/
-└── sites.json         # 真实站点质量基准站点集（分层、期望结果、完整性检查项）
+├── sites.json         # 真实站点质量基准站点集（分层、期望结果、完整性检查项）
+└── baseline.json      # 夜间子集基线（趋势参照，每月更新）
 src/scrape_mcp
 ├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/login/session_*）
 ├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）

@@ -130,3 +130,16 @@ def test_render_markdown_includes_reference_ratio():
 def test_sites_json_is_utf8_json():
     data = json.loads((ROOT / "benchmarks" / "sites.json").read_text(encoding="utf-8"))
     assert data["version"] == 1
+
+
+def test_baseline_matches_corpus_and_schema():
+    baseline = json.loads((ROOT / "benchmarks" / "baseline.json").read_text(encoding="utf-8"))
+    corpus_ids = {s["id"] for s in bench.load_sites(ROOT / "benchmarks" / "sites.json")}
+    record_ids = {r["id"] for r in baseline["records"]}
+    assert record_ids
+    assert record_ids <= corpus_ids
+    assert baseline["source"].startswith("nightly run")
+    assert baseline["sites_file"] == "benchmarks/sites.json"
+    assert baseline["summary"]["sites"] == len(baseline["records"])
+    for record in baseline["records"]:
+        assert {"chars", "tokens", "ok"} <= set(record)

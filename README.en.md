@@ -526,6 +526,7 @@ python scripts/bench_sites.py --nightly                # nightly subset
 python scripts/bench_sites.py --category docs,list     # filter by category
 python scripts/bench_sites.py --json out.json --md out.md
 python scripts/bench_sites.py --baseline out.json      # compare with the previous run
+python scripts/bench_sites.py --nightly --baseline benchmarks/baseline.json  # compare with the repo baseline
 pip install trafilatura                                # optional: compare with a text-only extractor
 python scripts/bench_sites.py --reference trafilatura
 ```
@@ -539,9 +540,12 @@ The corpus lives in [benchmarks/sites.json](benchmarks/sites.json) and is groupe
 The output covers pass rate, fetch rate, interception rate, completeness, tokens, p50/p95 latency and tier distribution, and can be saved as JSON / Markdown.
 `--baseline` compares per site with a previous run and flags a regression when content characters drop by more than 20%.
 
+The repo keeps a nightly-subset baseline in [benchmarks/baseline.json](benchmarks/baseline.json), first recorded on 2026-10-21 (10/10 passed, p50 453 ms / p95 2813 ms). It only covers the nightly subset and is meant for trend checking, not as the pass rate of the full corpus. Update it monthly: download a `bench-sites.json`, set `sites_file` to a relative path, add a `source` field, and replace the file.
+
 **Local run (2026-10-21, 24 sites)**: 18/24 passed, completeness 17/19, interception 3/3, latency p50 2809 ms / p95 9294 ms.
 Of the 6 failures, 5 were unreachable from the local network (MDN / GitHub / Hacker News / V2EX / arXiv timed out) and 1 was blocked by the site (Stack Overflow returned `blocked`).
 The nightly job reruns these sites on GitHub's network; its `site-quality-<run_id>` artifact is the durable record.
+Nightly baseline (2026-10-21, after fixing the PDF dependency): 10/10 passed, 9/9 content fetched, 10/10 completeness, p50 453 ms / p95 2813 ms.
 
 `--reference trafilatura` only counts plain body text; this tool keeps headings, lists and links, so token counts are not directly equivalent — treat them as an order-of-magnitude check.
 
@@ -562,7 +566,8 @@ curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 
 ```
 benchmarks/
-└── sites.json         # Real-site quality corpus (tiers, expected outcome, completeness checks)
+├── sites.json         # Real-site quality corpus (tiers, expected outcome, completeness checks)
+└── baseline.json      # Nightly-subset baseline for trend checks (updated monthly)
 src/scrape_mcp
 ├── server.py          # MCP entry + tools (web_fetch/web_extract/web_batch/web_crawl/login/session_*)
 ├── cli.py             # Subcommands: init (client config) / schema (export tool definitions)
