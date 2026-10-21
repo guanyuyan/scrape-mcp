@@ -1,7 +1,8 @@
-"""HTTP 响应磁盘缓存（M4）：按 URL 缓存 L1 明文响应，命中即跳过网络。
+"""磁盘缓存：HTTP 响应（M4）+ 最终结果（正文/抽取）。
 
-只为 GET 类公开页加速重复抓取；detector + compact 依旧重跑（毫秒级），
-保证反爬判定与精简逻辑始终基于最新页面结构。
+HTTP 层按 URL 缓存 L1 明文响应，命中即跳过网络；结果层缓存的是 compact/extract
+之后的载荷，命中后连网络与解析一起跳过。两层都用 `cache_ttl` 统一控制
+（0 表示全部关闭），调用方的 `bypass_cache=True` 会同时绕过两层。
 """
 
 from __future__ import annotations
@@ -59,3 +60,46 @@ class HttpCache:
         safe_host = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in host)
         digest = hashlib.md5(url.encode("utf-8")).hexdigest()[:16]
         return self._path / safe_host / f"{digest}.json"
+
+
+class ResultCache:
+    """最终结果缓存：正文（compact 后）与字段抽取结果。
+
+    key 由调用方拼成，必须包含全部影响结果的参数（URL、格式、预算、schema 等），
+    否则会跨参数串味。命中后直接返回载荷，网络、渲染、解析全部跳过。
+    """
+
+    def __init__(self, root: str | Path, ttl: float, namespace: str) -> None:
+        self._path = Path(os.path.expanduser(str(root))).resolve() / namespace
+        self._ttl = ttl
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        if self._ttl <= 0:
+            return None
+        try:
+            with self._file_for(key).open("r", encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(rec, dict) or not isinstance(rec.get("data"), dict):
+            return None
+        try:
+            fresh = time.time() - float(rec["ts"]) <= self._ttl
+        except (KeyError, TypeError, ValueError):
+            return None
+        return rec["data"] if fresh else None
+
+    def put(self, key: str, data: dict[str, Any]) -> None:
+        if self._ttl <= 0:
+            return
+        try:
+            fp = self._file_for(key)
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            with fp.open("w", encoding="utf-8") as f:
+                json.dump({"ts": time.time(), "data": data}, f, ensure_ascii=False)
+        except (OSError, TypeError):
+            pass  # 缓存写失败不影响主流程
+
+    def _file_for(self, key: str) -> Path:
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+        return self._path / f"{digest}.json"

@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     accept_language: str = "zh-CN,zh;q=0.9,en;q=0.8"
 
     # ---- M4 缓存与批量 ----
-    # L1 明文响应磁盘缓存 TTL（秒）；0 表示关闭。只缓存判定的正常 HTML 页
+    # 两层缓存 TTL（秒）；0 表示全关。HTTP 层只缓存可判定的正常 HTML 页，
+    # 结果层只缓存成功载荷（正文/抽取），失败与调试结果不入缓存
     cache_ttl: float = 300
     # web_batch 单批并发上限
     batch_max_concurrency: int = 4

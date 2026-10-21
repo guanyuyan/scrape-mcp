@@ -103,7 +103,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **稳定错误码 + 可诊断**：失败返回 `error_code` 与 `retryable`，`debug=true` 还能看到分层决策、选择器命中数与 L2 交互结果。
 - **登录态持久化 + 多会话**：`login` 工具手动登录并落盘，`web_fetch` 自动带上；`session="work"` 可按身份隔离登录态，`session_export`/`session_import` 在机器之间搬运 cookie。
 - **非 HTML 内容**：`web_fetch` 直接读纯文本；装 `[pdf]` extra 后按页抽取 PDF 文本，扫描件（无文字层）如实返回 `empty`，不伪造正文。
-- **缓存与批量**：L1 明文响应按 TTL 磁盘缓存，过期后带 `ETag`/`Last-Modified` 做条件请求；`web_batch` 并发抓取一批 URL。
+- **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。
 - **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`。
 - **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
@@ -164,7 +164,7 @@ cp .env.example .env    # 生成配置模板
 | `DATA_DIR` | `~/.scrape_mcp` | 登录态/缓存放盘目录 |
 | `RECIPES_DIR` | `<DATA_DIR>/recipes` | 站点 recipe 目录；留空用默认路径 |
 | `PDF_MAX_PAGES` | `200` | PDF 单次最多解析页数（超出部分不抽取，`pages` 仍返回总页数） |
-| `CACHE_TTL` | `300` | L1 缓存 TTL（秒），`0` 关闭；过期后带 `ETag`/`Last-Modified` 做条件请求 |
+| `CACHE_TTL` | `300` | 两层缓存 TTL（秒），`0` 全关；HTTP 层过期后带 `ETag`/`Last-Modified` 做条件请求，正文/抽取结果层命中即直接返回 |
 | `RETRY_TIMES` | `2` | 网络异常/5xx 重试次数（429/403 不重试） |
 | `RETRY_BACKOFF` | `0.5` | 重试退避基数（秒，指数增长） |
 | `RETRY_AFTER_MAX_WAIT` | `0` | 429/503 带 `Retry-After` 时最多等待秒数；`0` 只上报不等待 |
@@ -467,6 +467,24 @@ python examples/03_crawl_docs.py --max-pages 5 --out docs.md
 
 另有 `examples/example_client.py`（MCP 客户端调用示例）与 `examples/recipes/*.json`（站点 recipe）。
 
+## 基准
+
+```bash
+python scripts/bench.py                              # 冷/热对照
+python scripts/bench.py --l2 https://news.qq.com/    # 额外看浏览器开销
+```
+
+"冷" = `bypass_cache=true`（走网络 + 精简），"热" = 普通调用（命中正文缓存）。
+2026-10 实测（Windows 11 / 家宽直连，`rounds=3`，`max_tokens=4000`）：
+
+| 页面 | 层级 | 冷 p50 | 热 p50 | 提升 | token |
+| --- | --- | --- | --- | --- | --- |
+| example.com | L2 | 974 ms | 1.2 ms | ~840× | 330 |
+| docs.python.org（asyncio-task） | L1 | 1.67 s | 1.2 ms | ~1340× | 3588 |
+
+L2 浏览器：进程内首次调用 ≈3.5 s（含启动），复用 p50 ≈1.8 s。
+网络与目标站状态会明显影响绝对值，重点看同一台机器上的冷热对比。
+
 ## Docker
 
 ```bash
@@ -496,7 +514,7 @@ src/scrape_mcp
 │   ├── browser.py     # L2 Playwright + stealth
 │   ├── session.py     # 登录态持久化（多会话 + cookie 导入导出）
 │   ├── recipes.py     # 站点 recipe（按 host 最长后缀匹配、mtime 重载）
-│   ├── cache.py       # HTTP 响应缓存
+│   ├── cache.py       # HTTP 响应缓存 + 正文/抽取结果缓存
 │   ├── errors.py      # 统一错误码
 │   └── hostlimit.py   # 同域并发闸门
 └── extract/

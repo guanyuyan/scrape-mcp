@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added
+- **正文与抽取结果缓存**：`web_fetch` / `web_extract` 在 HTTP 缓存之外再加一层结果缓存（`<DATA_DIR>/results/`），命中后网络、渲染、解析全部跳过，只读缓存返回；`bypass_cache=true` 同时绕过两层，`debug=true` 与自定义 `headers`/`cookies` 不入缓存。两层共用 `CACHE_TTL`（默认 300 秒，`0` 全关）
+- **基准套件**：`scripts/bench.py` 输出冷/热 p50/p95、加速比与 token 数，`--l2` 额外测量浏览器冷启动与复用；README 增加可复现的实测表
+
 ## [0.6.0] - 2026-10-21
 
 ### Added

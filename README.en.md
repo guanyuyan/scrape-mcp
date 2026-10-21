@@ -99,7 +99,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Stable error codes + diagnostics**: failures carry `error_code` and `retryable`; `debug=true` exposes tier decisions, selector hit counts and L2 interaction results.
 - **Persisted logins + named sessions**: `login` opens a visible browser and saves the session; `web_fetch` reuses it. `session="work"` isolates identities, and `session_export` / `session_import` move cookies between machines.
 - **Non-HTML content**: `web_fetch` reads plain text directly; with the `[pdf]` extra it extracts PDF text per page, returning `empty` for scanned files without a text layer instead of inventing content.
-- **Caching and batching**: L1 responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; `web_batch` fetches a list concurrently.
+- **Two cache layers**: HTTP responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; compacted content and extraction results get their own cache so repeat calls return immediately. `bypass_cache=true` skips both layers. `web_batch` fetches a list concurrently.
 - **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped.
 - **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent.
 - **Site recipes**: keep per-site rendering hints, root selector, extraction schema and pagination rules in a JSON file; later calls need no arguments, and per-call arguments still win.
@@ -158,7 +158,7 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `DATA_DIR` | `~/.scrape_mcp` | Where sessions and cache live |
 | `RECIPES_DIR` | `<DATA_DIR>/recipes` | Site recipe directory; empty means default |
 | `PDF_MAX_PAGES` | `200` | Max pages parsed per PDF (remaining pages are skipped; `pages` still reports the total) |
-| `CACHE_TTL` | `300` | L1 cache TTL (seconds); `0` disables; expired entries are revalidated |
+| `CACHE_TTL` | `300` | TTL for both cache layers (seconds); `0` disables them. HTTP entries are revalidated after expiry; content/extraction hits return directly |
 | `RETRY_TIMES` | `2` | Retries for network errors / 5xx (429/403 are not retried) |
 | `RETRY_BACKOFF` | `0.5` | Backoff base (seconds, exponential) |
 | `RETRY_AFTER_MAX_WAIT` | `0` | Max seconds to wait on `Retry-After` for 429/503; `0` reports only |
@@ -459,6 +459,24 @@ python examples/03_crawl_docs.py --max-pages 5 --out docs.md
 
 Also see `examples/example_client.py` (MCP client call example) and `examples/recipes/*.json`.
 
+## Benchmarks
+
+```bash
+python scripts/bench.py                              # cold vs. warm
+python scripts/bench.py --l2 https://news.qq.com/    # also measure browser cost
+```
+
+"Cold" means `bypass_cache=true` (network + compaction); "warm" is a normal call that hits the content cache.
+Measured in 2026-10 on Windows 11 over a home connection (`rounds=3`, `max_tokens=4000`):
+
+| Page | Tier | Cold p50 | Warm p50 | Speedup | Tokens |
+| --- | --- | --- | --- | --- | --- |
+| example.com | L2 | 974 ms | 1.2 ms | ~840× | 330 |
+| docs.python.org (asyncio-task) | L1 | 1.67 s | 1.2 ms | ~1340× | 3588 |
+
+L2 browser: first call in a process ≈3.5 s (including launch), reused p50 ≈1.8 s.
+Absolute numbers depend heavily on network and target site; the cold-vs-warm ratio on one machine is what matters.
+
 ## Docker
 
 ```bash
@@ -488,7 +506,7 @@ src/scrape_mcp
 │   ├── browser.py     # L2 Playwright + stealth
 │   ├── session.py     # Session persistence (named sessions + cookie import/export)
 │   ├── recipes.py     # Site recipes (longest-suffix match, mtime reload)
-│   ├── cache.py       # HTTP response cache
+│   ├── cache.py       # HTTP response cache + content/extraction result cache
 │   ├── errors.py      # Stable error codes
 │   └── hostlimit.py   # Per-host concurrency gate
 └── extract/

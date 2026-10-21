@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,6 +16,7 @@ from starlette.responses import JSONResponse
 from . import __version__
 from .config import get_settings
 from .core import errors
+from .core.cache import ResultCache
 from .core.fetcher import Fetcher, FetchOutcome
 from .core.hostlimit import HostLimiter
 from .core.logging import configure, log_event
@@ -69,6 +71,45 @@ def _host_of(url: str) -> str:
 def _recipe_for(url: str) -> Recipe | None:
     """按 host 取站点 recipe；没配就是 None（所有行为保持默认）。"""
     return get_recipe_store().for_url(url)
+
+
+def _result_cache(namespace: str) -> ResultCache:
+    """正文/抽取结果缓存：与 HTTP 缓存共用 DATA_DIR 与 CACHE_TTL。"""
+    settings = get_settings()
+    return ResultCache(Path(settings.data_dir) / "results", settings.cache_ttl, namespace)
+
+
+def _result_key(**parts: object) -> str:
+    """把影响最终结果的全部参数拼成稳定 key（排序 JSON，参数顺序不影响命中）。"""
+    return json.dumps(parts, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _cacheable(
+    *,
+    headers: dict[str, str] | None,
+    cookies: dict[str, str] | None,
+    bypass_cache: bool,
+    debug: bool,
+) -> bool:
+    """带自定义头/凭证的结果可能因人而异；debug 要现算诊断，都不走结果缓存。"""
+    return (
+        get_settings().cache_ttl > 0
+        and not bypass_cache
+        and not debug
+        and not headers
+        and not cookies
+    )
+
+
+def _cache_hit(cache: ResultCache, key: str) -> dict | None:
+    """命中时把 cached / elapsed_ms 换成本次读缓存的真实耗时。"""
+    started = time.perf_counter()
+    payload = cache.get(key)
+    if payload is None:
+        return None
+    payload["cached"] = True
+    payload["elapsed_ms"] = max(1, int((time.perf_counter() - started) * 1000))
+    return payload
 
 
 def _session_store() -> SessionStore:
@@ -422,6 +463,30 @@ async def _fetch_dict(
             "retryable": False,
         }
 
+    budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
+    recipe = _recipe_for(url)
+    cache: ResultCache | None = None
+    key = ""
+    if _cacheable(headers=headers, cookies=cookies, bypass_cache=bypass_cache, debug=debug):
+        cache = _result_cache("fetch")
+        # 命中 key 必须覆盖所有会改变正文的参数：recipe 的正文根与 L2 交互也算在内
+        key = _result_key(
+            kind="fetch",
+            version=__version__,
+            url=url,
+            session=session,
+            format=fmt,
+            link_policy=link_policy,
+            budget=budget,
+            root=recipe.root_selector if recipe else None,
+            wait_for=wait_for if wait_for is not None else (recipe.wait_for if recipe else None),
+            click=click if click is not None else (recipe.click if recipe else None),
+            scroll=scroll if scroll is not None else (recipe.scroll if recipe else None),
+            pdf_max_pages=settings.pdf_max_pages,
+        )
+        if (hit := _cache_hit(cache, key)) is not None:
+            return hit
+
     outcome, error = await _fetch_html(
         url,
         headers=headers,
@@ -438,8 +503,10 @@ async def _fetch_dict(
 
     budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
     if outcome.kind != "html":
-        return _plain_payload(outcome, url, budget, fmt)
-    recipe = _recipe_for(url)
+        payload = _plain_payload(outcome, url, budget, fmt)
+        if cache is not None and payload.get("ok"):
+            cache.put(key, payload)
+        return payload
     result = compact_html(
         outcome.html,
         outcome.final_url or url,
@@ -498,6 +565,8 @@ async def _fetch_dict(
             else "正文极少，疑似 JS 登录墙或骨架页；当前仅 L1 抓取（未执行 JS）"
         )
 
+    if cache is not None and payload.get("ok"):
+        cache.put(key, payload)
     return payload
 
 
@@ -632,8 +701,8 @@ async def web_extract(
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
 
+    recipe = _recipe_for(url)
     if schema is None:
-        recipe = _recipe_for(url)
         schema = recipe.extract if recipe is not None else None
         if schema is None:
             return _payload(
@@ -654,6 +723,24 @@ async def web_extract(
             error_code=errors.INVALID_ARGUMENT,
             error=f"schema 非法: {exc}",
         )
+
+    cache: ResultCache | None = None
+    key = ""
+    if _cacheable(headers=headers, cookies=cookies, bypass_cache=bypass_cache, debug=debug):
+        cache = _result_cache("extract")
+        # schema 决定字段结果，recipe 的 L2 交互决定渲染后的 DOM，都进 key
+        key = _result_key(
+            kind="extract",
+            version=__version__,
+            url=url,
+            session=session,
+            schema=schema,
+            wait_for=wait_for if wait_for is not None else (recipe.wait_for if recipe else None),
+            click=click if click is not None else (recipe.click if recipe else None),
+            scroll=scroll if scroll is not None else (recipe.scroll if recipe else None),
+        )
+        if (hit := _cache_hit(cache, key)) is not None:
+            return _payload(**hit)
 
     outcome, error = await _fetch_html(
         url,
@@ -705,6 +792,8 @@ async def web_extract(
         payload["error_code"] = errors.MISSING_REQUIRED
         payload["error"] = "必填字段缺失: " + ", ".join(result.required_missing)
         payload["retryable"] = False
+    if cache is not None and payload.get("ok"):
+        cache.put(key, payload)
     return _payload(**payload)
 
 
