@@ -12,6 +12,8 @@
 [![Release](https://img.shields.io/github/v/release/guanyuyan/scrape-mcp?color=blue&label=release)](https://github.com/guanyuyan/scrape-mcp/releases)
 [![CI](https://github.com/guanyuyan/scrape-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/guanyuyan/scrape-mcp/actions)
 
+简体中文 | [English](README.en.md)
+
 ---
 
 ## ⚡ 60 秒入门

@@ -10,6 +10,7 @@
 - **Python SDK**：`scrape_mcp.sdk` 提供 `fetch` / `extract` / `crawl` / `batch`，与 MCP 工具共用实现，返回解析后的 dict；`aclose()` 可显式释放浏览器
 - **示例脚本**：`examples/` 新增 5 个场景脚本（长文正文、列表抽取、翻页合并、PDF 转文本、批量巡检）
 - **进度通知**：`web_batch` / `web_crawl` 在客户端请求进度时逐条/逐页上报（并发批量为 `已抓取 n/N 个 URL`，分页为 `已翻到第 n/N 页`）；客户端未请求时零额外开销
+- **英文 README**：新增 `README.en.md`，内容与中文版完整对照，顶部提供 `简体中文 | English` 双向切换
 
 ## [0.5.0] - 2026-10-21
 
