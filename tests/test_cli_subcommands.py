@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -259,8 +260,21 @@ def test_sdk_configures_logging_once(monkeypatch):
     assert calls == ["ERROR"]
 
 
+def test_sdk_aclose_releases_fetcher(monkeypatch):
+    released: list[bool] = []
+
+    class FakeFetcher:
+        async def aclose(self) -> None:
+            released.append(True)
+
+    monkeypatch.setattr(server, "_fetcher", FakeFetcher())
+    asyncio.run(sdk.aclose())
+    assert released == [True]
+    assert server._fetcher is None
+
+
 def test_sdk_module_is_the_programmatic_entry():
     assert sdk.fetch is sdk.__dict__["fetch"]
-    assert set(sdk.__all__) == {"batch", "crawl", "extract", "fetch"}
+    assert set(sdk.__all__) == {"aclose", "batch", "crawl", "extract", "fetch"}
     # 顶层保持只有版本号，避免与 scrape_mcp.extract 子包重名
     assert scrape_mcp.__dict__.get("fetch") is None

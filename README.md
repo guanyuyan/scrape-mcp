@@ -407,21 +407,36 @@ web_crawl(url="https://docs.python.org/3/library/asyncio.html", max_pages=3)
 ```python
 import asyncio
 
-from scrape_mcp.sdk import batch, crawl, extract, fetch
+from scrape_mcp.sdk import aclose, batch, crawl, extract, fetch
 
 
 async def main() -> None:
     page = await fetch("https://docs.python.org/3/library/asyncio.html", max_tokens=2000)
     print(page["ok"], page["token_estimate"], page["tier"])
 
-    # 按字段抽取（schema 规则见 web_extract）；命中 recipe 时可省略 schema
-    data = await extract("https://github.com/trending")
-    print([repo["name"] for repo in data["data"]["repos"][:3]])
+    # 按字段抽取；不传 schema 时套用该站 recipe
+    data = await extract(
+        "https://docs.python.org/3/library/asyncio.html",
+        {
+            "fields": {
+                "title": {"selector": "h1"},
+                "sections": {"selector": "section", "type": "count"},
+            }
+        },
+    )
+    print(data["data"])
 
-    pages = await crawl("https://docs.python.org/3/library/asyncio.html", max_pages=3)
+    pages = await crawl(
+        "https://docs.python.org/3/library/asyncio.html",
+        next_selector='div.related a[accesskey="N"]',
+        max_pages=3,
+    )
     print(pages["mode"], pages["pages_fetched"])
 
     many = await batch(["https://example.com", "https://example.org"])
+    print(many["ok_count"], "/", many["total"])
+
+    await aclose()  # 触发过 L2 时释放浏览器子进程；不调用也能跑，只是退出时可能有清理告警
 
 
 asyncio.run(main())
@@ -429,6 +444,26 @@ asyncio.run(main())
 
 - 返回的就是 MCP 工具的 JSON 载荷（已解析为 dict），失败同样带 `error_code` / `retryable`
 - SDK 放在 `scrape_mcp.sdk`，是为了不和内部 `scrape_mcp.extract` 子包重名
+
+## 示例脚本
+
+`examples/` 下按场景提供 5 个可直接运行的脚本（默认参数就能跑通，需要代理时先设 `SCRAPE_MCP_PROXY`）：
+
+| 脚本 | 场景 | 常用参数 |
+| --- | --- | --- |
+| [01_fetch_article.py](examples/01_fetch_article.py) | 长文压成 token 预算内的正文 | `--max-tokens` `--out` |
+| [02_extract_list.py](examples/02_extract_list.py) | 列表页抽结构化数据（不取整页正文） | `--json` `--csv` |
+| [03_crawl_docs.py](examples/03_crawl_docs.py) | 按"下一页"翻页并合并成一份 markdown | `--selector` `--max-pages` `--out` |
+| [04_pdf_to_text.py](examples/04_pdf_to_text.py) | PDF 直接读成文本（需 `mcp-scrape[pdf]`） | `--out` `--max-tokens` |
+| [05_batch_check.py](examples/05_batch_check.py) | 批量巡检，输出层级/状态/token/错误码，失败即非零退出 | 位置参数传 URL |
+
+```bash
+python examples/01_fetch_article.py https://ruanyifeng.com/blog/ --max-tokens 1200
+python examples/02_extract_list.py --csv trending.csv
+python examples/03_crawl_docs.py --max-pages 5 --out docs.md
+```
+
+另有 `examples/example_client.py`（MCP 客户端调用示例）与 `examples/recipes/*.json`（站点 recipe）。
 
 ## Docker
 
@@ -449,7 +484,7 @@ curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 src/scrape_mcp
 ├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/login/session_*）
 ├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）
-├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/batch）
+├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/batch/aclose）
 ├── config.py          # 环境变量配置
 ├── tokenizer.py       # tiktoken 计数 + 预算截断
 ├── core/

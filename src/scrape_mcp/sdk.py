@@ -20,7 +20,7 @@ from . import server
 from .config import get_settings
 from .core.logging import configure
 
-__all__ = ["batch", "crawl", "extract", "fetch"]
+__all__ = ["aclose", "batch", "crawl", "extract", "fetch"]
 
 _logging_ready = False
 
@@ -59,3 +59,15 @@ async def batch(urls: list[str], **options: Any) -> dict[str, Any]:
     """并发抓取一组 URL；参数同 ``web_batch``。"""
     _ensure_logging()
     return _parse(await server.web_batch(urls, **options))
+
+
+async def aclose() -> None:
+    """释放全局抓取器（含 Playwright 浏览器）。
+
+    脚本在事件循环结束前调用一次，可避免浏览器子进程在解释器退出时清理告警；
+    长驻进程可复用同一个抓取器，无需每次调用。
+    """
+    fetcher = server._fetcher
+    if fetcher is not None:
+        await fetcher.aclose()
+        server._fetcher = None
