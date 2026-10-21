@@ -32,7 +32,7 @@ class _FakeFetcher:
 
 
 def _run(monkeypatch, status: int, blocked: str = "none") -> dict:
-    async def ok(_url: str) -> None:
+    async def ok(_url: str, *_args, **_kwargs) -> None:
         return None
 
     monkeypatch.setattr(server, "_compliance_check", ok)

@@ -87,6 +87,9 @@ def classify_message(message: str | None) -> str:
 
 def classify_outcome(outcome: FetchOutcome) -> str:
     """给一次抓取结果定错误码；成功返回 ``ok``。"""
+    # 预算在请求前/重试前就耗光：本质是超时，不该让文本关键词去猜成 unknown
+    if "deadline:exceeded" in outcome.decisions:
+        return TIMEOUT
     if outcome.error:
         return classify_message(outcome.error)
     if outcome.blocked != "none":

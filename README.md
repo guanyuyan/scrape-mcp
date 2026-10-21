@@ -107,6 +107,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **非 HTML 内容**：`web_fetch` 直接读纯文本；装 `[pdf]` extra 后按页抽取 PDF 文本，扫描件（无文字层）如实返回 `empty`，不伪造正文。
 - **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。
+- **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
 - **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`。
 - **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
 - **输出格式可选**：`format=markdown|text|json`，正文可按段落数组直接入库。
@@ -249,6 +250,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `link_policy`: `internal`（站内相对链接+站外降级）/ `all` / `none`
   - `format`: `markdown`（默认，保留标题/列表/链接）/ `text`（剥掉标记的纯文本）/ `json`（`content` 为段落数组）
   - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
+  - 总预算：`deadline_ms`（毫秒，可选）限制整次调用；不够时逐级降级，见"错误码与诊断"中的 `deadline:*` 说明
   - 登录态：`session`（默认 `default`），与 `login` 时的会话名一致即可自动带上对应登录态
   - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）
   - 非 HTML：PDF 返回结构化文本（装 `[pdf]` extra；`kind="pdf"` 且带 `pages`/`pages_parsed`），纯文本原样返回（`kind="text"`）
@@ -264,11 +266,13 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）；非 HTML（PDF/纯文本）返回 `unsupported_content`，请改用 `web_fetch`
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
   - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session`（对该批所有 URL 生效）
+  - `deadline_ms` 为整批共用的预算：耗尽后还没开始的子任务直接返回 `timeout`，不再占用网络与浏览器
   - 客户端请求进度（传 `progressToken`）时，每完成一条上报 `已抓取 n/N 个 URL`
 - **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → 从一个入口逐页抓取，返回带 `mode` 标明模式
   - `mode=links`（默认）：按 `depth`/`limit` 发现站内链接逐层抓取；`depth` 最大 `3`，`limit` 受 `CRAWL_MAX_PAGES` 约束
   - `mode=paginate`：传 `next_selector` 即启用分页模式，按"下一页"链接顺序翻页，`max_pages` 封顶（默认 `5`），已访问 URL 自动去重，默认不跟随站外链接（`same_host=false` 可放开）
   - 单页失败只影响该页；图片/压缩包等静态资源链接自动跳过；`session` 对该次所有页面生效
+  - `deadline_ms` 为整次爬取的预算：耗尽后不再抓新页，已抓到的页面照常返回
   - 客户端请求进度时逐页上报（分页模式为 `已翻到第 n/N 页`，链接模式为 `已抓取 n/N 页`）
 - **`login(url, timeout=180, session="default")`** → 打开带界面浏览器手动登录并持久化登录态
   - 多账号场景用不同 `session` 名分别登录，`web_fetch` 时传同一个名字即可，互不覆盖
@@ -298,6 +302,8 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
 | `invalid_url` / `invalid_argument` | ❌ | 参数问题 |
 
 失败时默认带精简 `diagnostics.decisions`（如 `["retry:5xx", "escalate_l2:cloudflare", "l2_ok"]`）；
+传了 `deadline_ms` 且触发降级时，会看到 `deadline:skip_retry`（预算不够再等一次退避）、
+`deadline:skip_l2`（不够启动浏览器，返回 L1 结果）或 `deadline:exceeded`（没来得及发起请求）。
 传 `debug=true` 会展开更多计数：
 
 ```json

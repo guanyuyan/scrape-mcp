@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..config import Settings
+from . import deadline as budget
 from .browser import BrowserRenderer
 from .detector import detect_block, looks_like_shell
 from .http_client import HttpClient
@@ -21,6 +22,11 @@ _NO_ESCALATE = ("rate_limit",)
 
 # 升级后仍未放行、很可能需要登录态的判定类型
 _LOGIN_CANDIDATES = ("captcha", "waf", "empty_spa", "empty", "cloudflare")
+
+# 剩余预算低于这个值时不再发起新的尝试/不再升级浏览器：
+# 一次 L1 至少要几百毫秒，浏览器启动 + 渲染则是秒级。
+_MIN_ATTEMPT_S = 0.3
+_L2_MIN_BUDGET_S = 1.5
 
 
 @dataclass
@@ -81,6 +87,7 @@ class Fetcher:
         click: str | None = None,
         bypass_cache: bool = False,
         session: str = "default",
+        deadline: float | None = None,
     ) -> FetchOutcome:
         outcome = await self._fetch_l1_with_retry(
             url,
@@ -88,6 +95,7 @@ class Fetcher:
             cookies=cookies,
             timeout=timeout,
             bypass_cache=bypass_cache,
+            deadline=deadline,
         )
         reason = self._escalation_reason(outcome)
         if reason is None:
@@ -100,9 +108,20 @@ class Fetcher:
             elif not self._settings.l2_enabled and outcome.blocked != "none":
                 outcome.decisions.append("no_escalate:l2_disabled")
             return outcome
+        left = budget.remaining(deadline)
+        if left is not None and left < _L2_MIN_BUDGET_S:
+            # 预算不够跑浏览器：把 L1 的判定如实返回，并说明为什么没升级
+            outcome.decisions.append("deadline:skip_l2")
+            return outcome
         outcome.decisions.append(f"escalate_l2:{reason}")
         return await self._fetch_l2(
-            url, outcome, wait_for=wait_for, scroll=scroll, click=click, session=session
+            url,
+            outcome,
+            wait_for=wait_for,
+            scroll=scroll,
+            click=click,
+            session=session,
+            deadline=deadline,
         )
 
     async def _fetch_l1_with_retry(
@@ -113,19 +132,27 @@ class Fetcher:
         cookies: dict[str, str] | None,
         timeout: float | None,
         bypass_cache: bool,
+        deadline: float | None = None,
     ) -> FetchOutcome:
-        """网络异常/5xx 指数退避重试；429/503 带 Retry-After 时按配置做一次有界等待。"""
+        """网络异常/5xx 指数退避重试；429/503 带 Retry-After 时按配置做一次有界等待。
+
+        有总预算时，每次尝试的超时都被压进剩余时间；剩余不够一次尝试或一次退避
+        就直接返回已有结果，不再为空等买单。
+        """
         attempts = max(1, int(self._settings.retry_times) + 1)
         retry_after_used = False
         # 每次重试都是一次新的 L1 结果，决策轨迹要跨尝试累积，否则调用方只看到最后一次
         trail: list[str] = []
         outcome: FetchOutcome | None = None
         for i in range(1, attempts + 1):
+            left = budget.remaining(deadline)
+            if left is not None and left < _MIN_ATTEMPT_S:
+                return _deadline_outcome(url, trail)
             outcome = await self._fetch_l1(
                 url,
                 headers=headers,
                 cookies=cookies,
-                timeout=timeout,
+                timeout=budget.cap(deadline, timeout or self._settings.request_timeout),
                 bypass_cache=bypass_cache,
             )
             if trail:
@@ -145,6 +172,9 @@ class Fetcher:
                 and (outcome.blocked == "rate_limit" or outcome.status == 503)
             ):
                 retry_after_used = True
+                if _budget_too_short(deadline, wait):
+                    outcome.decisions.append("deadline:skip_retry")
+                    return outcome
                 outcome.decisions.append(f"retry:retry_after_{wait:g}s")
                 trail = list(outcome.decisions)
                 await asyncio.sleep(wait)
@@ -152,9 +182,13 @@ class Fetcher:
 
             if not _is_retryable(outcome):
                 return outcome
+            backoff = self._settings.retry_backoff * (2 ** (i - 1))
+            if _budget_too_short(deadline, backoff):
+                outcome.decisions.append("deadline:skip_retry")
+                return outcome
             outcome.decisions.append("retry:transport" if outcome.error else "retry:5xx")
             trail = list(outcome.decisions)
-            await asyncio.sleep(self._settings.retry_backoff * (2 ** (i - 1)))
+            await asyncio.sleep(backoff)
         return outcome
 
     def _escalation_reason(self, outcome: FetchOutcome) -> str | None:
@@ -242,11 +276,19 @@ class Fetcher:
         scroll: bool = False,
         click: str | None = None,
         session: str = "default",
+        deadline: float | None = None,
     ) -> FetchOutcome:
         host = urlparse(l1.final_url or url).netloc.lower()
         browser = self._get_browser()
         result = await browser.render(
-            url, host, wait_for=wait_for, scroll=scroll, click=click, session=session
+            url,
+            host,
+            wait_for=wait_for,
+            scroll=scroll,
+            click=click,
+            session=session,
+            # 导航超时按剩余预算压缩，避免一页把整次调用的预算吃光
+            timeout=budget.cap(deadline, self._settings.l2_navigate_timeout),
         )
         elapsed = l1.elapsed_ms + result.elapsed_ms
         l2_diag = {
@@ -316,3 +358,26 @@ def _is_retryable(outcome: FetchOutcome) -> bool:
     if outcome.error:
         return True
     return 500 <= outcome.status < 600
+
+
+def _budget_too_short(deadline: float | None, wait: float) -> bool:
+    """等完这段之后还放得下一次尝试吗；没有预算时永远放得下。"""
+    left = budget.remaining(deadline)
+    return left is not None and left < wait + _MIN_ATTEMPT_S
+
+
+def _deadline_outcome(url: str, trail: list[str]) -> FetchOutcome:
+    """预算在发起请求前就耗光：不发请求，直接给出可判定的失败。"""
+    return FetchOutcome(
+        url=url,
+        final_url=url,
+        status=0,
+        tier="l1",
+        blocked="none",
+        block_reason="",
+        content_type="",
+        html="",
+        elapsed_ms=0,
+        error="超出总预算 deadline_ms，未发起请求",
+        decisions=[*trail, "deadline:exceeded"],
+    )

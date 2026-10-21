@@ -103,6 +103,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Non-HTML content**: `web_fetch` reads plain text directly; with the `[pdf]` extra it extracts PDF text per page, returning `empty` for scanned files without a text layer instead of inventing content.
 - **Two cache layers**: HTTP responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; compacted content and extraction results get their own cache so repeat calls return immediately. `bypass_cache=true` skips both layers. `web_batch` fetches a list concurrently.
 - **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped.
+- **Total budget with degradation**: `web_fetch` / `web_extract` / `web_batch` / `web_crawl` accept `deadline_ms`. When time runs short it degrades step by step — cap each request → skip retries → skip L2 rendering → return `timeout` — while any content already fetched is still returned. Degraded results are never cached, so later calls with a larger budget cannot inherit truncated content. The budget also covers the compliance stage (rate-limit wait and robots.txt fetch): if it is too tight, the call returns `timeout` early instead of burning the budget on preparation.
 - **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent.
 - **Site recipes**: keep per-site rendering hints, root selector, extraction schema and pagination rules in a JSON file; later calls need no arguments, and per-call arguments still win.
 - **Selectable output format**: `format=markdown|text|json`; `json` yields a paragraph array ready for storage.
@@ -244,6 +245,7 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `link_policy`: `internal` (keep same-site links, demote off-site) / `all` / `none`
   - `format`: `markdown` (default, keeps headings/lists/links) / `text` (plain) / `json` (`content` is a paragraph array)
   - Fetch options: `headers` / `cookies` (custom requests bypass the shared cache), `timeout`, `bypass_cache`
+  - Total budget: optional `deadline_ms` caps the whole call; degradation markers are listed under "Error codes and diagnostics"
   - Session: `session` (default `default`); use the same name as `login` to attach the stored session
   - Render options (L2 only): `wait_for` (CSS selector), `scroll` (trigger lazy loading), `click` ("load more")
   - Non-HTML: PDFs return structured text (with the `[pdf]` extra; `kind="pdf"` plus `pages` / `pages_parsed`); plain text is returned as-is (`kind="text"`)
@@ -259,11 +261,13 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Fetch/render options match `web_fetch` (without `link_policy` / `format`); non-HTML returns `unsupported_content` — use `web_fetch` instead
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → concurrent fetch, one result per URL; a single failure does not sink the batch
   - Supports `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session` for the whole batch
+  - `deadline_ms` is shared by the batch: tasks that have not started when it runs out return `timeout` without touching the network or browser
   - Reports progress per completed URL when the client requests it (`progressToken`)
 - **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → crawl page by page; the response's `mode` tells which mode ran
   - `mode=links` (default): discover same-site links by `depth` / `limit`; `depth` max `3`, `limit` bounded by `CRAWL_MAX_PAGES`
   - `mode=paginate`: pass `next_selector` to follow "next page" links; `max_pages` caps it (default `5`), visited URLs are deduped, off-site links are not followed unless `same_host=false`
   - A failing page only affects that page; image/archive links are skipped; `session` applies to every page
+  - `deadline_ms` budgets the whole crawl: no new pages are started once it runs out, and pages already fetched are returned
   - Reports progress per page when requested (`已翻到第 n/N 页` in paginate mode, `已抓取 n/N 页` in link mode)
 - **`login(url, timeout=180, session="default")`** → open a visible browser for a manual login and persist it
   - Use different `session` names for multiple accounts; pass the same name to `web_fetch`
@@ -276,6 +280,8 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
 Tool results are JSON strings in `content[0].text` — parse the text, do not rely on `structured_content`.
 
 Failures carry a stable `error_code` and `retryable`. Transport errors / 5xx are retried with exponential backoff and `attempts` reports the real count. A missed L2 interaction (e.g. a selector that never appears) is only noted in `notes`, not treated as a failure.
+
+With `deadline_ms`, a degraded call shows up in `diagnostics.decisions` as `deadline:skip_retry` (no time left for one more backoff), `deadline:skip_l2` (no time to launch the browser, so the L1 result is returned) or `deadline:exceeded` (the request was never sent).
 
 ### Error codes and diagnostics
 

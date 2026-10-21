@@ -45,7 +45,7 @@ def _patch_fetch(monkeypatch) -> None:
         async def aclose(self) -> None:
             pass
 
-    async def allowed(_url: str) -> None:
+    async def allowed(_url: str, *_args, **_kwargs) -> None:
         return None
 
     monkeypatch.setattr(server, "_compliance_check", allowed)
@@ -168,7 +168,7 @@ def test_blocked_fetch_counts_error_code(tmp_path, monkeypatch):
         async def aclose(self) -> None:
             pass
 
-    async def allowed(_url: str) -> None:
+    async def allowed(_url: str, *_args, **_kwargs) -> None:
         return None
 
     monkeypatch.setattr(server, "_compliance_check", allowed)

@@ -45,7 +45,7 @@ def _install_fetcher(monkeypatch, calls: dict):
         async def aclose(self) -> None:
             pass
 
-    async def allowed(_url: str) -> None:
+    async def allowed(_url: str, *_args, **_kwargs) -> None:
         return None
 
     monkeypatch.setattr(server, "_get_fetcher", lambda: _Fetcher())

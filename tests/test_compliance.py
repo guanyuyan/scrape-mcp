@@ -82,6 +82,26 @@ def test_robots_checker_network_error_is_allow():
     assert asyncio.run(run()) is True
 
 
+def test_budget_truncated_robots_lookup_is_not_cached():
+    """紧预算导致没拿到规则时先不缓存，避免影响后续预算充足的调用。"""
+
+    async def run():
+        checker = RobotsChecker(_Settings())
+
+        async def no_rules(_host, timeout=None):
+            return None
+
+        checker._fetch_rules = no_rules
+        await checker._rules_for("https://example.com/a", timeout=0.2)
+        tight = dict(checker._cache)
+        await checker._rules_for("https://example.com/a")
+        return tight, dict(checker._cache)
+
+    tight, normal = asyncio.run(run())
+    assert tight == {}
+    assert "example.com" in normal
+
+
 def test_ratelimiter_blocks_surge():
     async def run():
         lim = RateLimiter(max_qps=100.0)

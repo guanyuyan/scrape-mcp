@@ -313,6 +313,7 @@ class BrowserRenderer:
         scroll: bool = False,
         click: str | None = None,
         session: str = "default",
+        timeout: float | None = None,
     ) -> BrowserOutcome:
         t0 = time.perf_counter()
         host = host or urlparse(url).netloc.lower()
@@ -329,6 +330,7 @@ class BrowserRenderer:
                     scroll=scroll,
                     click=click,
                     session=session,
+                    timeout=timeout,
                 )
             finally:
                 self._active -= 1
@@ -343,7 +345,10 @@ class BrowserRenderer:
         scroll: bool,
         click: str | None,
         session: str,
+        timeout: float | None,
     ) -> BrowserOutcome:
+        # 单步超时可由调用方的总预算压缩（deadline_ms），默认仍取配置值
+        nav_ms = int((timeout or self._s.l2_navigate_timeout) * 1000)
         try:
             context = await self._context_for(host, session)
         except Exception as exc:
@@ -366,11 +371,11 @@ class BrowserRenderer:
             resp = await page.goto(
                 url,
                 wait_until="domcontentloaded",
-                timeout=self._s.l2_navigate_timeout * 1000,
+                timeout=nav_ms,
             )
             status = resp.status if resp is not None else 0
             wait_for_hit, clicked, scroll_rounds = await self._interact(
-                page, wait_for=wait_for, scroll=scroll, click=click, notes=notes
+                page, wait_for=wait_for, scroll=scroll, click=click, notes=notes, timeout=timeout
             )
             html = await self._settle(page)
             return BrowserOutcome(
@@ -411,6 +416,7 @@ class BrowserRenderer:
         scroll: bool,
         click: str | None,
         notes: list[str],
+        timeout: float | None = None,
     ) -> tuple[bool | None, bool | None, int]:
         """渲染后的可选交互：等节点、点"加载更多"、滚动触发懒加载。
 
@@ -424,7 +430,8 @@ class BrowserRenderer:
         if wait_for:
             wait_for_hit = False
             try:
-                await page.wait_for_selector(wait_for, timeout=self._s.l2_navigate_timeout * 1000)
+                wait_ms = int((timeout or self._s.l2_navigate_timeout) * 1000)
+                await page.wait_for_selector(wait_for, timeout=wait_ms)
                 wait_for_hit = True
             except Exception:
                 notes.append(f"wait_for 未命中: {wait_for}")

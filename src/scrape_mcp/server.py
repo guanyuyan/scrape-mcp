@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 
 from . import __version__
 from .config import get_settings
+from .core import deadline as dl
 from .core import errors
 from .core.cache import ResultCache
 from .core.fetcher import Fetcher, FetchOutcome
@@ -144,6 +145,46 @@ def _denied_payload(url: str, code: str, message: str) -> dict:
     }
 
 
+def _deadline_arg(deadline_ms: int | None) -> tuple[float | None, dict | None]:
+    """校验 deadline_ms 并换算成绝对截止时间；非法时给出统一错误载荷。"""
+    if deadline_ms is None:
+        return None, None
+    if isinstance(deadline_ms, bool) or not isinstance(deadline_ms, int) or deadline_ms <= 0:
+        return None, {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": "deadline_ms 必须是正整数（毫秒）；不传表示不限",
+            "retryable": False,
+        }
+    return dl.start(deadline_ms), None
+
+
+def _deadline_payload(url: str, note: str = "") -> dict:
+    """预算在抓取开始前就耗尽：不发请求，沿用 timeout 错误码并标明原因。"""
+    message = "超出总预算 deadline_ms，未完成抓取"
+    if note:
+        message = f"{message}；{note}"
+    return {
+        "ok": False,
+        "url": url,
+        "error_code": errors.TIMEOUT,
+        "error": message,
+        "retryable": True,
+        "diagnostics": {"decisions": ["deadline:exceeded"], "attempts": 0},
+    }
+
+
+def _deadline_limited(outcome: FetchOutcome) -> bool:
+    """因预算降级得到的结果不进缓存：后续预算更充足的调用不该拿到残缺内容。"""
+    return any(d.startswith("deadline:") for d in outcome.decisions)
+
+
+def _budget_below(deadline: float | None, need: float) -> bool:
+    """剩余预算是否已经不够做下一步（没有预算时永远够）。"""
+    left = dl.remaining(deadline)
+    return left is not None and left < need
+
+
 async def _notify_progress(ctx: Context | None, done: int, total: int, message: str) -> None:
     """向客户端汇报进度。
 
@@ -168,10 +209,16 @@ def _diagnostics(outcome: FetchOutcome, *, detail: bool = False) -> dict:
     return diag
 
 
-async def _compliance_check(url: str) -> dict | None:
+# 合规检查至少要留出的预算：限流等待 + robots.txt 抓取 + 真正发请求
+_COMPLIANCE_MIN_S = 0.5
+
+
+async def _compliance_check(url: str, deadline: float | None = None) -> dict | None:
     """阶段 0 合规：白/黑名单 → 全局限流 → robots.txt。
 
     通过返回 None；被拦返回结构化错误 payload（拒绝抓取，不发起任何请求）。
+    有总预算时合规检查同样受约束：剩余时间不够走完就先返回超时，
+    不让准备阶段把预算吃光，robots 抓取也按剩余时间压缩超时。
     """
     settings = get_settings()
     host = _host_of(url)
@@ -181,10 +228,26 @@ async def _compliance_check(url: str) -> dict | None:
     if settings.allowed_host_set and host not in settings.allowed_host_set:
         return _denied_payload(url, errors.DENIED, f"主机 {host} 不在白名单内，已拒绝请求")
 
-    await _get_ratelimiter().acquire()
+    if _budget_below(deadline, _COMPLIANCE_MIN_S):
+        return _deadline_payload(url, "预算不足以完成限流与 robots.txt 检查")
 
-    if settings.respect_robots and not await _get_robots().is_allowed(url):
-        return _denied_payload(url, errors.ROBOTS_DISALLOWED, "目标路径被该站 robots.txt 禁止抓取")
+    left = dl.remaining(deadline)
+    if left is None:
+        await _get_ratelimiter().acquire()
+    else:
+        try:
+            await asyncio.wait_for(_get_ratelimiter().acquire(), left)
+        except asyncio.TimeoutError:
+            return _deadline_payload(url, "等待全局限流配额时预算耗尽")
+
+    if settings.respect_robots:
+        if _budget_below(deadline, _COMPLIANCE_MIN_S):
+            return _deadline_payload(url, "预算不足以完成 robots.txt 检查")
+        robots = _get_robots()
+        if not await robots.is_allowed(url, timeout=dl.remaining(deadline)):
+            return _denied_payload(
+                url, errors.ROBOTS_DISALLOWED, "目标路径被该站 robots.txt 禁止抓取"
+            )
 
     return None
 
@@ -255,12 +318,14 @@ async def _fetch_html(
     click: str | None = None,
     bypass_cache: bool = False,
     session: str = "default",
+    deadline: float | None = None,
 ) -> tuple[FetchOutcome | None, dict | None]:
     """抓取单个 URL，返回 (outcome, 错误 payload)。
 
     web_fetch 与 web_extract 共用：先做合规检查，再走分级抓取链路；
     拦截/登录墙统一如实上报，避免把挑战页当正文/当数据。成功时 error 为 None。
     wait_for/scroll/click 为 None 时套用该站 recipe，显式传值优先。
+    deadline 是绝对截止时间（见 core.deadline），预算耗尽时不再发起新请求。
     """
     recipe = _recipe_for(url)
     if recipe is not None:
@@ -268,12 +333,17 @@ async def _fetch_html(
         click = click if click is not None else recipe.click
         scroll = scroll if scroll is not None else recipe.scroll
 
-    denied = await _compliance_check(url)
+    if dl.expired(deadline):
+        return None, _deadline_payload(url)
+
+    denied = await _compliance_check(url, deadline)
     if denied is not None:
         return None, denied
 
     # 同域并发闸门：批量/爬取时避免瞬间对同一站点打多个请求
     async with _get_hostlimiter().slot(_host_of(url)):
+        if dl.expired(deadline):
+            return None, _deadline_payload(url, "排队等待同域配额时预算耗尽")
         outcome: FetchOutcome = await _get_fetcher().fetch(
             url,
             headers=headers,
@@ -284,6 +354,7 @@ async def _fetch_html(
             click=click,
             bypass_cache=bypass_cache,
             session=session,
+            deadline=deadline,
         )
 
     code = errors.classify_outcome(outcome)
@@ -324,11 +395,12 @@ async def _fetch_html(
             if outcome.blocked in ("cloudflare", "captcha", "waf", "rate_limit")
             else "页面无有效正文（疑似 JS 渲染）"
         )
-        explain = (
-            "已升级 L2 浏览器渲染后仍被判为拦截页"
-            if outcome.tier == "l2"
-            else "未取得 L2 渲染结果（限流类判定不升级，或浏览器渲染失败，详见 block_reason）"
-        )
+        if "deadline:skip_l2" in outcome.decisions:
+            explain = "总预算剩余不足，未升级 L2 渲染；可提高 deadline_ms 后重试"
+        elif outcome.tier == "l2":
+            explain = "已升级 L2 浏览器渲染后仍被判为拦截页"
+        else:
+            explain = "未取得 L2 渲染结果（限流类判定不升级，或浏览器渲染失败，详见 block_reason）"
         payload = {
             "ok": False,
             "url": url,
@@ -466,6 +538,7 @@ async def _fetch_dict(
     bypass_cache: bool = False,
     debug: bool = False,
     session: str = "default",
+    deadline: float | None = None,
 ) -> dict:
     """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
     settings = get_settings()
@@ -519,6 +592,7 @@ async def _fetch_dict(
         click=click,
         bypass_cache=bypass_cache,
         session=session,
+        deadline=deadline,
     )
     if error is not None:
         return error
@@ -528,7 +602,7 @@ async def _fetch_dict(
         payload = _plain_payload(outcome, url, budget, fmt)
         if payload.get("ok"):
             get_stats().record_tokens(payload.get("token_estimate", 0))
-            if cache is not None:
+            if cache is not None and not _deadline_limited(outcome):
                 cache.put(key, payload)
         return payload
     result = compact_html(
@@ -589,7 +663,7 @@ async def _fetch_dict(
             else "正文极少，疑似 JS 登录墙或骨架页；当前仅 L1 抓取（未执行 JS）"
         )
 
-    if cache is not None and payload.get("ok"):
+    if cache is not None and payload.get("ok") and not _deadline_limited(outcome):
         cache.put(key, payload)
     if payload.get("ok"):
         get_stats().record_tokens(payload["token_estimate"])
@@ -605,6 +679,7 @@ async def web_fetch(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
+    deadline_ms: int | None = None,
     wait_for: str | None = None,
     scroll: bool | None = None,
     click: str | None = None,
@@ -627,6 +702,10 @@ async def web_fetch(
         headers: 自定义请求头，如 {"Referer": "...", "User-Agent": "..."}；传入时不走共享缓存。
         cookies: 自定义 cookie 字典；传入时不走共享缓存。
         timeout: 单次请求超时秒数（默认取配置 request_timeout）。
+        deadline_ms: 整次调用的总预算（毫秒），不传表示不限。预算不够时逐级降级：
+            压缩单步超时 → 跳过重试（diagnostics 里是 deadline:skip_retry）→
+            不升级 L2（deadline:skip_l2）→ 未开始就耗尽时直接返回 timeout。
+            预算内拿到的正文照常返回，但降级结果不会写入结果缓存。
         wait_for: 仅 L2 生效，等待该 CSS 选择器出现后再取内容（适合 SPA）；不传则套用站点 recipe。
         scroll: 仅 L2 生效，滚动页面触发懒加载/无限滚动；不传则套用站点 recipe。
         click: 仅 L2 生效，渲染后点击一次该 CSS 选择器（如"加载更多"）；不传则套用站点 recipe。
@@ -643,6 +722,9 @@ async def web_fetch(
         )
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
     return _payload(
         **await _fetch_dict(
             url,
@@ -658,6 +740,7 @@ async def web_fetch(
             bypass_cache=bypass_cache,
             debug=debug,
             session=session,
+            deadline=deadline,
         )
     )
 
@@ -669,6 +752,7 @@ async def web_extract(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
+    deadline_ms: int | None = None,
     wait_for: str | None = None,
     scroll: bool | None = None,
     click: str | None = None,
@@ -711,6 +795,7 @@ async def web_extract(
         headers: 自定义请求头；传入时不走共享缓存。
         cookies: 自定义 cookie 字典；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
+        deadline_ms: 整次调用的总预算（毫秒），不传表示不限；降级规则同 web_fetch。
         wait_for: 仅 L2 生效，等待该 CSS 选择器出现后再取内容；不传则套用站点 recipe。
         scroll: 仅 L2 生效，滚动页面触发懒加载；不传则套用站点 recipe。
         click: 仅 L2 生效，渲染后点击一次该 CSS 选择器；不传则套用站点 recipe。
@@ -726,6 +811,9 @@ async def web_extract(
         )
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
 
     recipe = _recipe_for(url)
     if schema is None:
@@ -778,6 +866,7 @@ async def web_extract(
         click=click,
         bypass_cache=bypass_cache,
         session=session,
+        deadline=deadline,
     )
     if error is not None:
         return _payload(**error)
@@ -818,7 +907,7 @@ async def web_extract(
         payload["error_code"] = errors.MISSING_REQUIRED
         payload["error"] = "必填字段缺失: " + ", ".join(result.required_missing)
         payload["retryable"] = False
-    if cache is not None and payload.get("ok"):
+    if cache is not None and payload.get("ok") and not _deadline_limited(outcome):
         cache.put(key, payload)
     return _payload(**payload)
 
@@ -832,6 +921,7 @@ async def web_batch(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
+    deadline_ms: int | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
     session: str = "default",
@@ -847,6 +937,8 @@ async def web_batch(
         headers: 所有 URL 共用的自定义请求头；传入时不走共享缓存。
         cookies: 所有 URL 共用的自定义 cookie；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
+        deadline_ms: 整批共用的总预算（毫秒），不传表示不限。预算耗尽后还没开始的
+            子任务直接返回 timeout（diagnostics 为 deadline:exceeded），不再占用网络与浏览器。
         bypass_cache: 跳过并绕过响应缓存。
         debug: 每条结果附带 diagnostics（决策轨迹与计数，不含页面内容）。
         session: 登录态会话名（默认 default）；对该批所有 URL 生效。
@@ -855,6 +947,9 @@ async def web_batch(
     settings = get_settings()
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
     if link_policy not in LINK_POLICIES:
         return _payload(
             ok=False,
@@ -882,28 +977,33 @@ async def web_batch(
     async def one(u: str) -> dict:
         nonlocal done
         async with sem:
-            try:
-                result = await _fetch_dict(
-                    u,
-                    max_tokens,
-                    link_policy,
-                    fmt=format,
-                    headers=headers,
-                    cookies=cookies,
-                    timeout=timeout,
-                    bypass_cache=bypass_cache,
-                    debug=debug,
-                    session=session,
-                )
-            except Exception as exc:  # 单条意外异常不应拖垮整批
-                code = errors.classify_exception(exc)
-                result = {
-                    "ok": False,
-                    "url": u,
-                    "error_code": code,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "retryable": errors.is_retryable(code),
-                }
+            if dl.expired(deadline):
+                # 排队期间预算耗尽：不再发起抓取，直接给出可判定的失败
+                result = _deadline_payload(u, "批量子任务排队时预算耗尽")
+            else:
+                try:
+                    result = await _fetch_dict(
+                        u,
+                        max_tokens,
+                        link_policy,
+                        fmt=format,
+                        headers=headers,
+                        cookies=cookies,
+                        timeout=timeout,
+                        bypass_cache=bypass_cache,
+                        debug=debug,
+                        session=session,
+                        deadline=deadline,
+                    )
+                except Exception as exc:  # 单条意外异常不应拖垮整批
+                    code = errors.classify_exception(exc)
+                    result = {
+                        "ok": False,
+                        "url": u,
+                        "error_code": code,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "retryable": errors.is_retryable(code),
+                    }
         done += 1
         await _notify_progress(ctx, done, total, f"已抓取 {done}/{total} 个 URL")
         return result
@@ -926,6 +1026,7 @@ async def _crawl_page(
     bypass_cache: bool,
     next_selector: str | None = None,
     session: str = "default",
+    deadline: float | None = None,
 ) -> tuple[dict, list[str], str | None]:
     """抓一页并顺手抽链接/下一页；失败页返回错误 payload 和空链接列表。"""
     outcome, error = await _fetch_html(
@@ -935,6 +1036,7 @@ async def _crawl_page(
         timeout=timeout,
         bypass_cache=bypass_cache,
         session=session,
+        deadline=deadline,
     )
     if error is not None:
         return error, [], None
@@ -998,6 +1100,7 @@ async def web_crawl(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
+    deadline_ms: int | None = None,
     bypass_cache: bool = False,
     session: str = "default",
     ctx: Context | None = None,
@@ -1023,6 +1126,8 @@ async def web_crawl(
         headers: 所有页面共用的自定义请求头；传入时不走共享缓存。
         cookies: 所有页面共用的自定义 cookie；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
+        deadline_ms: 整次爬取的总预算（毫秒），不传表示不限。预算耗尽后不再抓新页，
+            已抓到的页面照常返回；排队中的子任务直接返回 timeout。
         bypass_cache: 跳过并绕过响应缓存。
         session: 登录态会话名（默认 default）；对本次所有页面生效。
         ctx: MCP 上下文，由框架注入，用于逐页上报进度（客户端请求进度时才发通知）。
@@ -1035,6 +1140,11 @@ async def web_crawl(
         )
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
+    if dl.expired(deadline):
+        return _payload(**_deadline_payload(url))
     settings = get_settings()
     if depth < 0 or depth > 3:
         return _payload(
@@ -1071,7 +1181,7 @@ async def web_crawl(
         results: list[dict] = []
         visited: set[str] = {url}
         current: str | None = url
-        while current is not None and len(results) < cap:
+        while current is not None and len(results) < cap and not dl.expired(deadline):
             try:
                 payload, _links, nxt = await _crawl_page(
                     current,
@@ -1085,6 +1195,7 @@ async def web_crawl(
                     bypass_cache=bypass_cache,
                     next_selector=next_selector,
                     session=session,
+                    deadline=deadline,
                 )
             except Exception as exc:  # 单页异常不中断整次爬取
                 code = errors.classify_exception(exc)
@@ -1123,32 +1234,36 @@ async def web_crawl(
     async def one(u: str) -> tuple[dict, list[str], str | None]:
         nonlocal fetched
         async with sem:
-            try:
-                result = await _crawl_page(
-                    u,
-                    max_tokens=max_tokens,
-                    link_policy=link_policy,
-                    same_host=same_host,
-                    link_limit=max(cap * 5, 50),
-                    headers=headers,
-                    cookies=cookies,
-                    timeout=timeout,
-                    bypass_cache=bypass_cache,
-                    session=session,
-                )
-            except Exception as exc:  # 单页异常不中断整次爬取
-                code = errors.classify_exception(exc)
-                result = (
-                    {
-                        "ok": False,
-                        "url": u,
-                        "error_code": code,
-                        "error": f"{type(exc).__name__}: {exc}",
-                        "retryable": errors.is_retryable(code),
-                    },
-                    [],
-                    None,
-                )
+            if dl.expired(deadline):
+                result = (_deadline_payload(u, "爬取子任务排队时预算耗尽"), [], None)
+            else:
+                try:
+                    result = await _crawl_page(
+                        u,
+                        max_tokens=max_tokens,
+                        link_policy=link_policy,
+                        same_host=same_host,
+                        link_limit=max(cap * 5, 50),
+                        headers=headers,
+                        cookies=cookies,
+                        timeout=timeout,
+                        bypass_cache=bypass_cache,
+                        session=session,
+                        deadline=deadline,
+                    )
+                except Exception as exc:  # 单页异常不中断整次爬取
+                    code = errors.classify_exception(exc)
+                    result = (
+                        {
+                            "ok": False,
+                            "url": u,
+                            "error_code": code,
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "retryable": errors.is_retryable(code),
+                        },
+                        [],
+                        None,
+                    )
         fetched += 1
         await _notify_progress(ctx, fetched, cap, f"已抓取 {fetched}/{cap} 页")
         return result
@@ -1158,7 +1273,7 @@ async def web_crawl(
     results: list[dict] = []
     level = 0
 
-    while frontier and len(results) < cap:
+    while frontier and len(results) < cap and not dl.expired(deadline):
         frontier = frontier[: cap - len(results)]
         pairs = await asyncio.gather(*(one(u) for u in frontier))
         next_frontier: list[str] = []

@@ -32,29 +32,37 @@ class RobotsChecker:
         self._settings = settings
         self._cache: dict[str, tuple[float, list[_Rule] | None]] = {}
 
-    async def is_allowed(self, url: str) -> bool:
-        _, rules = await self._rules_for(url)
+    async def is_allowed(self, url: str, timeout: float | None = None) -> bool:
+        """timeout 是本次规则拉取的时间上限（秒），由调用方的总预算换算而来。"""
+        _, rules = await self._rules_for(url, timeout=timeout)
         return self._match(rules, urlparse(url).path)
 
-    async def _rules_for(self, url: str) -> tuple[str, list[_Rule] | None]:
+    async def _rules_for(
+        self, url: str, timeout: float | None = None
+    ) -> tuple[str, list[_Rule] | None]:
         host = (urlparse(url).netloc or "").lower()
         if not host:
             return "", None
         cached = self._cache.get(host)
         if cached is not None and time.time() - cached[0] < self._settings.robots_cache_ttl:
             return host, cached[1]
-        rules = await self._fetch_rules(host)
-        self._cache[host] = (time.time(), rules)
+        rules = await self._fetch_rules(host, timeout=timeout)
+        # 预算压缩导致没拿到规则时先不缓存：别让一次紧预算的调用影响后续正常调用
+        if timeout is None or rules is not None:
+            self._cache[host] = (time.time(), rules)
         return host, rules
 
-    async def _fetch_rules(self, host: str) -> list[_Rule] | None:
+    async def _fetch_rules(self, host: str, timeout: float | None = None) -> list[_Rule] | None:
         robots_url = f"https://{host}/robots.txt"
+        limit = min(8.0, self._settings.request_timeout)
+        if timeout is not None:
+            limit = max(0.05, min(limit, timeout))
         try:
             async with AsyncSession(impersonate=self._settings.impersonate) as session:
                 resp = await session.get(
                     robots_url,
                     headers={"User-Agent": _UA},
-                    timeout=min(8.0, self._settings.request_timeout),
+                    timeout=limit,
                     allow_redirects=True,
                 )
         except Exception:  # robot 判定是系统边界：拿不到规则就放行，不阻断可用性

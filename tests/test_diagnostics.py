@@ -85,7 +85,7 @@ def test_no_debug_means_no_diagnostics(monkeypatch):
 
 
 def test_transport_error_payload_is_retryable(monkeypatch):
-    async def no_compliance(_url):
+    async def no_compliance(_url, *_args, **_kwargs):
         return None
 
     class FakeFetcher:
@@ -109,7 +109,7 @@ def test_transport_error_payload_is_retryable(monkeypatch):
 
 
 def test_rate_limit_payload_exposes_retry_after(monkeypatch):
-    async def no_compliance(_url):
+    async def no_compliance(_url, *_args, **_kwargs):
         return None
 
     class FakeFetcher:
@@ -133,7 +133,7 @@ def test_rate_limit_payload_exposes_retry_after(monkeypatch):
 
 
 class _FakeRobots:
-    async def is_allowed(self, _url: str) -> bool:
+    async def is_allowed(self, _url: str, **_kwargs) -> bool:
         return False
 
 
