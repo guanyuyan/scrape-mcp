@@ -1,0 +1,25 @@
+{
+  "host": "cnblogs.com",
+  "root_selector": "#post_list",
+  "extract": {
+    "fields": {
+      "posts": {
+        "selector": "#post_list .post-item",
+        "type": "list",
+        "fields": {
+          "title": {"selector": "a.post-item-title"},
+          "url": {
+            "selector": "a.post-item-title",
+            "type": "attr",
+            "attr": "href",
+            "abs_url": true
+          },
+          "author": {"selector": ".post-item-author span"},
+          "summary": {"selector": "p.post-item-summary"},
+          "published": {"selector": ".post-item-foot .post-meta-item span"}
+        }
+      }
+    }
+  },
+  "note": "博客园首页列表：每篇一个 article.post-item；翻页是页码链接、没有“下一页”箭头，所以不配 crawl"
+}

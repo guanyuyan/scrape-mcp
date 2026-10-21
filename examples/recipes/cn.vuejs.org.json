@@ -1,0 +1,12 @@
+{
+  "host": "cn.vuejs.org",
+  "root_selector": ".vt-doc",
+  "extract": {
+    "fields": {
+      "title": {"selector": "h1", "required": true},
+      "sections": {"selector": "h2", "type": "count"},
+      "links": {"selector": ".vt-doc a", "type": "count"}
+    }
+  },
+  "note": "VitePress 站（Vue 中文文档）：正文在 .vt-doc（新版主题；旧版是 .vp-doc）"
+}

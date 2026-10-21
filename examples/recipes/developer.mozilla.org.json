@@ -1,0 +1,12 @@
+{
+  "host": "developer.mozilla.org",
+  "root_selector": "main#content",
+  "extract": {
+    "fields": {
+      "title": {"selector": "h1", "required": true},
+      "sections": {"selector": "h2", "type": "count"},
+      "links": {"selector": "#content a", "type": "count"}
+    }
+  },
+  "note": "MDN 文档：正文在 main#content；页面没有 article 标签，别用 article 选正文"
+}

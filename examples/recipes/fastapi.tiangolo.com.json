@@ -1,0 +1,12 @@
+{
+  "host": "fastapi.tiangolo.com",
+  "root_selector": ".md-content__inner",
+  "extract": {
+    "fields": {
+      "title": {"selector": "h1", "required": true},
+      "sections": {"selector": "h2", "type": "count"},
+      "links": {"selector": ".md-content a", "type": "count"}
+    }
+  },
+  "note": "Material for MkDocs 站（FastAPI 文档）：正文在 .md-content__inner，导航在 .md-sidebar"
+}

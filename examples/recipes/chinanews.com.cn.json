@@ -1,0 +1,13 @@
+{
+  "host": "chinanews.com.cn",
+  "root_selector": ".left_zw",
+  "extract": {
+    "fields": {
+      "title": {"selector": "h1.content_left_title", "required": true},
+      "published": {"selector": "#pubtime_baidu"},
+      "source": {"selector": "#source_baidu"},
+      "author": {"selector": "#author_baidu"}
+    }
+  },
+  "note": "中国新闻网常规文章页：正文在 .left_zw，标题在 h1.content_left_title；时间/来源/作者在 BaiduSpider 隐藏块（页面可能不显示）。图集稿走 /tp/ 路径，正文不在 .left_zw，此 recipe 不适用"
+}

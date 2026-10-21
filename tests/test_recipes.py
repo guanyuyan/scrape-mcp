@@ -128,6 +128,25 @@ def test_missing_directory_is_empty(tmp_path):
     assert RecipeStore(tmp_path / "nope").all() == []
 
 
+def test_bundled_example_recipes_are_loadable():
+    """examples/recipes 下的示例要能被直接复制使用：能解析、host 与文件名一致。"""
+    from pathlib import Path
+
+    from scrape_mcp.core.recipes import RecipeStore
+
+    directory = Path(__file__).resolve().parents[1] / "examples" / "recipes"
+    files = sorted(directory.glob("*.json"))
+    assert len(files) >= 8
+
+    loaded = {recipe.host: recipe for recipe in RecipeStore(directory).all()}
+    assert len(loaded) == len(files), "示例 host 有重复，复制后会互相覆盖"
+    for path in files:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert (data.get("host") or path.stem).lower() == path.stem
+        recipe = loaded[path.stem]
+        assert recipe.root_selector or recipe.extract, f"{path.name} 没有配置任何抓取规则"
+
+
 # ---------- 套用 ----------
 
 

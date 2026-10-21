@@ -394,7 +394,7 @@ No restart is needed: files reload on mtime change. A malformed JSON file is ski
 
 #### Ready-made recipes (real sites)
 
-`examples/recipes/` contains three usable recipes — copy them into `RECIPES_DIR`:
+`examples/recipes/` contains eight usable recipes — copy them into `RECIPES_DIR`:
 
 ```bash
 mkdir -p ~/.scrape_mcp/recipes
@@ -406,12 +406,22 @@ cp examples/recipes/*.json ~/.scrape_mcp/recipes/
 | `docs.python.org.json` | Python docs | `root_selector` = `div.body`; `crawl.next_selector` via `accesskey="N"`; `extract` for title/version/section count/next link |
 | `github.com.json` | GitHub Trending | `type=list` for the whole board (repo, URL, stars today, language, description) |
 | `ruanyifeng.com.json` | Ruan Yifeng's blog | `root_selector` = `#main-content` plus `regex` for the publish date; `host` = `ruanyifeng.com` to cover `www.` |
+| `developer.mozilla.org.json` | MDN docs | `root_selector` = `main#content` (the site has no `article` element); `extract` for title/section count/body link count |
+| `fastapi.tiangolo.com.json` | FastAPI docs | Material for MkDocs site: `root_selector` = `.md-content__inner`, skipping `.md-sidebar` navigation |
+| `cn.vuejs.org.json` | Vue docs (zh-CN) | VitePress site: `root_selector` = `.vt-doc` (the older theme used `.vp-doc`) |
+| `cnblogs.com.json` | Cnblogs home | List page: one `type=list` extraction yields 20 posts (title/URL/author/summary/time); pagination is numbered links, so no `crawl` |
+| `chinanews.com.cn.json` | China News article page | `root_selector` = `.left_zw` with a `required` title; time/source/author live in the BaiduSpider block |
 
 ```bash
 # Extract via recipe (no schema)
 web_extract(url="https://docs.python.org/3/library/asyncio.html")
 web_extract(url="https://github.com/trending")
 web_extract(url="https://www.ruanyifeng.com/blog/2026/10/weekly-issue-415.html")
+web_extract(url="https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Guides/CORS")
+web_extract(url="https://fastapi.tiangolo.com/tutorial/")
+web_extract(url="https://cn.vuejs.org/guide/introduction.html")
+web_extract(url="https://www.cnblogs.com/")
+web_extract(url="https://www.chinanews.com.cn/gn/2026/10-21/10718387.shtml")
 
 # Paginate via recipe (next_selector switches to mode=paginate)
 web_crawl(url="https://docs.python.org/3/library/asyncio.html", max_pages=3)

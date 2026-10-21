@@ -402,7 +402,7 @@ schema='{"fields": {
 
 #### 开箱示例（真实站点）
 
-`examples/recipes/` 里有三份可直接使用的 recipe，复制到 `RECIPES_DIR` 即可：
+`examples/recipes/` 里有八份可直接使用的 recipe，复制到 `RECIPES_DIR` 即可：
 
 ```bash
 mkdir -p ~/.scrape_mcp/recipes
@@ -414,12 +414,22 @@ cp examples/recipes/*.json ~/.scrape_mcp/recipes/
 | `docs.python.org.json` | Python 官方文档 | `root_selector` 取 `div.body`；`crawl.next_selector` 用 `accesskey="N"` 顺序翻页；`extract` 取标题/版本/章节数/下一章链接 |
 | `github.com.json` | GitHub Trending | `type=list` 一次抽整张榜单（仓库名、URL、今日 star、语言、简介） |
 | `ruanyifeng.com.json` | 阮一峰的网络日志 | 正文根 `#main-content` + `regex` 提取发布日期；`host` 用 `ruanyifeng.com` 以覆盖 `www.` 子域 |
+| `developer.mozilla.org.json` | MDN 文档 | 正文根用 `main#content`（该站没有 `article` 标签）；`extract` 取标题/章节数/正文链接数 |
+| `fastapi.tiangolo.com.json` | FastAPI 文档 | Material for MkDocs 站：正文根 `.md-content__inner`，避开 `.md-sidebar` 导航 |
+| `cn.vuejs.org.json` | Vue 中文文档 | VitePress 站：正文根 `.vt-doc`（旧版主题是 `.vp-doc`） |
+| `cnblogs.com.json` | 博客园首页 | 列表页 `type=list` 一次抽 20 条（标题/URL/作者/摘要/时间）；翻页只有页码链接，不配 `crawl` |
+| `chinanews.com.cn.json` | 中国新闻网文章页 | 正文根 `.left_zw`，标题 `required`；时间/来源/作者在 BaiduSpider 隐藏块 |
 
 ```bash
 # 按 recipe 抽取（不传 schema）
 web_extract(url="https://docs.python.org/3/library/asyncio.html")
 web_extract(url="https://github.com/trending")
 web_extract(url="https://www.ruanyifeng.com/blog/2026/10/weekly-issue-415.html")
+web_extract(url="https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Guides/CORS")
+web_extract(url="https://fastapi.tiangolo.com/tutorial/")
+web_extract(url="https://cn.vuejs.org/guide/introduction.html")
+web_extract(url="https://www.cnblogs.com/")
+web_extract(url="https://www.chinanews.com.cn/gn/2026/10-21/10718387.shtml")
 
 # 按 recipe 翻页（next_selector 生效即进入 mode=paginate）
 web_crawl(url="https://docs.python.org/3/library/asyncio.html", max_pages=3)
