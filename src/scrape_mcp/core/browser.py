@@ -1,7 +1,10 @@
 """L2 抓取层：Playwright 渲染，用于 JS 空壳页与反爬挑战页。
 
 只在 L1 被判为拦截时才启用：启动浏览器比 curl_cffi 贵一到两个数量级。
-浏览器实例按需创建、跨请求复用，进程退出时由 server 的 lifespan 关闭。
+浏览器实例按需创建、跨请求复用；池化管理三件事：
+- 同一 host + session 共用一个 context（各带独立登录态），超出上限按最久未用淘汰
+- 同时打开的页面数受限，超出排队而不是把浏览器压满
+- 空闲超过阈值后自动关掉浏览器进程，下次用到再启动
 """
 
 from __future__ import annotations
@@ -9,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -87,6 +91,14 @@ _LAUNCH_ARGS = (
 
 _SETTLE_INTERVAL_MS = 400
 
+# 空闲检查的最小间隔（秒）：阈值很小时不至于把检查开成忙轮询
+_REAP_MIN_INTERVAL = 1.0
+
+
+def _reap_interval(idle_timeout: float) -> float:
+    """空闲检查间隔：取阈值的 1/4，限制在 1~30 秒之间。"""
+    return max(_REAP_MIN_INTERVAL, min(30.0, idle_timeout / 4))
+
 
 @dataclass
 class BrowserOutcome:
@@ -110,9 +122,17 @@ class BrowserRenderer:
         self._sessions = SessionStore(settings.data_dir)
         self._playwright: Any = None
         self._browser: Any = None
-        # 每站（按会话名隔离）一个 context，各带一份独立的登录态
-        self._contexts: dict[tuple[str, str], Any] = {}
+        # 每站（按会话名隔离）一个 context，各带一份独立的登录态；
+        # 按最近使用排序，超过 l2_max_contexts 时淘汰最久未用的那个
+        self._contexts: OrderedDict[tuple[str, str], Any] = OrderedDict()
         self._lock = asyncio.Lock()
+        # 并发页上限：Semaphore 会绑定首次使用时的事件循环，换循环就重建
+        self._slots: asyncio.Semaphore | None = None
+        self._slots_loop: asyncio.AbstractEventLoop | None = None
+        # 在途渲染/登录数：>0 时不做空闲回收，避免把正在用的浏览器关掉
+        self._active = 0
+        self._last_used = time.monotonic()
+        self._reaper: asyncio.Task[None] | None = None
 
     def has_session(self, host: str, session: str = "default") -> bool:
         return self._sessions.has(host, session)
@@ -122,16 +142,82 @@ class BrowserRenderer:
     async def _context_for(self, host: str, session: str = "default") -> Any:
         key = (host, session)
         async with self._lock:
-            if key in self._contexts:
-                return self._contexts[key]
+            context = self._contexts.get(key)
+            if context is not None:
+                self._contexts.move_to_end(key)
+                return context
             try:
                 context = await self._new_context(host, session)
             except Exception:
                 # 半途失败会留下已启动的浏览器/驱动进程，先收干净再抛，避免每次重试都漏一个
-                await self.aclose()
+                await self._shutdown()
                 raise
             self._contexts[key] = context
+            await self._trim_contexts()
             return context
+
+    async def _trim_contexts(self) -> None:
+        """超出上限时关掉最久未用的 context，避免跨站抓取把内存越堆越多。"""
+        limit = max(1, int(self._s.l2_max_contexts))
+        while len(self._contexts) > limit:
+            _key, stale = self._contexts.popitem(last=False)
+            with contextlib.suppress(Exception):
+                await stale.close()
+
+    def _page_slots(self) -> asyncio.Semaphore:
+        """取并发页配额；换事件循环（多次 asyncio.run）时重建，理由同 HTTP 会话。"""
+        loop = asyncio.get_running_loop()
+        if self._slots is None or self._slots_loop is not loop:
+            self._slots = asyncio.Semaphore(max(1, int(self._s.l2_max_pages)))
+            self._slots_loop = loop
+        return self._slots
+
+    def _touch(self) -> None:
+        """记录最近活动时间，并确保空闲回收协程在跑（阈值 0 表示不回收）。"""
+        self._last_used = time.monotonic()
+        if self._s.l2_idle_timeout <= 0:
+            return
+        if self._reaper is None or self._reaper.done():
+            self._reaper = asyncio.create_task(self._reap_idle_loop())
+
+    async def _reap_idle_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_reap_interval(self._s.l2_idle_timeout))
+            if self._browser is None:
+                return  # 已被别处关掉（启动失败清理 / 进程退出）
+            if await self._reap_if_idle():
+                return
+
+    async def _reap_if_idle(self) -> bool:
+        """空闲超过阈值就回收；返回 True 表示已经关掉。
+
+        判断放在锁内：避免与正在创建 context 的请求撞车，把刚启动的浏览器关掉。
+        """
+        async with self._lock:
+            if self._browser is None:
+                return True
+            if self._s.l2_idle_timeout <= 0:
+                return False
+            if self._active > 0:
+                return False
+            if time.monotonic() - self._last_used < self._s.l2_idle_timeout:
+                return False
+            await self._shutdown()
+            return True
+
+    async def _shutdown(self) -> None:
+        """关掉 context / 浏览器 / 驱动；可重复调用，关闭失败不影响后续重来。"""
+        contexts, self._contexts = list(self._contexts.values()), OrderedDict()
+        for context in contexts:
+            with contextlib.suppress(Exception):
+                await context.close()
+        if self._browser is not None:
+            with contextlib.suppress(Exception):
+                await self._browser.close()
+        if self._playwright is not None:
+            with contextlib.suppress(Exception):
+                await self._playwright.stop()
+        self._playwright = self._browser = None
 
     async def _new_context(
         self, host: str, session: str = "default", *, headless: bool | None = None
@@ -207,17 +293,14 @@ class BrowserRenderer:
         )
 
     async def aclose(self) -> None:
-        for context in self._contexts.values():
-            with contextlib.suppress(Exception):  # 关闭失败不影响进程退出
-                await context.close()
-        self._contexts.clear()
-        if self._browser is not None:
-            with contextlib.suppress(Exception):
-                await self._browser.close()
-        if self._playwright is not None:
-            with contextlib.suppress(Exception):
-                await self._playwright.stop()
-        self._playwright = self._browser = None
+        """进程退出或显式释放：先停掉空闲回收协程，再关掉浏览器。"""
+        reaper, self._reaper = self._reaper, None
+        if reaper is not None and not reaper.done():
+            reaper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reaper
+        async with self._lock:
+            await self._shutdown()
 
     # ---------- 渲染 ----------
 
@@ -233,6 +316,34 @@ class BrowserRenderer:
     ) -> BrowserOutcome:
         t0 = time.perf_counter()
         host = host or urlparse(url).netloc.lower()
+        # 并发页上限：超出时排队；排队期间不计入在途，空闲回收仍可正常关浏览器
+        async with self._page_slots():
+            self._active += 1
+            self._touch()
+            try:
+                return await self._render_once(
+                    url,
+                    host,
+                    t0,
+                    wait_for=wait_for,
+                    scroll=scroll,
+                    click=click,
+                    session=session,
+                )
+            finally:
+                self._active -= 1
+
+    async def _render_once(
+        self,
+        url: str,
+        host: str,
+        t0: float,
+        *,
+        wait_for: str | None,
+        scroll: bool,
+        click: str | None,
+        session: str,
+    ) -> BrowserOutcome:
         try:
             context = await self._context_for(host, session)
         except Exception as exc:
@@ -346,7 +457,17 @@ class BrowserRenderer:
         host = urlparse(url).netloc.lower()
         had_session = self.has_session(host, session)
         t0 = time.perf_counter()
+        # 手动登录可能等上几分钟：计入在途，避免空闲回收把登录窗口关掉
+        self._active += 1
+        self._touch()
+        try:
+            return await self._login_once(url, host, timeout, session, had_session, t0)
+        finally:
+            self._active -= 1
 
+    async def _login_once(
+        self, url: str, host: str, timeout: float, session: str, had_session: bool, t0: float
+    ) -> dict[str, Any]:
         # 手动登录必须能看到界面；新开一个不落缓存的 context，避免被已存登录态干扰
         context = await self._new_context(host, session, headless=False)
         page = await context.new_page()
@@ -368,8 +489,11 @@ class BrowserRenderer:
 
             state = await context.storage_state()
             self._sessions.save(host, state, session)
-            # 若该站该会话已有带旧登录态的缓存 context，下次抓取要重新加载新登录态
-            self._contexts.pop((host, session), None)
+            # 该站该会话若还留着带旧登录态的 context，关掉它，下次抓取重新加载新登录态
+            stale = self._contexts.pop((host, session), None)
+            if stale is not None:
+                with contextlib.suppress(Exception):
+                    await stale.close()
 
             return {
                 "ok": True,

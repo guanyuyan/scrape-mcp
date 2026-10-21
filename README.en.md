@@ -94,6 +94,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 
 - **Tiered fetching**: L1 `curl_cffi` → L2 Playwright, escalating only when blocked.
 - **L1 connection reuse**: one connection pool per fingerprint template inside the process, skipping repeated TLS handshakes and DNS lookups; rebuilt automatically when the event loop changes, released on shutdown or `aclose()`.
+- **L2 browser pool**: contexts are reused per host + session (each with its own login state) and evicted least-recently-used when over the cap; concurrent pages are bounded and queue up; an idle browser is closed after `L2_IDLE_TIMEOUT` seconds and relaunched on demand.
 - **Content-density root picking**: chooses the tightest container that still holds the whole body, avoiding nav/sidebars.
 - **Compact output**: attribute stripping, boilerplate removal, off-site link demotion, tables to CSV (merged cells padded), fenced code blocks with language tags, `figure` images with absolute URLs plus captions. Compression typically 1%–20% (e.g. MDN 214 KB → a few hundred tokens).
 - **Honest blocking reports**: challenge pages and empty shells are never treated as content; you get `blocked` / `block_reason`.
@@ -155,6 +156,9 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `L2_SETTLE_TIMEOUT` | `8` | Wait window for challenge pages (seconds) |
 | `L2_SCROLL_STEPS` | `5` | L2 scroll steps (triggers lazy loading) |
 | `L2_SCROLL_DELAY_MS` | `400` | Delay per scroll step (ms) |
+| `L2_MAX_PAGES` | `3` | Max pages open at once; extra calls queue |
+| `L2_MAX_CONTEXTS` | `8` | Max resident contexts (per host + session); least recently used is evicted |
+| `L2_IDLE_TIMEOUT` | `120` | Idle seconds before the browser is closed; `0` keeps it for the process lifetime |
 | `L2_TIMEZONE` | `Asia/Shanghai` | Timezone used for stealth alignment |
 | `DATA_DIR` | `~/.scrape_mcp` | Where sessions and cache live |
 | `RECIPES_DIR` | `<DATA_DIR>/recipes` | Site recipe directory; empty means default |

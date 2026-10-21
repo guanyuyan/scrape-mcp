@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     # L2 交互：滚动步数与每步间隔，用于触发无限滚动/懒加载
     l2_scroll_steps: int = 5
     l2_scroll_delay_ms: int = 400
+    # 同时打开的页面上限：超出时排队，避免一次批量把浏览器压满
+    l2_max_pages: int = 3
+    # 常驻 context 上限（按 host + session 复用）；超出按最久未用淘汰
+    l2_max_contexts: int = 8
+    # 浏览器空闲多久后回收（秒）：关掉 context 与浏览器进程，下次用到再启动；0=常驻到进程退出
+    l2_idle_timeout: float = 120.0
 
     # ---- M3 登录态持久化 ----
     # 登录态文件（Playwright storage_state）落盘目录，按站点域名各存一份

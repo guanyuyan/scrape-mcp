@@ -97,6 +97,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 
 - **分级抓取**：L1 `curl_cffi` → L2 Playwright，拦截才升级，不误伤正常页面。
 - **L1 连接复用**：同一指纹模板在进程内共享连接池，省掉重复的 TLS 握手与 DNS 解析；换事件循环自动重建，进程退出或 `aclose()` 统一释放。
+- **L2 浏览器池**：同站同会话复用 context（各带独立登录态），超出上限按最久未用淘汰；同时打开的页面数受限，超出排队；空闲超过 `L2_IDLE_TIMEOUT` 秒自动关掉浏览器进程，下次用到再启动。
 - **内容密度选根**：从 article/main/div 中挑出"恰好装住正文的最紧容器"，避开导航/侧栏。
 - **compact 精简**：属性剥离、模板块丢弃、站外链接降级、表格转 CSV（合并单元格自动补齐空位）、
   代码块带语言标记、`figure` 输出图片地址与图注，压缩率可达 1~20% 数量级（如 MDN 214KB → 数百 token）。
@@ -161,6 +162,9 @@ cp .env.example .env    # 生成配置模板
 | `L2_SETTLE_TIMEOUT` | `8` | 挑战页等待窗口（秒） |
 | `L2_SCROLL_STEPS` | `5` | L2 滚动步数（触发懒加载） |
 | `L2_SCROLL_DELAY_MS` | `400` | L2 每步滚动间隔（毫秒） |
+| `L2_MAX_PAGES` | `3` | L2 同时打开的页面上限，超出排队 |
+| `L2_MAX_CONTEXTS` | `8` | L2 常驻 context 上限（按 host + session 复用），超出淘汰最久未用 |
+| `L2_IDLE_TIMEOUT` | `120` | L2 浏览器空闲回收阈值（秒），`0` 常驻到进程退出 |
 | `L2_TIMEZONE` | `Asia/Shanghai` | 隐身加固时区 |
 | `DATA_DIR` | `~/.scrape_mcp` | 登录态/缓存放盘目录 |
 | `RECIPES_DIR` | `<DATA_DIR>/recipes` | 站点 recipe 目录；留空用默认路径 |
