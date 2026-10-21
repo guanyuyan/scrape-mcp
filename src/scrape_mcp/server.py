@@ -374,6 +374,7 @@ async def _fetch_html(
         kind=outcome.kind,
         cached=outcome.cached,
         html_bytes=len(outcome.html),
+        elapsed_ms=outcome.elapsed_ms,
     )
 
     if outcome.error:

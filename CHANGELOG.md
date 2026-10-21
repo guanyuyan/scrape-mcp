@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- **`/stats` 耗时分布**：新增 `latency_ms`——最近 1024 次抓取的 p50/p95/p99、固定分桶（`lt_100` … `gte_10000`）与按 L1/L2 分层的 p50/p95。与 payload 的 `elapsed_ms` 同口径，不含结果缓存命中；样本有上限，长时间运行不涨内存
+
 ## [0.7.0] - 2026-10-21
 
 ### Added

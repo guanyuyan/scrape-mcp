@@ -61,8 +61,8 @@ def _run(coro) -> dict:
 
 def test_snapshot_counts_and_hit_rate():
     s = stats.Stats()
-    s.record_fetch(tier="l1", code="ok", kind="html", cached=False, html_bytes=100)
-    s.record_fetch(tier="l2", code="blocked", kind="html", cached=True, html_bytes=0)
+    s.record_fetch(tier="l1", code="ok", kind="html", cached=False, html_bytes=100, elapsed_ms=120)
+    s.record_fetch(tier="l2", code="blocked", kind="html", cached=True, html_bytes=0, elapsed_ms=8)
     s.record_result_hit()
     s.record_tokens(120)
 
@@ -79,6 +79,9 @@ def test_snapshot_counts_and_hit_rate():
     assert snap["tokens_returned"] == 120
     assert snap["bytes_in"] == 100
     assert snap["uptime_s"] >= 0
+    assert snap["latency_ms"]["samples"] == 2
+    assert snap["latency_ms"]["p50"] == 8
+    assert snap["latency_ms"]["p95"] == 120
 
 
 def test_snapshot_of_empty_stats():
@@ -86,6 +89,51 @@ def test_snapshot_of_empty_stats():
     assert snap["requests"] == 0
     assert snap["cache_hit_rate"] == 0.0
     assert snap["by_tier"] == {}
+    assert snap["latency_ms"]["samples"] == 0
+    assert snap["latency_ms"]["p50"] == 0
+    assert snap["latency_ms"]["by_tier"] == {}
+
+
+def test_latency_percentiles_and_buckets():
+    s = stats.Stats()
+    for ms in (10, 120, 250, 600, 1500, 4000, 20000):
+        s.record_fetch(tier="l1", code="ok", kind="html", cached=False, elapsed_ms=ms)
+
+    lat = s.snapshot()["latency_ms"]
+    assert lat["samples"] == 7
+    assert lat["p50"] == 600
+    assert lat["p95"] == 20000
+    assert lat["p99"] == 20000
+    assert lat["buckets"] == {
+        "lt_100": 1,
+        "lt_300": 2,
+        "lt_1000": 1,
+        "lt_3000": 1,
+        "lt_10000": 1,
+        "gte_10000": 1,
+    }
+
+
+def test_latency_is_split_by_tier():
+    s = stats.Stats()
+    s.record_fetch(tier="l1", code="ok", kind="html", cached=False, elapsed_ms=50)
+    s.record_fetch(tier="l2", code="ok", kind="html", cached=False, elapsed_ms=2000)
+
+    lat = s.snapshot()["latency_ms"]
+    assert lat["by_tier"]["l1"] == {"samples": 1, "p50": 50, "p95": 50}
+    assert lat["by_tier"]["l2"] == {"samples": 1, "p50": 2000, "p95": 2000}
+
+
+def test_latency_window_is_bounded():
+    """样本只留最近 N 条，长时间运行不会让内存一直涨。"""
+    s = stats.Stats()
+    for _ in range(stats._LATENCY_WINDOW + 10):
+        s.record_fetch(tier="l1", code="ok", kind="html", cached=False, elapsed_ms=10)
+
+    lat = s.snapshot()["latency_ms"]
+    assert s.fetches == stats._LATENCY_WINDOW + 10
+    assert lat["samples"] == stats._LATENCY_WINDOW
+    assert sum(lat["buckets"].values()) == stats._LATENCY_WINDOW
 
 
 # ---- /stats 端点 ----
@@ -109,6 +157,7 @@ def test_stats_endpoint_serves_loopback():
         "by_kind",
         "tokens_returned",
         "bytes_in",
+        "latency_ms",
     }
 
 
@@ -148,6 +197,9 @@ def test_fetch_and_result_cache_hit_are_counted(tmp_path, monkeypatch):
     assert snap["by_tier"] == {"l1": 1}
     assert snap["by_code"] == {"ok": 1}
     assert snap["tokens_returned"] == first["token_estimate"]
+    # 结果缓存命中不产生抓取，也不该进入耗时样本
+    assert snap["latency_ms"]["samples"] == 1
+    assert snap["latency_ms"]["by_tier"]["l1"]["samples"] == 1
 
 
 def test_blocked_fetch_counts_error_code(tmp_path, monkeypatch):

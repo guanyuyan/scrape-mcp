@@ -198,8 +198,13 @@ Local stats: `GET /stats` returns in-process counters and only answers loopback 
 curl http://127.0.0.1:8000/stats
 # {"ok":true,"uptime_s":42,"requests":7,"fetches":5,"result_cache_hits":2,
 #  "http_cache_hits":1,"cache_hit_rate":0.286,"by_tier":{"l1":4,"l2":1},
-#  "by_code":{"ok":5},"by_kind":{"html":5},"tokens_returned":8120,"bytes_in":1048576}
+#  "by_code":{"ok":5},"by_kind":{"html":5},"tokens_returned":8120,"bytes_in":1048576,
+#  "latency_ms":{"window":1024,"samples":5,"p50":120,"p95":820,"p99":820,
+#   "buckets":{"lt_100":2,"lt_300":1,"lt_1000":1,"lt_3000":1,"lt_10000":0,"gte_10000":0},
+#   "by_tier":{"l1":{"samples":4,"p50":90,"p95":260},"l2":{"samples":1,"p50":820,"p95":820}}}}
 ```
+
+`latency_ms` covers the last 1024 fetches (percentiles + fixed histogram buckets + per-tier split), excluding result-cache hits. The window is bounded, so memory stays flat in long-running processes.
 
 `by_tier` is the tier that actually ran, `by_code` reuses the tool error codes (`ok` on success), and `cache_hit_rate` is result-cache hits over total requests. Only counters and byte sizes are kept — no URLs, no page content — and everything resets on restart.
 

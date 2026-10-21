@@ -203,8 +203,13 @@ python -m scrape_mcp.server
 curl http://127.0.0.1:8000/stats
 # {"ok":true,"uptime_s":42,"requests":7,"fetches":5,"result_cache_hits":2,
 #  "http_cache_hits":1,"cache_hit_rate":0.286,"by_tier":{"l1":4,"l2":1},
-#  "by_code":{"ok":5},"by_kind":{"html":5},"tokens_returned":8120,"bytes_in":1048576}
+#  "by_code":{"ok":5},"by_kind":{"html":5},"tokens_returned":8120,"bytes_in":1048576,
+#  "latency_ms":{"window":1024,"samples":5,"p50":120,"p95":820,"p99":820,
+#   "buckets":{"lt_100":2,"lt_300":1,"lt_1000":1,"lt_3000":1,"lt_10000":0,"gte_10000":0},
+#   "by_tier":{"l1":{"samples":4,"p50":90,"p95":260},"l2":{"samples":1,"p50":820,"p95":820}}}}
 ```
+
+`latency_ms` 是最近 1024 次抓取的耗时分布（分位数 + 固定分桶 + 分层），不含结果缓存命中；样本有上限，长时间运行不会持续占内存。
 
 `by_tier` 是实际生效的层级分布，`by_code` 复用工具返回的错误码（成功为 `ok`），`cache_hit_rate` 是结果缓存命中数 ÷ 总请求数。统计只记计数与字节数，不记 URL、不记页面内容，进程重启后归零。
 
