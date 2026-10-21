@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from starlette.responses import JSONResponse
 
 from . import __version__
@@ -99,6 +99,17 @@ def _denied_payload(url: str, code: str, message: str) -> dict:
         "error": message,
         "retryable": errors.is_retryable(code),
     }
+
+
+async def _notify_progress(ctx: Context | None, done: int, total: int, message: str) -> None:
+    """向客户端汇报进度。
+
+    客户端没请求进度时 SDK 本身是 no-op；直接调用工具函数（SDK/测试）时没有
+    Context，也不该为了通知多发一次请求，所以这里静默跳过。
+    """
+    if ctx is None or ctx.request_context is None:
+        return
+    await ctx.report_progress(done, total, message)
 
 
 def _diagnostics(outcome: FetchOutcome, *, detail: bool = False) -> dict:
@@ -709,6 +720,7 @@ async def web_batch(
     bypass_cache: bool = False,
     debug: bool = False,
     session: str = "default",
+    ctx: Context | None = None,
 ) -> str:
     """并发抓取一批 URL，各自走完整分级链路，返回逐个结果。
 
@@ -723,6 +735,7 @@ async def web_batch(
         bypass_cache: 跳过并绕过响应缓存。
         debug: 每条结果附带 diagnostics（决策轨迹与计数，不含页面内容）。
         session: 登录态会话名（默认 default）；对该批所有 URL 生效。
+        ctx: MCP 上下文，由框架注入，用于逐条上报进度（客户端请求进度时才发通知）。
     """
     settings = get_settings()
     if (session_err := _session_error(session)) is not None:
@@ -748,11 +761,14 @@ async def web_batch(
         )
 
     sem = asyncio.Semaphore(settings.batch_max_concurrency)
+    total = len(urls)
+    done = 0
 
     async def one(u: str) -> dict:
+        nonlocal done
         async with sem:
             try:
-                return await _fetch_dict(
+                result = await _fetch_dict(
                     u,
                     max_tokens,
                     link_policy,
@@ -766,13 +782,16 @@ async def web_batch(
                 )
             except Exception as exc:  # 单条意外异常不应拖垮整批
                 code = errors.classify_exception(exc)
-                return {
+                result = {
                     "ok": False,
                     "url": u,
                     "error_code": code,
                     "error": f"{type(exc).__name__}: {exc}",
                     "retryable": errors.is_retryable(code),
                 }
+        done += 1
+        await _notify_progress(ctx, done, total, f"已抓取 {done}/{total} 个 URL")
+        return result
 
     results = await asyncio.gather(*(one(u) for u in urls))
     ok_count = sum(1 for r in results if r.get("ok"))
@@ -866,6 +885,7 @@ async def web_crawl(
     timeout: float | None = None,
     bypass_cache: bool = False,
     session: str = "default",
+    ctx: Context | None = None,
 ) -> str:
     """从起始页发现站内链接并批量抓取，或按"下一页"顺序翻页，适合把一个栏目的前 N 篇读进来。
 
@@ -890,6 +910,7 @@ async def web_crawl(
         timeout: 单次请求超时秒数。
         bypass_cache: 跳过并绕过响应缓存。
         session: 登录态会话名（默认 default）；对本次所有页面生效。
+        ctx: MCP 上下文，由框架注入，用于逐页上报进度（客户端请求进度时才发通知）。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -961,6 +982,7 @@ async def web_crawl(
                 }
                 nxt = None
             results.append(payload)
+            await _notify_progress(ctx, len(results), cap, f"已翻到第 {len(results)}/{cap} 页")
             if not payload.get("ok") or nxt is None or nxt in visited:
                 break
             visited.add(nxt)
@@ -981,11 +1003,13 @@ async def web_crawl(
 
     cap = min(max(1, int(limit)), settings.crawl_max_pages)
     sem = asyncio.Semaphore(settings.batch_max_concurrency)
+    fetched = 0
 
     async def one(u: str) -> tuple[dict, list[str], str | None]:
+        nonlocal fetched
         async with sem:
             try:
-                return await _crawl_page(
+                result = await _crawl_page(
                     u,
                     max_tokens=max_tokens,
                     link_policy=link_policy,
@@ -999,7 +1023,7 @@ async def web_crawl(
                 )
             except Exception as exc:  # 单页异常不中断整次爬取
                 code = errors.classify_exception(exc)
-                return (
+                result = (
                     {
                         "ok": False,
                         "url": u,
@@ -1010,6 +1034,9 @@ async def web_crawl(
                     [],
                     None,
                 )
+        fetched += 1
+        await _notify_progress(ctx, fetched, cap, f"已抓取 {fetched}/{cap} 页")
+        return result
 
     visited: set[str] = {url}
     frontier: list[str] = [url]

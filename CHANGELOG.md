@@ -8,6 +8,7 @@
 - **`scrape-mcp init`**：一行生成 Claude Desktop / Cursor / VS Code / 通用 JSON 配置；默认只打印 diff 预览，`--write` 落盘，已有同名条目需 `--force` 才覆盖，`--env KEY=VALUE` 可写入环境变量
 - **`scrape-mcp schema`**：导出工具定义（名称、说明、入参 schema），支持 `--tool` 过滤与 `--output` 写文件
 - **Python SDK**：`scrape_mcp.sdk` 提供 `fetch` / `extract` / `crawl` / `batch`，与 MCP 工具共用实现，返回解析后的 dict
+- **进度通知**：`web_batch` / `web_crawl` 在客户端请求进度时逐条/逐页上报（并发批量为 `已抓取 n/N 个 URL`，分页为 `已翻到第 n/N 页`）；客户端未请求时零额外开销
 
 ## [0.5.0] - 2026-10-21
 
