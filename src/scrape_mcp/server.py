@@ -1222,13 +1222,21 @@ def main(argv: list[str] | None = None) -> None:
     """
     if argv is None:
         argv = sys.argv[1:]
+    # 子命令（init / schema）走独立模块，不启动服务；其余参数保持原有零配置行为
+    if argv and argv[0] in ("init", "schema"):
+        from .cli import run as run_subcommand
+
+        raise SystemExit(run_subcommand(argv))
     if not argv:
         argv = ["--transport", "stdio"]
     elif argv in (["-h"], ["--help"]):
         msg = (
             "scrape-mcp — 反爬感知抓取 + 极省 Token 内容精简的 MCP Server\n\n"
-            "用法: scrape-mcp [--transport stdio|streamable-http] [--port N] [--version]\n\n"
+            "用法: scrape-mcp [--transport stdio|streamable-http] [--port N] [--version]\n"
+            "      scrape-mcp init [--client claude|cursor|vscode|json] [--write]\n"
+            "      scrape-mcp schema [--tool NAME] [--output FILE]\n\n"
             "零配置默认作为 stdio MCP 服务运行，供 Claude/Cursor 等客户端接管。\n"
+            "init 生成客户端配置（默认只预览 diff），schema 导出工具定义。\n"
             "如需 HTTP 直连（Postman/curl），加 --transport streamable-http [--port 8000]。\n"
             "配置详见 .env / SCRAPE_MCP_* 环境变量。"
         )

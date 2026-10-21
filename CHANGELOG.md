@@ -2,6 +2,13 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- **`scrape-mcp init`**：一行生成 Claude Desktop / Cursor / VS Code / 通用 JSON 配置；默认只打印 diff 预览，`--write` 落盘，已有同名条目需 `--force` 才覆盖，`--env KEY=VALUE` 可写入环境变量
+- **`scrape-mcp schema`**：导出工具定义（名称、说明、入参 schema），支持 `--tool` 过滤与 `--output` 写文件
+- **Python SDK**：`scrape_mcp.sdk` 提供 `fetch` / `extract` / `crawl` / `batch`，与 MCP 工具共用实现，返回解析后的 dict
+
 ## [0.5.0] - 2026-10-21
 
 ### Added

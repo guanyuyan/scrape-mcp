@@ -51,13 +51,13 @@ python -m venv .venv && .venv\Scripts\pip install -e .
   ok=True tier=l1 data={"heading": "跨源资源共享（CORS）", "h2_count": 10, "links": 665}
 ```
 
-**第 2 步：作为 MCP 客户端接入**（Claude / Cursor 等，命令指向已安装的 `scrape-mcp`）
+**第 2 步：接入 MCP 客户端**（Claude / Cursor 等，一条命令写好配置）
 
 ```bash
-scrape-mcp            # 已安装时；或 python -m scrape_mcp.server
+scrape-mcp init --client cursor --write     # claude / vscode / json 同理
 ```
 
-在客户端里调用 `web_fetch(url=...)` 即可拿到极省正文。
+默认只打印 diff 预览，确认后加 `--write` 落盘；重启客户端即可调用 `web_fetch(url=...)`。
 
 > MDN 整页约 260KB，这里只花几千 token 就拿到干净正文；拦截/登录页会自动升级或如实上报，不会把验证码当正文。
 
@@ -193,23 +193,37 @@ python -m scrape_mcp.server
 
 ## 接入 MCP 客户端（Claude / Cursor 等）
 
-先 `pip install mcp-scrape`（或用项目 `.venv` 跑 `pip install -e .`），使 `scrape-mcp` 命令全局可用；然后按标准 MCP 方式接入。
+先 `pip install mcp-scrape`（或用项目 `.venv` 跑 `pip install -e .`），使 `scrape-mcp` 命令全局可用。
 
-以 Claude Desktop 为例（`claude_desktop_config.json`）：
+**一条命令生成配置（推荐）**
+
+```bash
+scrape-mcp init --client cursor --write     # 或 claude / vscode / json
+```
+
+- 默认只打印 diff 预览，加 `--write` 才落盘；目标文件里其它服务配置原样保留
+- `--client json` 直接打印 JSON（不落盘），适合贴到任意客户端或自定义路径
+- 已有同名 `scrape-mcp` 条目时不覆盖，确需更新加 `--force`
+- `--scope global|project` 控制写全局还是项目内（`.cursor/mcp.json`、`.vscode/mcp.json`）
+- `--env KEY=VALUE` 可把 `SCRAPE_MCP_PROXY`、`SCRAPE_MCP_L2_CHANNEL` 等写进客户端配置
+- `--command` 可指定启动命令；缺省优先用已安装的 `scrape-mcp`，找不到则退回当前解释器 + `-m scrape_mcp.server`
+
+生成的结构（Claude / Cursor 用 `mcpServers`，VS Code 用 `servers` 且带 `"type": "stdio"`）：
 
 ```json
 {
   "mcpServers": {
     "scrape-mcp": {
-      "command": "scrape-mcp"
+      "command": "scrape-mcp",
+      "args": []
     }
   }
 }
 ```
 
-- 用 `command: "scrape-mcp"`（已全局安装），免去 `PYTHONPATH` 与系统解释器导致的 `ModuleNotFoundError`。
 - 若复用系统浏览器（免下载）：设环境变量 `SCRAPE_MCP_L2_CHANNEL` 为 `chrome` 或 `msedge`。
 - 配对成功后重启客户端，即可在会话里直接调用 `web_fetch` / `web_extract` / `web_batch` / `web_crawl`。
+- 想先看工具定义（名称、说明、入参 schema）：`scrape-mcp schema --tool web_fetch`，或 `--output tools.json` 导出全量。
 
 ## MCP 工具
 
@@ -384,6 +398,36 @@ web_crawl(url="https://docs.python.org/3/library/asyncio.html", max_pages=3)
 
 单次覆盖：显式参数优先于 recipe，例如 `web_fetch(url="...", wait_for=".comments")`。
 
+## Python SDK
+
+不接 MCP 也能直接用同一套实现（参数、返回值、错误码与工具完全一致）：
+
+```python
+import asyncio
+
+from scrape_mcp.sdk import batch, crawl, extract, fetch
+
+
+async def main() -> None:
+    page = await fetch("https://docs.python.org/3/library/asyncio.html", max_tokens=2000)
+    print(page["ok"], page["token_estimate"], page["tier"])
+
+    # 按字段抽取（schema 规则见 web_extract）；命中 recipe 时可省略 schema
+    data = await extract("https://github.com/trending")
+    print([repo["name"] for repo in data["data"]["repos"][:3]])
+
+    pages = await crawl("https://docs.python.org/3/library/asyncio.html", max_pages=3)
+    print(pages["mode"], pages["pages_fetched"])
+
+    many = await batch(["https://example.com", "https://example.org"])
+
+
+asyncio.run(main())
+```
+
+- 返回的就是 MCP 工具的 JSON 载荷（已解析为 dict），失败同样带 `error_code` / `retryable`
+- SDK 放在 `scrape_mcp.sdk`，是为了不和内部 `scrape_mcp.extract` 子包重名
+
 ## Docker
 
 ```bash
@@ -402,6 +446,8 @@ curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 ```
 src/scrape_mcp
 ├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/login/session_*）
+├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）
+├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/batch）
 ├── config.py          # 环境变量配置
 ├── tokenizer.py       # tiktoken 计数 + 预算截断
 ├── core/
