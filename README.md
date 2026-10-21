@@ -95,7 +95,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 
 ## 特性
 
-- **分级抓取**：L1 `curl_cffi` → L2 Playwright，拦截才升级，不误伤正常页面。
+- **分级抓取**：L1 `curl_cffi` → L2 Playwright，拦截才升级，不误伤正常页面。L2 真拿到正文后按主机记 10 分钟"必须上浏览器"，期间同站直接走 L2（`skip_l1:sticky_l2`），省掉每次注定被拦的 L1；TTL 到期或浏览器渲染失败会自动回到 L1 重新判断
 - **L1 连接复用**：同一指纹模板在进程内共享连接池，省掉重复的 TLS 握手与 DNS 解析；换事件循环自动重建，进程退出或 `aclose()` 统一释放。
 - **L2 浏览器池**：同站同会话复用 context（各带独立登录态），超出上限按最久未用淘汰；同时打开的页面数受限，超出排队；空闲超过 `L2_IDLE_TIMEOUT` 秒自动关掉浏览器进程，下次用到再启动。
 - **内容密度选根**：从 article/main/div 中挑出"恰好装住正文的最紧容器"，避开导航/侧栏。
@@ -307,6 +307,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
 | `invalid_url` / `invalid_argument` | ❌ | 参数问题 |
 
 失败时默认带精简 `diagnostics.decisions`（如 `["retry:5xx", "escalate_l2:cloudflare", "l2_ok"]`）；
+走粘性升级时首条是 `skip_l1:sticky_l2`，浏览器这次没跑起来则会看到 `sticky_l2_failed:fallback_l1`。
 传了 `deadline_ms` 且触发降级时，会看到 `deadline:skip_retry`（预算不够再等一次退避）、
 `deadline:skip_l2`（不够启动浏览器，返回 L1 结果）或 `deadline:exceeded`（没来得及发起请求）。
 传 `debug=true` 会展开更多计数：

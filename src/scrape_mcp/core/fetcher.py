@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import urlparse
@@ -27,6 +28,30 @@ _LOGIN_CANDIDATES = ("captcha", "waf", "empty_spa", "empty", "cloudflare")
 # 一次 L1 至少要几百毫秒，浏览器启动 + 渲染则是秒级。
 _MIN_ATTEMPT_S = 0.3
 _L2_MIN_BUDGET_S = 1.5
+
+# 粘性升级：L2 真拿到正文后，在 TTL 内同一主机直接走浏览器，
+# 省掉一次注定被拦的 L1。站点改版/风控解除后最多 TTL 秒就会重新走 L1。
+_STICKY_TTL_S = 600.0
+_STICKY_MAX_HOSTS = 512
+# 明显是资源文件的 URL 不粘性升级：浏览器拿不到 PDF/图片的正文，交给 L1 更合适
+_ASSET_SUFFIXES = (
+    ".pdf",
+    ".zip",
+    ".gz",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".ico",
+    ".mp3",
+    ".mp4",
+    ".csv",
+    ".json",
+    ".xml",
+    ".txt",
+)
 
 
 @dataclass
@@ -63,6 +88,8 @@ class Fetcher:
         self._settings = settings
         self._http = HttpClient(settings)
         self._browser: BrowserRenderer | None = None
+        # host -> 粘性结论的到期时刻（monotonic）
+        self._sticky: dict[str, float] = {}
 
     def _get_browser(self) -> BrowserRenderer:
         if self._browser is None:
@@ -74,6 +101,28 @@ class Fetcher:
             await self._browser.aclose()
             self._browser = None
         await self._http.aclose()
+
+    def _sticky_active(self, host: str, url: str) -> bool:
+        """该主机上次是否确认过"必须上浏览器"，且还没过期。"""
+        if not self._settings.l2_enabled or _looks_like_asset(url):
+            return False
+        expiry = self._sticky.get(host)
+        if expiry is None:
+            return False
+        if expiry <= time.monotonic():
+            self._sticky.pop(host, None)
+            return False
+        return True
+
+    def _remember_sticky(self, host: str) -> None:
+        """L2 真拿到正文才记结论，并顺手控制表的大小。"""
+        now = time.monotonic()
+        if len(self._sticky) >= _STICKY_MAX_HOSTS:
+            self._sticky = {h: t for h, t in self._sticky.items() if t > now}
+            if len(self._sticky) >= _STICKY_MAX_HOSTS:
+                oldest = min(self._sticky, key=lambda h: self._sticky[h])
+                self._sticky.pop(oldest, None)
+        self._sticky[host] = now + _STICKY_TTL_S
 
     async def fetch(
         self,
@@ -89,6 +138,25 @@ class Fetcher:
         session: str = "default",
         deadline: float | None = None,
     ) -> FetchOutcome:
+        host = _host_of(url)
+        sticky_failed = False
+        if self._sticky_active(host, url):
+            left = budget.remaining(deadline)
+            if left is None or left >= _L2_MIN_BUDGET_S:
+                sticky = await self._fetch_l2_sticky(
+                    url,
+                    wait_for=wait_for,
+                    scroll=scroll,
+                    click=click,
+                    session=session,
+                    deadline=deadline,
+                )
+                if sticky is not None:
+                    return sticky
+                # 浏览器这次没跑起来：结论不可靠，清掉后照常走 L1
+                self._sticky.pop(host, None)
+                sticky_failed = True
+
         outcome = await self._fetch_l1_with_retry(
             url,
             headers=headers,
@@ -97,6 +165,8 @@ class Fetcher:
             bypass_cache=bypass_cache,
             deadline=deadline,
         )
+        if sticky_failed:
+            outcome.decisions.insert(0, "sticky_l2_failed:fallback_l1")
         reason = self._escalation_reason(outcome)
         if reason is None:
             if outcome.blocked == "rate_limit":
@@ -114,7 +184,7 @@ class Fetcher:
             outcome.decisions.append("deadline:skip_l2")
             return outcome
         outcome.decisions.append(f"escalate_l2:{reason}")
-        return await self._fetch_l2(
+        result = await self._fetch_l2(
             url,
             outcome,
             wait_for=wait_for,
@@ -123,6 +193,9 @@ class Fetcher:
             session=session,
             deadline=deadline,
         )
+        if result.tier == "l2" and result.blocked == "none":
+            self._remember_sticky(host)
+        return result
 
     async def _fetch_l1_with_retry(
         self,
@@ -267,6 +340,40 @@ class Fetcher:
             retry_after=resp.retry_after,
         )
 
+    async def _fetch_l2_sticky(
+        self,
+        url: str,
+        *,
+        wait_for: str | None,
+        scroll: bool,
+        click: str | None,
+        session: str,
+        deadline: float | None,
+    ) -> FetchOutcome | None:
+        """已知需要浏览器的主机：跳过 L1 直接渲染；渲染失败返回 None 交给 L1 兜底。"""
+        placeholder = FetchOutcome(
+            url=url,
+            final_url=url,
+            status=0,
+            tier="l1",
+            blocked="none",
+            block_reason="",
+            content_type="",
+            html="",
+            elapsed_ms=0,
+            decisions=["skip_l1:sticky_l2"],
+        )
+        outcome = await self._fetch_l2(
+            url,
+            placeholder,
+            wait_for=wait_for,
+            scroll=scroll,
+            click=click,
+            session=session,
+            deadline=deadline,
+        )
+        return None if outcome.tier != "l2" else outcome
+
     async def _fetch_l2(
         self,
         url: str,
@@ -278,7 +385,7 @@ class Fetcher:
         session: str = "default",
         deadline: float | None = None,
     ) -> FetchOutcome:
-        host = urlparse(l1.final_url or url).netloc.lower()
+        host = _host_of(l1.final_url or url)
         browser = self._get_browser()
         result = await browser.render(
             url,
@@ -339,6 +446,14 @@ class Fetcher:
     def has_session(self, url: str, session: str = "default") -> bool:
         host = urlparse(url).netloc.lower()
         return self._get_browser().has_session(host, session)
+
+
+def _host_of(url: str) -> str:
+    return (urlparse(url).netloc or "").lower().split(":")[0]
+
+
+def _looks_like_asset(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(_ASSET_SUFFIXES)
 
 
 def _content_kind(content_type: str, url: str) -> str:

@@ -92,7 +92,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 
 ## Features
 
-- **Tiered fetching**: L1 `curl_cffi` → L2 Playwright, escalating only when blocked.
+- **Tiered fetching**: L1 `curl_cffi` → L2 Playwright, escalating only when blocked. Once L2 actually returns content, the host is remembered as "needs a browser" for 10 minutes, so later calls go straight to L2 (`skip_l1:sticky_l2`) instead of paying for a blocked L1; the TTL expiring or a render failure falls back to L1.
 - **L1 connection reuse**: one connection pool per fingerprint template inside the process, skipping repeated TLS handshakes and DNS lookups; rebuilt automatically when the event loop changes, released on shutdown or `aclose()`.
 - **L2 browser pool**: contexts are reused per host + session (each with its own login state) and evicted least-recently-used when over the cap; concurrent pages are bounded and queue up; an idle browser is closed after `L2_IDLE_TIMEOUT` seconds and relaunched on demand.
 - **Content-density root picking**: chooses the tightest container that still holds the whole body, avoiding nav/sidebars.
@@ -304,7 +304,7 @@ With `deadline_ms`, a degraded call shows up in `diagnostics.decisions` as `dead
 | `unsupported_content` | ❌ | Content type unsupported by this tool (e.g. PDF via `web_extract`); use `web_fetch`, install the `[pdf]` extra for PDFs |
 | `invalid_url` / `invalid_argument` | ❌ | Bad arguments |
 
-Failures include a compact `diagnostics.decisions` (e.g. `["retry:5xx", "escalate_l2:cloudflare", "l2_ok"]`); `debug=true` expands counts:
+Failures include a compact `diagnostics.decisions` (e.g. `["retry:5xx", "escalate_l2:cloudflare", "l2_ok"]`); a sticky call starts with `skip_l1:sticky_l2`, and a failed render shows `sticky_l2_failed:fallback_l1`. `debug=true` expands counts:
 
 ```json
 {"diagnostics": {

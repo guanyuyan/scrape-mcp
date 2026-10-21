@@ -353,6 +353,103 @@ async def test_shell_escalation_reason_recorded():
     assert "escalate_l2:shell" in outcome.decisions
 
 
+# ---- 粘性升级 ----
+
+
+async def test_sticky_host_skips_l1_after_l2_success():
+    browser = FakeBrowser()
+    fetcher, http = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
+
+    assert (await fetcher.fetch(URL)).tier == "l2"
+    outcome = await fetcher.fetch(URL)
+
+    assert outcome.tier == "l2"
+    # L1 只付了第一次；第二次直接走浏览器
+    assert http.calls == 1
+    assert browser.calls == 2
+    assert "skip_l1:sticky_l2" in outcome.decisions
+
+
+async def test_sticky_not_remembered_when_l2_still_blocked():
+    blocked_page = BrowserOutcome(
+        ok=True, url=URL, final_url=URL, status=403, html=CLOUDFLARE_HTML, elapsed_ms=300
+    )
+    browser = FakeBrowser(blocked_page)
+    fetcher, http = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
+
+    await fetcher.fetch(URL)
+    await fetcher.fetch(URL)
+
+    # L2 也没拿到正文，不能把"必须上浏览器"当成结论固化下来
+    assert fetcher._sticky == {}
+    assert http.calls == 2 and browser.calls == 2
+
+
+async def test_sticky_skips_asset_urls():
+    browser = FakeBrowser()
+    fetcher, http = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
+    await fetcher.fetch(URL)
+
+    # 静态资源不该交给浏览器：换回正常 HTML 后确认走的是 L1
+    http.status = 200
+    http.text = f"<html><body><p>{LONG_TEXT}</p></body></html>"
+    outcome = await fetcher.fetch("https://example.com/files/report.pdf")
+
+    assert outcome.tier == "l1"
+    assert http.calls == 2 and browser.calls == 1
+
+
+async def test_sticky_expires_after_ttl():
+    browser = FakeBrowser()
+    fetcher, http = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
+    await fetcher.fetch(URL)
+
+    # 模拟 TTL 已过：结论失效，重新从 L1 开始
+    fetcher._sticky["example.com"] = 0.0
+    http.status = 200
+    http.text = f"<html><body><p>{LONG_TEXT}</p></body></html>"
+    outcome = await fetcher.fetch(URL)
+
+    assert outcome.tier == "l1"
+    assert http.calls == 2 and browser.calls == 1
+
+
+async def test_sticky_l2_failure_falls_back_to_l1():
+    browser = FakeBrowser()
+    fetcher, http = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
+    await fetcher.fetch(URL)
+    assert fetcher._sticky
+
+    browser.outcome = BrowserOutcome(
+        ok=False, url=URL, final_url=URL, status=0, html="", elapsed_ms=100, error="未安装"
+    )
+    http.status = 200
+    http.text = f"<html><body><p>{LONG_TEXT}</p></body></html>"
+    outcome = await fetcher.fetch(URL)
+
+    assert outcome.tier == "l1"
+    assert http.calls == 2
+    assert outcome.decisions[0] == "sticky_l2_failed:fallback_l1"
+    # 结论已被清掉，下次重新从 L1 判断
+    assert fetcher._sticky == {}
+
+
+async def test_sticky_does_not_run_without_budget():
+    from scrape_mcp.core import deadline as dl
+
+    browser = FakeBrowser()
+    fetcher, http = make_fetcher(status=403, text=CLOUDFLARE_HTML, browser=browser)
+    await fetcher.fetch(URL)
+
+    http.status = 200
+    http.text = f"<html><body><p>{LONG_TEXT}</p></body></html>"
+    outcome = await fetcher.fetch(URL, deadline=dl.start(500))
+
+    # 预算不够跑浏览器，宁可走一次 L1（虽然大概率仍被拦）
+    assert outcome.tier == "l1"
+    assert http.calls == 2 and browser.calls == 1
+
+
 # ---- 非 HTML 内容形态 ----
 
 
