@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "updated": "2026-10-21",
+  "note": "分层真实站点集。expect=ok 表示应取到正文；expect 为错误码表示该站应被如实拦截（登录墙/反爬/robots）而不是伪装成功。checks 是正文中必须出现的稳定片段，只给结构稳定的页面配置（文档/固定文章/PDF），首页类动态内容只校验最小字符数。",
+  "sites": [
+    {
+      "id": "py-asyncio",
+      "url": "https://docs.python.org/3/library/asyncio-task.html",
+      "category": "docs",
+      "min_chars": 2000,
+      "checks": ["create_task", "TaskGroup"],
+      "nightly": true
+    },
+    {
+      "id": "mdn-fetch",
+      "url": "https://developer.mozilla.org/zh-CN/docs/Web/API/Fetch_API",
+      "category": "docs",
+      "min_chars": 1500,
+      "checks": ["Fetch API", "fetch()"],
+      "nightly": true
+    },
+    {
+      "id": "fastapi-first-steps",
+      "url": "https://fastapi.tiangolo.com/zh/tutorial/first-steps/",
+      "category": "docs",
+      "min_chars": 1500,
+      "checks": ["FastAPI", "uvicorn"],
+      "nightly": true
+    },
+    {
+      "id": "vue-intro",
+      "url": "https://cn.vuejs.org/guide/introduction.html",
+      "category": "docs",
+      "min_chars": 1500,
+      "checks": ["渐进式框架", "单文件组件"],
+      "nightly": true
+    },
+    {
+      "id": "ruanyifeng-blog",
+      "url": "https://www.ruanyifeng.com/blog/",
+      "category": "blog",
+      "min_chars": 500,
+      "checks": ["阮一峰的网络日志", "科技爱好者周刊"],
+      "nightly": true
+    },
+    {
+      "id": "cnblogs-home",
+      "url": "https://www.cnblogs.com/",
+      "category": "blog",
+      "min_chars": 500,
+      "checks": []
+    },
+    {
+      "id": "sspai-home",
+      "url": "https://sspai.com/",
+      "category": "blog",
+      "min_chars": 500,
+      "checks": ["少数派", "写作"]
+    },
+    {
+      "id": "solidot-home",
+      "url": "https://www.solidot.org/",
+      "category": "blog",
+      "min_chars": 500,
+      "checks": ["Solidot", "热门文章"]
+    },
+    {
+      "id": "chinanews-home",
+      "url": "https://www.chinanews.com.cn/",
+      "category": "news",
+      "min_chars": 500,
+      "checks": [],
+      "nightly": true
+    },
+    {
+      "id": "tencent-news-home",
+      "url": "https://news.qq.com/",
+      "category": "news",
+      "min_chars": 500,
+      "checks": []
+    },
+    {
+      "id": "thepaper-home",
+      "url": "https://www.thepaper.cn/",
+      "category": "news",
+      "min_chars": 500,
+      "checks": []
+    },
+    {
+      "id": "36kr-home",
+      "url": "https://www.36kr.com/",
+      "category": "news",
+      "min_chars": 500,
+      "checks": []
+    },
+    {
+      "id": "github-trending",
+      "url": "https://github.com/trending",
+      "category": "list",
+      "min_chars": 500,
+      "checks": [],
+      "nightly": true
+    },
+    {
+      "id": "hacker-news",
+      "url": "https://news.ycombinator.com/",
+      "category": "list",
+      "min_chars": 500,
+      "checks": [],
+      "nightly": true
+    },
+    {
+      "id": "v2ex-home",
+      "url": "https://www.v2ex.com/",
+      "category": "list",
+      "min_chars": 500,
+      "checks": []
+    },
+    {
+      "id": "stackoverflow-questions",
+      "url": "https://stackoverflow.com/questions",
+      "category": "list",
+      "min_chars": 500,
+      "checks": []
+    },
+    {
+      "id": "react-learn",
+      "url": "https://react.dev/learn",
+      "category": "spa",
+      "min_chars": 500,
+      "checks": ["Quick Start", "components"]
+    },
+    {
+      "id": "apple-cn-home",
+      "url": "https://www.apple.com.cn/",
+      "category": "spa",
+      "min_chars": 100,
+      "checks": ["Apple", "快速链接"]
+    },
+    {
+      "id": "zhihu-question",
+      "url": "https://www.zhihu.com/question/19550224",
+      "category": "anti_bot",
+      "min_chars": 0,
+      "checks": [],
+      "expect": "robots_disallowed",
+      "nightly": true
+    },
+    {
+      "id": "xiaohongshu-explore",
+      "url": "https://www.xiaohongshu.com/explore",
+      "category": "anti_bot",
+      "min_chars": 0,
+      "checks": [],
+      "expect": "robots_disallowed"
+    },
+    {
+      "id": "weibo-home",
+      "url": "https://weibo.com/",
+      "category": "anti_bot",
+      "min_chars": 0,
+      "checks": [],
+      "expect": "robots_disallowed"
+    },
+    {
+      "id": "bilibili-home",
+      "url": "https://www.bilibili.com/",
+      "category": "anti_bot",
+      "min_chars": 300,
+      "checks": []
+    },
+    {
+      "id": "arxiv-attention",
+      "url": "https://arxiv.org/pdf/1706.03762",
+      "category": "pdf",
+      "min_chars": 1000,
+      "checks": [],
+      "nightly": true
+    },
+    {
+      "id": "w3c-dummy-pdf",
+      "url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+      "category": "pdf",
+      "min_chars": 10,
+      "checks": ["Dummy PDF file"]
+    }
+  ]
+}

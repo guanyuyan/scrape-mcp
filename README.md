@@ -507,6 +507,10 @@ python examples/03_crawl_docs.py --max-pages 5 --out docs.md
 
 ## 基准
 
+两类基准，口径不同：`bench.py` 看缓存带来的延迟收益，`bench_sites.py` 看真实站点上取到的内容对不对、全不全。
+
+### 缓存与延迟
+
 ```bash
 python scripts/bench.py                              # 冷/热对照
 python scripts/bench.py --l2 https://news.qq.com/    # 额外看浏览器开销
@@ -522,6 +526,60 @@ python scripts/bench.py --l2 https://news.qq.com/    # 额外看浏览器开销
 
 L2 浏览器：进程内首次调用 ≈3.5 s（含启动），复用 p50 ≈1.8 s。
 网络与目标站状态会明显影响绝对值，重点看同一台机器上的冷热对比。
+
+### 真实站点质量
+
+```bash
+python scripts/bench_sites.py                          # 全部站点
+python scripts/bench_sites.py --nightly                # 夜间回归子集
+python scripts/bench_sites.py --category docs,list     # 按分类过滤
+python scripts/bench_sites.py --json out.json --md out.md
+python scripts/bench_sites.py --baseline out.json      # 与上次结果对比
+pip install trafilatura                                # 可选：对照第三方正文抽取器
+python scripts/bench_sites.py --reference trafilatura
+```
+
+站点集在 [benchmarks/sites.json](benchmarks/sites.json)，按文档 / 博客 / 资讯 / 列表 / 前端渲染 / 登录墙与反爬 / PDF 分层，每站可配置：
+
+- `expect`：`ok` 表示应取到正文；`login_required` / `robots_disallowed` 等错误码表示该站应被如实拦截，而不是伪装成功
+- `min_chars`：正文字符数下限
+- `checks`：正文中必须出现的稳定片段，用于衡量完整度（只给结构稳定的页面配置，首页类动态内容不配）
+
+输出包含通过率、取正文率、拦截符合率、完整度、token、p50/p95 延迟与分层分布，可写 JSON / Markdown 留档。
+`--baseline` 会按站点对比上次结果，并把正文字符下降超过 20% 的站点标为退化。
+
+**本机实测（2026-10-21，24 站）**：通过 18/24，完整度 17/19，拦截符合 3/3，延迟 p50 2809 ms / p95 9294 ms。
+未通过的 6 项里，5 项是本机网络不可达（MDN / GitHub / Hacker News / V2EX / arXiv 超时），1 项被站点拦截（Stack Overflow 返回 `blocked`）；
+这些站点在 GitHub 网络的夜间任务里会重新跑，结果以 `site-quality-<run_id>` 工件为准。
+
+| 站点 | 分类 | 层级 | 结果 | 字符 | token | 完整度 | 耗时 |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| py-asyncio | docs | l1 | 通过 | 31049 | 7222 | 2/2 | 5817 ms |
+| mdn-fetch | docs | l1 | timeout（本机网络） | 0 | 0 | 0/2 | 25007 ms |
+| fastapi-first-steps | docs | l1 | 通过 | 8777 | 4124 | 2/2 | 1969 ms |
+| vue-intro | docs | l1 | 通过 | 4833 | 3101 | 2/2 | 2210 ms |
+| ruanyifeng-blog | blog | l1 | 通过 | 914 | 547 | 2/2 | 4492 ms |
+| cnblogs-home | blog | l1 | 通过 | 4947 | 3886 | - | 233 ms |
+| sspai-home | blog | l2 | 通过 | 1555 | 1203 | 2/2 | 9930 ms |
+| solidot-home | blog | l1 | 通过 | 8801 | 7197 | 2/2 | 912 ms |
+| chinanews-home | news | l1 | 通过 | 1046 | 238 | - | 182 ms |
+| tencent-news-home | news | l2 | 通过 | 2212 | 1439 | - | 2809 ms |
+| thepaper-home | news | l2 | 通过 | 2121 | 1704 | - | 6115 ms |
+| 36kr-home | news | l2 | 通过 | 1168 | 1002 | - | 8083 ms |
+| github-trending | list | l1 | timeout（本机网络） | 0 | 0 | - | 25007 ms |
+| hacker-news | list | l1 | timeout（本机网络） | 0 | 0 | - | 25017 ms |
+| v2ex-home | list | l1 | timeout（本机网络） | 0 | 0 | - | 25015 ms |
+| stackoverflow-questions | list | l1 | blocked | 0 | 0 | - | 25343 ms |
+| react-learn | spa | l1 | 通过 | 13986 | 3514 | 2/2 | 9294 ms |
+| apple-cn-home | spa | l2 | 通过 | 198 | 90 | 2/2 | 1604 ms |
+| zhihu-question | anti_bot | - | 按预期拦截 | 0 | 0 | - | 109 ms |
+| xiaohongshu-explore | anti_bot | - | 按预期拦截 | 0 | 0 | - | 77 ms |
+| weibo-home | anti_bot | - | 按预期拦截 | 0 | 0 | - | 105 ms |
+| bilibili-home | anti_bot | l2 | 通过 | 789 | 719 | - | 5919 ms |
+| arxiv-attention | pdf | l1 | timeout（本机网络） | 0 | 0 | - | 25020 ms |
+| w3c-dummy-pdf | pdf | l1 | 通过 | 14 | 3 | 1/1 | 1623 ms |
+
+`--reference trafilatura` 的对照只统计纯正文；本工具输出保留标题、列表与链接结构，token 数不是等价口径，只看量级即可。
 
 ## Docker
 
@@ -539,6 +597,8 @@ curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 ## 目录结构
 
 ```
+benchmarks/
+└── sites.json         # 真实站点质量基准站点集（分层、期望结果、完整性检查项）
 src/scrape_mcp
 ├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/login/session_*）
 ├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）
