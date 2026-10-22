@@ -16,6 +16,7 @@ from . import deadline as budget
 from .browser import BrowserRenderer
 from .detector import detect_block, looks_like_shell
 from .http_client import HttpClient
+from .proxy import ProxyPool, split_pool
 
 # 这些判定不值得升级浏览器：同一 IP 下换浏览器通常仍被限流，
 # 只是白付一次浏览器启动成本。
@@ -90,6 +91,12 @@ class Fetcher:
         self._browser: BrowserRenderer | None = None
         # host -> 粘性结论的到期时刻（monotonic）
         self._sticky: dict[str, float] = {}
+        self._pool = ProxyPool(
+            split_pool(settings.proxy_pool),
+            fail_threshold=settings.proxy_pool_fail_threshold,
+            cooldown_s=settings.proxy_pool_cooldown,
+            sticky_ttl_s=settings.proxy_pool_sticky_ttl,
+        )
 
     def _get_browser(self) -> BrowserRenderer:
         if self._browser is None:
@@ -139,6 +146,49 @@ class Fetcher:
         deadline: float | None = None,
         proxy: str | None = None,
     ) -> FetchOutcome:
+        """为本次抓取固定一个出口，再走分级链路。
+
+        出口优先级：单请求 proxy > 代理池 > 全局 SCRAPE_MCP_PROXY。池化出口按站点
+        粘性分配，L1、重试与 L2 升级都走同一个 IP；结束后把结果回报给池用于冷却判定。
+        """
+        explicit = proxy is not None
+        if not explicit:
+            proxy = self._pool.pick(_host_of(url))
+        outcome = await self._fetch(
+            url,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            wait_for=wait_for,
+            scroll=scroll,
+            click=click,
+            # 显式指定的出口可能让同一 URL 拿到不同内容，这类结果不进共享缓存
+            bypass_cache=bypass_cache,
+            allow_cache=not explicit,
+            session=session,
+            deadline=deadline,
+            proxy=proxy,
+        )
+        if proxy is not None and not explicit:
+            self._pool.report(proxy, ok=not _egress_failed(outcome))
+        return outcome
+
+    async def _fetch(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        cookies: dict[str, str] | None = None,
+        timeout: float | None = None,
+        wait_for: str | None = None,
+        scroll: bool = False,
+        click: str | None = None,
+        bypass_cache: bool = False,
+        allow_cache: bool = True,
+        session: str = "default",
+        deadline: float | None = None,
+        proxy: str | None = None,
+    ) -> FetchOutcome:
         host = _host_of(url)
         sticky_failed = False
         if self._sticky_active(host, url):
@@ -165,6 +215,7 @@ class Fetcher:
             cookies=cookies,
             timeout=timeout,
             bypass_cache=bypass_cache,
+            allow_cache=allow_cache,
             deadline=deadline,
             proxy=proxy,
         )
@@ -209,6 +260,7 @@ class Fetcher:
         cookies: dict[str, str] | None,
         timeout: float | None,
         bypass_cache: bool,
+        allow_cache: bool = True,
         deadline: float | None = None,
         proxy: str | None = None,
     ) -> FetchOutcome:
@@ -232,6 +284,7 @@ class Fetcher:
                 cookies=cookies,
                 timeout=budget.cap(deadline, timeout or self._settings.request_timeout),
                 bypass_cache=bypass_cache,
+                allow_cache=allow_cache,
                 proxy=proxy,
             )
             if trail:
@@ -293,6 +346,7 @@ class Fetcher:
         cookies: dict[str, str] | None,
         timeout: float | None = None,
         bypass_cache: bool = False,
+        allow_cache: bool = True,
         proxy: str | None = None,
     ) -> FetchOutcome:
         resp = await self._http.get(
@@ -301,6 +355,7 @@ class Fetcher:
             cookies=cookies,
             timeout=timeout,
             bypass_cache=bypass_cache,
+            allow_cache=allow_cache,
             proxy=proxy,
         )
         if not resp.ok:
@@ -485,6 +540,17 @@ def _is_retryable(outcome: FetchOutcome) -> bool:
     if outcome.error:
         return True
     return 500 <= outcome.status < 600
+
+
+# 整条链路走完仍命中的拦截：出口 IP 很可能已被目标站标记，交给代理池累计失败
+_EGRESS_BAD_BLOCKS = ("rate_limit", "cloudflare", "captcha", "waf")
+
+
+def _egress_failed(outcome: FetchOutcome) -> bool:
+    """一次抓取是否说明该出口不可用；预算耗尽没发请求的情况不算在出口头上。"""
+    if "deadline:exceeded" in outcome.decisions:
+        return False
+    return bool(outcome.error) or outcome.blocked in _EGRESS_BAD_BLOCKS
 
 
 def _budget_too_short(deadline: float | None, wait: float) -> bool:

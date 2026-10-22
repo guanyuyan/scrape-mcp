@@ -157,7 +157,11 @@ cp .env.example .env    # 生成配置模板
 |---|---|---|
 | `IMPERSONATE` | `chrome` | curl_cffi 指纹模板 |
 | `REQUEST_TIMEOUT` | `20` | L1 超时（秒） |
-| `PROXY` | — | 代理，L1/L2 共用 |
+| `PROXY` | — | 单个代理，L1/L2 共用；配置了代理池时作为兜底 |
+| `PROXY_POOL` | — | 代理池（逗号/分号/空白分隔），按站点粘性轮询；非空时优先于 `PROXY` |
+| `PROXY_POOL_FAIL_THRESHOLD` | `2` | 同一出口连续失败多少次后进入冷却 |
+| `PROXY_POOL_COOLDOWN` | `60` | 出口冷却时长（秒），冷却期内不再分配 |
+| `PROXY_POOL_STICKY_TTL` | `300` | 同一主机固定走同一出口的时长（秒） |
 | `L2_ENABLED` | `true` | 是否启用 Playwright 升级链 |
 | `L2_CHANNEL` | — | 关联浏览器：空=自带 Chromium，`chrome`/`msedge`=系统 |
 | `L2_SETTLE_TIMEOUT` | `8` | 挑战页等待窗口（秒） |
@@ -186,6 +190,8 @@ cp .env.example .env    # 生成配置模板
 | `HTTP_TOKEN` | — | HTTP 模式访问令牌；设置后除 `/healthz` 外都需 Bearer，绑定非回环地址时必填 |
 | `HTTP_QPS` | `5` | 单令牌每秒请求上限（令牌桶，允许同量突发）；超出返回 429 + `Retry-After`；`0` 不限 |
 | `HTTP_DAILY_QUOTA` | `10000` | 单令牌每日请求配额（UTC 自然日，跨日清零）；超出返回 429；`0` 不限 |
+
+代理池非空时优先于 `PROXY`：出口按轮询分配，同一主机在 `PROXY_POOL_STICKY_TTL` 内固定走同一个 IP（登录态与风控都更稳）；同一出口连续失败（传输异常，或整条链路走完仍被限流/风控拦截）达 `PROXY_POOL_FAIL_THRESHOLD` 次后进入 `PROXY_POOL_COOLDOWN` 秒冷却，冷却期内不再分配；整池都在冷却时回退到最早解冻的那个，而不是直接报错。单请求 `proxy` 参数优先级最高，且不参与池的失败计数。
 
 ## HTTP 模式（Postman / curl 直连）
 
@@ -270,7 +276,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `link_policy`: `internal`（站内相对链接+站外降级）/ `all` / `none`
   - `format`: `markdown`（默认，保留标题/列表/链接）/ `text`（剥掉标记的纯文本）/ `json`（`content` 为段落数组）
   - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
-  - 代理：`proxy`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）只对本次调用生效，L1 与升级后的 L2 走同一个出口；不传则沿用 `SCRAPE_MCP_PROXY`。带代理的请求不读也不写共享缓存，避免不同出口的结果混在一起
+  - 代理：`proxy`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）只对本次调用生效，L1 与升级后的 L2 走同一个出口；不传则按 `SCRAPE_MCP_PROXY_POOL` 代理池分配，未配池时沿用 `SCRAPE_MCP_PROXY`。显式传入代理的请求不读也不写共享缓存，避免不同出口的结果混在一起
   - 总预算：`deadline_ms`（毫秒，可选）限制整次调用；不够时逐级降级，见"错误码与诊断"中的 `deadline:*` 说明
   - 登录态：`session`（默认 `default`），与 `login` 时的会话名一致即可自动带上对应登录态
   - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）
@@ -287,14 +293,14 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）；非 HTML（PDF/纯文本）返回 `unsupported_content`，请改用 `web_fetch`
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
   - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session`（对该批所有 URL 生效）
-  - `proxy` 同样对该批所有 URL 生效，缺省沿用全局配置
+  - `proxy` 同样对该批所有 URL 生效；缺省按代理池分配，未配池时沿用全局配置
   - `deadline_ms` 为整批共用的预算：耗尽后还没开始的子任务直接返回 `timeout`，不再占用网络与浏览器
   - 客户端请求进度（传 `progressToken`）时，每完成一条上报 `已抓取 n/N 个 URL`
 - **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → 从一个入口逐页抓取，返回带 `mode` 标明模式
   - `mode=links`（默认）：按 `depth`/`limit` 发现站内链接逐层抓取；`depth` 最大 `3`，`limit` 受 `CRAWL_MAX_PAGES` 约束
   - `mode=paginate`：传 `next_selector` 即启用分页模式，按"下一页"链接顺序翻页，`max_pages` 封顶（默认 `5`），已访问 URL 自动去重，默认不跟随站外链接（`same_host=false` 可放开）
   - 单页失败只影响该页；图片/压缩包等静态资源链接自动跳过；`session` 对该次所有页面生效
-  - `proxy` 对该次所有页面生效，缺省沿用全局配置
+  - `proxy` 对该次所有页面生效；缺省按代理池分配，未配池时沿用全局配置
   - `deadline_ms` 为整次爬取的预算：耗尽后不再抓新页，已抓到的页面照常返回
   - 客户端请求进度时逐页上报（分页模式为 `已翻到第 n/N 页`，链接模式为 `已抓取 n/N 页`）
 - **`login(url, timeout=180, session="default")`** → 打开带界面浏览器手动登录并持久化登录态

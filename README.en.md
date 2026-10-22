@@ -151,7 +151,11 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 |---|---|---|
 | `IMPERSONATE` | `chrome` | curl_cffi fingerprint template |
 | `REQUEST_TIMEOUT` | `20` | L1 timeout (seconds) |
-| `PROXY` | — | Proxy shared by L1 and L2 |
+| `PROXY` | — | Single proxy shared by L1 and L2; acts as the fallback when a pool is configured |
+| `PROXY_POOL` | — | Proxy pool (comma/semicolon/whitespace separated), round-robin with per-site stickiness; takes precedence over `PROXY` |
+| `PROXY_POOL_FAIL_THRESHOLD` | `2` | Consecutive failures before an exit is cooled down |
+| `PROXY_POOL_COOLDOWN` | `60` | Cooldown seconds for a failing exit; it is not assigned meanwhile |
+| `PROXY_POOL_STICKY_TTL` | `300` | Seconds a host keeps the same exit |
 | `L2_ENABLED` | `true` | Enable the Playwright escalation path |
 | `L2_CHANNEL` | — | Browser channel: empty = bundled Chromium, `chrome`/`msedge` = system |
 | `L2_SETTLE_TIMEOUT` | `8` | Wait window for challenge pages (seconds) |
@@ -180,6 +184,8 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `HTTP_TOKEN` | — | HTTP access token; when set, all endpoints except `/healthz` require Bearer auth, and it is mandatory for non-loopback binds |
 | `HTTP_QPS` | `5` | Per-token request rate (token bucket, allows an equal burst); over-limit returns 429 + `Retry-After`; `0` disables |
 | `HTTP_DAILY_QUOTA` | `10000` | Per-token daily request quota (UTC day, resets at midnight); over-limit returns 429; `0` disables |
+
+When `PROXY_POOL` is set it takes precedence over `PROXY`: exits are assigned round-robin, and a host keeps the same IP for `PROXY_POOL_STICKY_TTL` so sessions and risk scoring stay stable. An exit that fails `PROXY_POOL_FAIL_THRESHOLD` times in a row (transport error, or still blocked/rate-limited after the whole chain) is cooled down for `PROXY_POOL_COOLDOWN` seconds; if every exit is cooling down, the earliest one is used instead of failing the request. A per-call `proxy` argument always wins and is not counted by the pool.
 
 ## HTTP mode (Postman / curl)
 
@@ -264,7 +270,7 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `link_policy`: `internal` (keep same-site links, demote off-site) / `all` / `none`
   - `format`: `markdown` (default, keeps headings/lists/links) / `text` (plain) / `json` (`content` is a paragraph array)
   - Fetch options: `headers` / `cookies` (custom requests bypass the shared cache), `timeout`, `bypass_cache`
-  - Proxy: `proxy` (e.g. `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`) applies to this call only, and both L1 and any L2 escalation use the same exit; omit it to fall back to `SCRAPE_MCP_PROXY`. Proxied requests bypass the shared cache so results from different exits never mix
+  - Proxy: `proxy` (e.g. `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`) applies to this call only, and both L1 and any L2 escalation use the same exit; omit it to let `SCRAPE_MCP_PROXY_POOL` assign one per site, falling back to `SCRAPE_MCP_PROXY`. An explicit proxy bypasses the shared cache so results from different exits never mix
   - Total budget: optional `deadline_ms` caps the whole call; degradation markers are listed under "Error codes and diagnostics"
   - Session: `session` (default `default`); use the same name as `login` to attach the stored session
   - Render options (L2 only): `wait_for` (CSS selector), `scroll` (trigger lazy loading), `click` ("load more")
@@ -281,14 +287,14 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Fetch/render options match `web_fetch` (without `link_policy` / `format`); non-HTML returns `unsupported_content` — use `web_fetch` instead
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → concurrent fetch, one result per URL; a single failure does not sink the batch
   - Supports `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session` for the whole batch
-  - `proxy` also applies to every URL in the batch; omit it to use `SCRAPE_MCP_PROXY`
+  - `proxy` also applies to every URL in the batch; omit it to use the proxy pool, then `SCRAPE_MCP_PROXY`
   - `deadline_ms` is shared by the batch: tasks that have not started when it runs out return `timeout` without touching the network or browser
   - Reports progress per completed URL when the client requests it (`progressToken`)
 - **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → crawl page by page; the response's `mode` tells which mode ran
   - `mode=links` (default): discover same-site links by `depth` / `limit`; `depth` max `3`, `limit` bounded by `CRAWL_MAX_PAGES`
   - `mode=paginate`: pass `next_selector` to follow "next page" links; `max_pages` caps it (default `5`), visited URLs are deduped, off-site links are not followed unless `same_host=false`
   - A failing page only affects that page; image/archive links are skipped; `session` applies to every page
-  - `proxy` applies to every page of the crawl; omit it to use `SCRAPE_MCP_PROXY`
+  - `proxy` applies to every page of the crawl; omit it to use the proxy pool, then `SCRAPE_MCP_PROXY`
   - `deadline_ms` budgets the whole crawl: no new pages are started once it runs out, and pages already fetched are returned
   - Reports progress per page when requested (`已翻到第 n/N 页` in paginate mode, `已抓取 n/N 页` in link mode)
 - **`login(url, timeout=180, session="default")`** → open a visible browser for a manual login and persist it

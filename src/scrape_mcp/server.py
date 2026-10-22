@@ -21,6 +21,7 @@ from .core.cache import ResultCache
 from .core.fetcher import Fetcher, FetchOutcome
 from .core.hostlimit import HostLimiter
 from .core.logging import configure, log_event
+from .core.proxy import valid_proxy
 from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
@@ -136,31 +137,20 @@ def _session_error(session: str) -> dict | None:
     return None
 
 
-# 单请求代理允许的协议：curl_cffi 与 Playwright 都支持这几类
-_PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks5"})
-
-
+# 单请求代理与代理池共用同一套校验（协议白名单、主机与端口合法性）
 def _proxy_arg(proxy: str | None) -> tuple[str | None, dict | None]:
-    """校验单请求代理，返回 (规范化值, 错误载荷)；不传表示沿用全局配置。"""
+    """校验单请求代理，返回 (规范化值, 错误载荷)；不传表示按代理池/全局配置决定。"""
     if proxy is None:
         return None, None
-    text = proxy.strip() if isinstance(proxy, str) else ""
-    parsed = urlparse(text)
-    try:
-        valid = bool(text) and parsed.scheme.lower() in _PROXY_SCHEMES and bool(parsed.hostname)
-        if valid:
-            # 端口写法非法（如 :abc）或越界时 urlparse 会在这里抛 ValueError
-            valid = parsed.port is None or parsed.port > 0
-    except ValueError:
-        valid = False
-    if not valid:
-        return None, {
-            "ok": False,
-            "error_code": errors.INVALID_ARGUMENT,
-            "error": "proxy 需为 http/https/socks4/socks5 代理 URL，如 http://127.0.0.1:7890",
-            "retryable": False,
-        }
-    return text, None
+    text = valid_proxy(proxy)
+    if text is not None:
+        return text, None
+    return None, {
+        "ok": False,
+        "error_code": errors.INVALID_ARGUMENT,
+        "error": "proxy 需为 http/https/socks4/socks5 代理 URL，如 http://127.0.0.1:7890",
+        "retryable": False,
+    }
 
 
 def _denied_payload(url: str, code: str, message: str) -> dict:
@@ -359,7 +349,7 @@ async def _fetch_html(
     拦截/登录墙统一如实上报，避免把挑战页当正文/当数据。成功时 error 为 None。
     wait_for/scroll/click 为 None 时套用该站 recipe，显式传值优先。
     deadline 是绝对截止时间（见 core.deadline），预算耗尽时不再发起新请求。
-    proxy 为单请求代理，缺省沿用全局配置；L1 与 L2 都走同一个出口。
+    proxy 为单请求代理，缺省按代理池分配、再回落到全局配置；L1 与 L2 都走同一个出口。
     """
     recipe = _recipe_for(url)
     if recipe is not None:
@@ -755,8 +745,9 @@ async def web_fetch(
             只含计数与决策、不含页面内容；失败时默认也会带精简版决策轨迹。
         session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致，多身份互不干扰。
         proxy: 本次请求使用的代理（如 ``http://127.0.0.1:7890``、``socks5://127.0.0.1:1080``），
-            L1 与升级后的 L2 都走该出口；不传则沿用配置 SCRAPE_MCP_PROXY。
-            传了代理的请求不读也不写共享缓存，避免把不同出口的结果混在一起。
+            L1 与升级后的 L2 都走该出口；不传则按代理池 SCRAPE_MCP_PROXY_POOL 分配，
+            未配池时沿用 SCRAPE_MCP_PROXY。
+            显式传入代理的请求不读也不写共享缓存，避免把不同出口的结果混在一起。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -851,8 +842,8 @@ async def web_extract(
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
         debug: 返回 diagnostics（分层决策与 L2 交互命中情况），不含页面内容。
         session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致。
-        proxy: 本次请求使用的代理（如 ``http://127.0.0.1:7890``）；不传则沿用配置。
-            传了代理的请求不读也不写共享缓存。
+        proxy: 本次请求使用的代理（如 ``http://127.0.0.1:7890``）；不传则按代理池分配，
+            未配池时沿用全局配置。显式传入代理的请求不读也不写共享缓存。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -1000,7 +991,8 @@ async def web_batch(
         bypass_cache: 跳过并绕过响应缓存。
         debug: 每条结果附带 diagnostics（决策轨迹与计数，不含页面内容）。
         session: 登录态会话名（默认 default）；对该批所有 URL 生效。
-        proxy: 该批所有 URL 共用的代理；不传则沿用配置。传了代理时不走共享缓存。
+        proxy: 该批所有 URL 共用的代理；不传则按代理池分配，未配池时沿用全局配置。
+            显式传入代理时该批不读也不写共享缓存。
         ctx: MCP 上下文，由框架注入，用于逐条上报进度（客户端请求进度时才发通知）。
     """
     settings = get_settings()
@@ -1196,7 +1188,8 @@ async def web_crawl(
             已抓到的页面照常返回；排队中的子任务直接返回 timeout。
         bypass_cache: 跳过并绕过响应缓存。
         session: 登录态会话名（默认 default）；对本次所有页面生效。
-        proxy: 本次爬取所有页面共用的代理；不传则沿用配置。传了代理时不走共享缓存。
+        proxy: 本次爬取所有页面共用的代理；不传则按代理池分配，未配池时沿用全局配置。
+            显式传入代理时不走共享缓存。
         ctx: MCP 上下文，由框架注入，用于逐页上报进度（客户端请求进度时才发通知）。
     """
     if not url.startswith(("http://", "https://")):

@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     default_max_tokens: int = 4000
     hard_max_tokens: int = 8000
     proxy: str | None = None
+    # 代理池（逗号/分号/空白分隔，支持 http/https/socks4/socks5）。非空时优先于上面的单代理：
+    # 按主机粘性轮询分配，连续失败达阈值后冷却；单请求传入的 proxy 优先级最高
+    proxy_pool: str = ""
+    proxy_pool_fail_threshold: int = 2
+    proxy_pool_cooldown: float = 60.0
+    proxy_pool_sticky_ttl: float = 300.0
     accept_language: str = "zh-CN,zh;q=0.9,en;q=0.8"
 
     # ---- M4 缓存与批量 ----

@@ -137,12 +137,21 @@ async def test_bypass_cache_skips_read_and_write(tmp_path, monkeypatch):
     assert resp.ok and ops == []
 
 
-async def test_proxy_skips_shared_cache(tmp_path, monkeypatch):
-    """不同出口可能拿到不同内容，带代理的请求不读也不写共享缓存。"""
+async def test_explicit_proxy_skips_shared_cache(tmp_path, monkeypatch):
+    """单请求显式代理可能让同一 URL 拿到不同内容；Fetcher 对这类调用传 allow_cache=False。"""
     client = _client(tmp_path, monkeypatch)
     ops = _spy_cache(client, monkeypatch)
-    resp = await client.get(URL, proxy="http://127.0.0.1:7890")
+    resp = await client.get(URL, proxy="http://127.0.0.1:7890", allow_cache=False)
     assert resp.ok and ops == []
+
+
+async def test_pool_proxy_still_shares_cache(tmp_path, monkeypatch):
+    """池化/全局代理属基础设施，同一 URL 的结果仍可共享缓存。"""
+    client = _client(tmp_path, monkeypatch)
+    first = await client.get(URL, proxy="http://127.0.0.1:7890")
+    second = await client.get(URL, proxy="http://127.0.0.1:7892")
+    assert first.ok and not first.cached
+    assert second.cached
 
 
 async def test_response_validators_are_stored(tmp_path, monkeypatch):
