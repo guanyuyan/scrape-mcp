@@ -30,6 +30,7 @@ from .extract.compact import LINK_POLICIES, compact_html
 from .extract.links import extract_links, next_link
 from .extract.pdf import PdfError, pdf_pages
 from .extract.render import FORMATS, to_blocks, to_plain_text
+from .http_auth import BearerAuthMiddleware, ensure_http_access, is_loopback
 from .tokenizer import count_tokens, truncate_to_budget
 
 _fetcher: Fetcher | None = None
@@ -281,16 +282,18 @@ async def healthz(_request) -> JSONResponse:
     )
 
 
-_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
-
-
 @mcp.custom_route("/stats", methods=["GET"])
 async def stats_endpoint(request) -> JSONResponse:
-    """进程内统计：请求数、分层/错误码分布、缓存命中率。只接受本机回环访问。"""
-    client = getattr(request, "client", None)
-    host = (getattr(client, "host", "") or "").lower()
-    if host not in _LOOPBACK_HOSTS:
-        return JSONResponse({"ok": False, "error": "仅允许本机访问"}, status_code=403)
+    """进程内统计：请求数、分层/错误码分布、缓存命中率。
+
+    未配置 ``SCRAPE_MCP_HTTP_TOKEN`` 时只接受本机回环访问；配置令牌后
+    由 Bearer 鉴权保护，可远程读取。
+    """
+    if not (get_settings().http_token or "").strip():
+        client = getattr(request, "client", None)
+        host = (getattr(client, "host", "") or "").lower()
+        if not is_loopback(host):
+            return JSONResponse({"ok": False, "error": "仅允许本机访问"}, status_code=403)
     return JSONResponse(get_stats().snapshot())
 
 
@@ -1471,6 +1474,23 @@ async def session_import(
     )
 
 
+def _run_http(settings, port: int, token: str | None) -> None:  # pragma: no cover
+    """构建带鉴权的 StreamableHTTP 应用并交给 uvicorn。"""
+    import uvicorn
+
+    app = mcp.streamable_http_app(
+        json_response=settings.http_json,
+        stateless_http=settings.http_stateless,
+        host=settings.http_host,
+    )
+    uvicorn.run(
+        BearerAuthMiddleware(app, token=token),
+        host=settings.http_host,
+        port=port,
+        log_level=settings.log_level.lower(),
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     """CLI 入口。
 
@@ -1495,7 +1515,8 @@ def main(argv: list[str] | None = None) -> None:
             "      scrape-mcp schema [--tool NAME] [--output FILE]\n\n"
             "零配置默认作为 stdio MCP 服务运行，供 Claude/Cursor 等客户端接管。\n"
             "init 生成客户端配置（默认只预览 diff），schema 导出工具定义。\n"
-            "如需 HTTP 直连（Postman/curl），加 --transport streamable-http [--port 8000]。\n"
+            "如需 HTTP 直连（Postman/curl），加 --transport streamable-http [--port 8000]；\n"
+            "绑定非回环地址时必须设置 SCRAPE_MCP_HTTP_TOKEN。\n"
             "配置详见 .env / SCRAPE_MCP_* 环境变量。"
         )
         print(msg)
@@ -1519,13 +1540,9 @@ def main(argv: list[str] | None = None) -> None:
         if "--port" in argv:
             settings.http_port = int(argv[argv.index("--port") + 1])
         base = settings.http_port if settings.http_port else 8000
-        mcp.run(
-            transport="streamable-http",
-            host=settings.http_host,
-            port=base,
-            json_response=settings.http_json,
-            stateless_http=settings.http_stateless,
-        )
+        token = (settings.http_token or "").strip() or None
+        ensure_http_access(settings.http_host, token)
+        _run_http(settings, base, token)
         return
     # 默认 stdio
     mcp.run(transport="stdio")

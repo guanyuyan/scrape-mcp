@@ -177,6 +177,7 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `ALLOWED_HOSTS` | — | Comma-separated allowlist; when set, only these hosts are allowed |
 | `DENIED_HOSTS` | — | Comma-separated denylist, takes precedence over the allowlist |
 | `MAX_QPS` | `10` | Global request rate limit (requests/second); `0` disables |
+| `HTTP_TOKEN` | — | HTTP access token; when set, all endpoints except `/healthz` require Bearer auth, and it is mandatory for non-loopback binds |
 
 ## HTTP mode (Postman / curl)
 
@@ -185,14 +186,23 @@ Switch to HTTP without code changes:
 ```bash
 $env:SCRAPE_MCP_TRANSPORT="streamable-http"
 $env:SCRAPE_MCP_HTTP_PORT="8000"
+$env:SCRAPE_MCP_HTTP_TOKEN="<long random string>"   # required for non-loopback binds
 python -m scrape_mcp.server
 ```
 
 It starts with `json_response=1` (the default), so requests and responses are plain JSON rather than streams. **In stateless mode there is no `initialize` handshake — send `tools/call` directly.**
 
-Health check: `GET /healthz` returns the version and key switches, suitable for container probes.
+**Access token**: when `SCRAPE_MCP_HTTP_TOKEN` is set, every request except `GET /healthz` must carry:
 
-Local stats: `GET /stats` returns in-process counters and only answers loopback clients (anything else gets 403):
+```bash
+curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000/stats
+```
+
+Without a token the server only binds to `127.0.0.1` / `localhost` / `::1`; binding to `0.0.0.0` or any non-loopback address exits immediately to avoid unauthenticated exposure. Missing or wrong tokens get a uniform 401 (with `WWW-Authenticate`), and the response contains no internal paths or version details. The token is read from the request header only and is never logged. Once a token is set, loopback requests must present it too, so a local reverse proxy cannot bypass auth by making every request look like `127.0.0.1`.
+
+Health check: `GET /healthz` always stays unauthenticated so container probes and gateways can use it.
+
+Stats: `GET /stats` returns in-process counters. Without a token it only answers loopback clients (anything else gets 403); with a token it is protected by Bearer auth and can be read remotely:
 
 ```bash
 curl http://127.0.0.1:8000/stats
@@ -558,9 +568,11 @@ docker build -t scrape-mcp .
 # With L2 real browser (Cloudflare/captcha/SPA)
 docker build --build-arg INSTALL_BROWSER=1 -t scrape-mcp:l2 .
 
-docker run -p 8002:8002 scrape-mcp
+docker run -p 8002:8002 -e SCRAPE_MCP_HTTP_TOKEN=<token> scrape-mcp
 curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 ```
+
+The container binds `0.0.0.0`, so the token must be supplied with `-e SCRAPE_MCP_HTTP_TOKEN=...`; `/healthz` stays unauthenticated for the HEALTHCHECK.
 
 ## Project layout
 
@@ -570,6 +582,7 @@ benchmarks/
 └── baseline.json      # Nightly-subset baseline for trend checks (updated monthly)
 src/scrape_mcp
 ├── server.py          # MCP entry + tools (web_fetch/web_extract/web_batch/web_crawl/login/session_*)
+├── http_auth.py       # HTTP Bearer middleware + non-loopback bind guard
 ├── cli.py             # Subcommands: init (client config) / schema (export tool definitions)
 ├── sdk.py             # Python SDK wrappers (fetch/extract/crawl/batch/aclose)
 ├── config.py          # Environment configuration

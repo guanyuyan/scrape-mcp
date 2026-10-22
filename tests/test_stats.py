@@ -172,6 +172,16 @@ def test_stats_endpoint_rejects_remote_client():
     assert json.loads(resp.body)["ok"] is False
 
 
+def test_stats_endpoint_allows_remote_when_token_configured(tmp_path, monkeypatch):
+    """配置令牌后由 Bearer 中间件把关，路由本身不再限制来源地址。"""
+    settings = Settings(data_dir=str(tmp_path / "data"), cache_ttl=0, http_token="s3cret")
+    monkeypatch.setattr(server, "get_settings", lambda: settings)
+
+    resp = asyncio.run(server.stats_endpoint(_request("10.1.2.3")))
+
+    assert resp.status_code == 200
+
+
 def test_stats_endpoint_rejects_missing_client():
     """拿不到来源地址时按"非本机"处理，避免容器暴露到公网时泄露统计。"""
     resp = asyncio.run(server.stats_endpoint(_request(None)))

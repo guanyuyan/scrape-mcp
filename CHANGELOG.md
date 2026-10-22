@@ -2,6 +2,16 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- **HTTP Bearer 鉴权**：设置 `SCRAPE_MCP_HTTP_TOKEN` 后，除 `/healthz` 外所有 HTTP 请求必须携带 `Authorization: Bearer <token>`；缺失或错误统一返回 401（带 `WWW-Authenticate`），响应不含内部路径与版本
+- **启动期保护**：HTTP 绑定非回环地址（如 `0.0.0.0`）但未配置令牌时拒绝启动；未配置令牌时仍可在 `127.0.0.1` / `localhost` / `::1` 上零配置使用
+
+### Changed
+- `/stats` 在配置令牌后由 Bearer 鉴权保护，可远程读取；未配置时保持仅回环访问
+- HTTP 传输改为显式构建 StreamableHTTP 应用并包上鉴权中间件；`/healthz` 保持免鉴权以支持容器探针
+
 ## [0.9.0] - 2026-10-21
 
 ### Added

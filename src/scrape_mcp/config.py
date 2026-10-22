@@ -118,6 +118,9 @@ class Settings(BaseSettings):
     http_json: bool = True
     # streamable-http 免握手/免会话（True）；有状态需先 initialize
     http_stateless: bool = True
+    # HTTP 访问令牌：设置后所有请求（/healthz 除外）必须带 Authorization: Bearer <token>；
+    # 绑定非回环地址时必须设置，否则拒绝启动
+    http_token: str | None = None
 
 
 @lru_cache(maxsize=1)

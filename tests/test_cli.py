@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import scrape_mcp
 from scrape_mcp import server
 
@@ -57,22 +59,52 @@ def test_no_args_defaults_to_stdio(monkeypatch):
     assert dummy.calls == [{"transport": "stdio"}]
 
 
+def _http_settings(**overrides: object) -> SimpleNamespace:
+    values = {
+        "http_port": 8000,
+        "http_host": "127.0.0.1",
+        "http_json": False,
+        "http_stateless": True,
+        "http_token": None,
+        "log_level": "WARNING",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_http_transport_port_override(monkeypatch):
-    dummy = _DummyMCP()
-    monkeypatch.setattr(server, "mcp", dummy)
-    stub = SimpleNamespace(
-        http_port=8000,
-        http_host="127.0.0.1",
-        http_json=False,
-        http_stateless=True,
-        log_level="WARNING",
-    )
+    stub = _http_settings()
     monkeypatch.setattr(server, "get_settings", lambda: stub)
+    calls: list[tuple[object, int, str | None]] = []
+    monkeypatch.setattr(
+        server, "_run_http", lambda settings, port, token: calls.append((settings, port, token))
+    )
     server.main(["--transport", "streamable-http", "--port", "8123"])
-    assert len(dummy.calls) == 1
-    call = dummy.calls[0]
-    assert call["transport"] == "streamable-http"
-    assert call["port"] == 8123
+
+    assert calls == [(stub, 8123, None)]
+
+
+def test_http_public_bind_without_token_is_rejected(monkeypatch):
+    stub = _http_settings(http_host="0.0.0.0")
+    monkeypatch.setattr(server, "get_settings", lambda: stub)
+    monkeypatch.setattr(server, "_run_http", lambda *args: pytest.fail("不应启动服务"))
+
+    with pytest.raises(SystemExit) as exc:
+        server.main(["--transport", "streamable-http"])
+
+    assert "SCRAPE_MCP_HTTP_TOKEN" in str(exc.value)
+
+
+def test_http_public_bind_passes_trimmed_token(monkeypatch):
+    stub = _http_settings(http_host="0.0.0.0", http_token=" s3cret ")
+    monkeypatch.setattr(server, "get_settings", lambda: stub)
+    calls: list[tuple[object, int, str | None]] = []
+    monkeypatch.setattr(
+        server, "_run_http", lambda settings, port, token: calls.append((settings, port, token))
+    )
+    server.main(["--transport", "streamable-http"])
+
+    assert calls == [(stub, 8000, "s3cret")]
 
 
 def test_entry_point_declared_in_pyproject():

@@ -183,6 +183,7 @@ cp .env.example .env    # 生成配置模板
 | `ALLOWED_HOSTS` | — | 主机白名单（逗号分隔）；非空时仅允许名单内主机 |
 | `DENIED_HOSTS` | — | 主机黑名单（逗号分隔），优先于白名单 |
 | `MAX_QPS` | `10` | 全网抓取限流（每秒请求数）；`0` 不限速 |
+| `HTTP_TOKEN` | — | HTTP 模式访问令牌；设置后除 `/healthz` 外都需 Bearer，绑定非回环地址时必填 |
 
 ## HTTP 模式（Postman / curl 直连）
 
@@ -191,13 +192,23 @@ cp .env.example .env    # 生成配置模板
 ```bash
 $env:SCRAPE_MCP_TRANSPORT="streamable-http"
 $env:SCRAPE_MCP_HTTP_PORT="8000"
+$env:SCRAPE_MCP_HTTP_TOKEN="<足够长的随机字符串>"   # 绑定非回环地址时必填
 python -m scrape_mcp.server
 ```
 
 以 `json_response=1`（默认）启动，请求/响应都是普通 JSON（非事件流）。**stateless 模式无需先 `initialize`，直接发 `tools/call` 即可。**
-健康检查：`GET /healthz` 返回版本与关键开关，可用于容器探针/网关巡检。
 
-本地统计：`GET /stats` 返回进程内计数，只接受回环地址访问（其它来源返回 403）：
+**访问令牌**：设置 `SCRAPE_MCP_HTTP_TOKEN` 后，除 `GET /healthz` 外所有请求都要带：
+
+```bash
+curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000/stats
+```
+
+未设置令牌时服务只允许绑定 `127.0.0.1` / `localhost` / `::1`；绑定 `0.0.0.0` 等非回环地址会直接退出，避免无鉴权暴露。缺失或错误令牌统一返回 401（带 `WWW-Authenticate`），响应里不含内部路径与版本。令牌只从请求头读取，不写入日志。配置令牌后回环请求同样要携带，避免本机反向代理把外部请求伪装成 `127.0.0.1` 绕过鉴权。
+
+健康检查：`GET /healthz` 返回版本与关键开关，始终免鉴权，可用于容器探针/网关巡检。
+
+统计：`GET /stats` 返回进程内计数。未配置令牌时只接受回环地址访问（其它来源返回 403）；配置令牌后由 Bearer 鉴权保护，可远程读取：
 
 ```bash
 curl http://127.0.0.1:8000/stats
@@ -594,9 +605,11 @@ docker build -t scrape-mcp .
 # 带 L2 真浏览器（Cloudflare/验证码/SPA）
 docker build --build-arg INSTALL_BROWSER=1 -t scrape-mcp:l2 .
 
-docker run -p 8002:8002 scrape-mcp
+docker run -p 8002:8002 -e SCRAPE_MCP_HTTP_TOKEN=<令牌> scrape-mcp
 curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 ```
+
+容器默认绑定 `0.0.0.0`，必须通过 `-e SCRAPE_MCP_HTTP_TOKEN=...` 提供令牌；`/healthz` 免鉴权，供 HEALTHCHECK 使用。
 
 ## 目录结构
 
@@ -606,6 +619,7 @@ benchmarks/
 └── baseline.json      # 夜间子集基线（趋势参照，每月更新）
 src/scrape_mcp
 ├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/login/session_*）
+├── http_auth.py       # HTTP Bearer 鉴权中间件 + 非回环绑定校验
 ├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）
 ├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/batch/aclose）
 ├── config.py          # 环境变量配置

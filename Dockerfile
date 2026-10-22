@@ -5,8 +5,9 @@
 #   docker build --build-arg INSTALL_BROWSER=1 -t scrape-mcp:l2 .
 #
 # 运行（HTTP 传输，供远端 MCP 客户端接入）：
-#   docker run -p 8002:8002 scrape-mcp
+#   docker run -p 8002:8002 -e SCRAPE_MCP_HTTP_TOKEN=<令牌> scrape-mcp
 #   curl http://127.0.0.1:8002/healthz
+# 容器绑定 0.0.0.0，必须通过环境变量提供访问令牌，否则服务拒绝启动。
 
 FROM python:3.12-slim
 
