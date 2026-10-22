@@ -137,6 +137,7 @@ class Fetcher:
         bypass_cache: bool = False,
         session: str = "default",
         deadline: float | None = None,
+        proxy: str | None = None,
     ) -> FetchOutcome:
         host = _host_of(url)
         sticky_failed = False
@@ -150,6 +151,7 @@ class Fetcher:
                     click=click,
                     session=session,
                     deadline=deadline,
+                    proxy=proxy,
                 )
                 if sticky is not None:
                     return sticky
@@ -164,6 +166,7 @@ class Fetcher:
             timeout=timeout,
             bypass_cache=bypass_cache,
             deadline=deadline,
+            proxy=proxy,
         )
         if sticky_failed:
             outcome.decisions.insert(0, "sticky_l2_failed:fallback_l1")
@@ -192,6 +195,7 @@ class Fetcher:
             click=click,
             session=session,
             deadline=deadline,
+            proxy=proxy,
         )
         if result.tier == "l2" and result.blocked == "none":
             self._remember_sticky(host)
@@ -206,6 +210,7 @@ class Fetcher:
         timeout: float | None,
         bypass_cache: bool,
         deadline: float | None = None,
+        proxy: str | None = None,
     ) -> FetchOutcome:
         """网络异常/5xx 指数退避重试；429/503 带 Retry-After 时按配置做一次有界等待。
 
@@ -227,6 +232,7 @@ class Fetcher:
                 cookies=cookies,
                 timeout=budget.cap(deadline, timeout or self._settings.request_timeout),
                 bypass_cache=bypass_cache,
+                proxy=proxy,
             )
             if trail:
                 outcome.decisions = [*trail, *outcome.decisions]
@@ -287,6 +293,7 @@ class Fetcher:
         cookies: dict[str, str] | None,
         timeout: float | None = None,
         bypass_cache: bool = False,
+        proxy: str | None = None,
     ) -> FetchOutcome:
         resp = await self._http.get(
             url,
@@ -294,6 +301,7 @@ class Fetcher:
             cookies=cookies,
             timeout=timeout,
             bypass_cache=bypass_cache,
+            proxy=proxy,
         )
         if not resp.ok:
             return FetchOutcome(
@@ -349,6 +357,7 @@ class Fetcher:
         click: str | None,
         session: str,
         deadline: float | None,
+        proxy: str | None = None,
     ) -> FetchOutcome | None:
         """已知需要浏览器的主机：跳过 L1 直接渲染；渲染失败返回 None 交给 L1 兜底。"""
         placeholder = FetchOutcome(
@@ -371,6 +380,7 @@ class Fetcher:
             click=click,
             session=session,
             deadline=deadline,
+            proxy=proxy,
         )
         return None if outcome.tier != "l2" else outcome
 
@@ -384,6 +394,7 @@ class Fetcher:
         click: str | None = None,
         session: str = "default",
         deadline: float | None = None,
+        proxy: str | None = None,
     ) -> FetchOutcome:
         host = _host_of(l1.final_url or url)
         browser = self._get_browser()
@@ -396,6 +407,7 @@ class Fetcher:
             session=session,
             # 导航超时按剩余预算压缩，避免一页把整次调用的预算吃光
             timeout=budget.cap(deadline, self._settings.l2_navigate_timeout),
+            proxy=proxy,
         )
         elapsed = l1.elapsed_ms + result.elapsed_ms
         l2_diag = {

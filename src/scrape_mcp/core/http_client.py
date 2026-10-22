@@ -111,8 +111,8 @@ class HttpClient:
         proxy: str | None = None,
         bypass_cache: bool = False,
     ) -> HttpResponse:
-        # 带自定义头/凭证的响应可能因人而异，既不读也不写共享缓存
-        use_cache = not bypass_cache and not headers and not cookies
+        # 带自定义头/凭证/代理的响应可能因人因出口而异，既不读也不写共享缓存
+        use_cache = not bypass_cache and not headers and not cookies and not proxy
         saved = None
         if use_cache:
             saved = self._cache.get(url)

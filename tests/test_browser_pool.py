@@ -70,7 +70,7 @@ def test_context_reused_per_host_and_session(tmp_path, monkeypatch):
     renderer = _renderer(tmp_path)
     created: list[tuple[str, str]] = []
 
-    async def fake_new_context(host: str, session: str = "default", *, headless=None):
+    async def fake_new_context(host: str, session: str = "default", *, headless=None, proxy=None):
         created.append((host, session))
         return _Resource(f"{host}/{session}")
 
@@ -93,7 +93,7 @@ def test_contexts_evicted_lru_beyond_limit(tmp_path, monkeypatch):
     renderer = _renderer(tmp_path, l2_max_contexts=2)
     store: dict[tuple[str, str], _Resource] = {}
 
-    async def fake_new_context(host: str, session: str = "default", *, headless=None):
+    async def fake_new_context(host: str, session: str = "default", *, headless=None, proxy=None):
         resource = _Resource(f"{host}/{session}")
         store[(host, session)] = resource
         return resource
@@ -108,7 +108,10 @@ def test_contexts_evicted_lru_beyond_limit(tmp_path, monkeypatch):
 
     asyncio.run(run())
 
-    assert set(renderer._contexts) == {("a.test", "default"), ("c.test", "default")}
+    assert set(renderer._contexts) == {
+        ("a.test", "default", ""),
+        ("c.test", "default", ""),
+    }
     assert store[("a.test", "default")].closed is False
     assert store[("b.test", "default")].closed is True
 
@@ -118,7 +121,7 @@ def test_page_slots_limit_concurrent_renders(tmp_path, monkeypatch):
     gauge = {"in_flight": 0, "peak": 0}
     context = _PoolContext(gauge)
 
-    async def fake_context(_host: str, session: str = "default"):
+    async def fake_context(_host: str, session: str = "default", **_kwargs):
         return context
 
     monkeypatch.setattr(renderer, "_context_for", fake_context)
@@ -155,7 +158,7 @@ def test_idle_reaper_closes_browser_and_contexts(tmp_path, monkeypatch):
     context = _Resource("context")
     renderer._browser = browser
     renderer._playwright = playwright
-    renderer._contexts[("a.test", "default")] = context
+    renderer._contexts[("a.test", "default", "")] = context
 
     async def run():
         renderer._touch()

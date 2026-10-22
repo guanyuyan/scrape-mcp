@@ -277,6 +277,8 @@ async def test_l2_interaction_options_forwarded():
         "session": "default",
         # 没有 deadline 时按配置的导航超时下传，效果与浏览器默认值一致
         "timeout": fetcher._settings.l2_navigate_timeout,
+        # 未指定单请求代理时显式下传 None，表示沿用全局配置
+        "proxy": None,
     }
 
 

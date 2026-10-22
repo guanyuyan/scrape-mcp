@@ -93,14 +93,16 @@ def _cacheable(
     cookies: dict[str, str] | None,
     bypass_cache: bool,
     debug: bool,
+    proxy: str | None = None,
 ) -> bool:
-    """带自定义头/凭证的结果可能因人而异；debug 要现算诊断，都不走结果缓存。"""
+    """带自定义头/凭证/代理的结果可能因人因出口而异；debug 要现算诊断，都不走结果缓存。"""
     return (
         get_settings().cache_ttl > 0
         and not bypass_cache
         and not debug
         and not headers
         and not cookies
+        and not proxy
     )
 
 
@@ -132,6 +134,33 @@ def _session_error(session: str) -> dict | None:
             "retryable": False,
         }
     return None
+
+
+# 单请求代理允许的协议：curl_cffi 与 Playwright 都支持这几类
+_PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks5"})
+
+
+def _proxy_arg(proxy: str | None) -> tuple[str | None, dict | None]:
+    """校验单请求代理，返回 (规范化值, 错误载荷)；不传表示沿用全局配置。"""
+    if proxy is None:
+        return None, None
+    text = proxy.strip() if isinstance(proxy, str) else ""
+    parsed = urlparse(text)
+    try:
+        valid = bool(text) and parsed.scheme.lower() in _PROXY_SCHEMES and bool(parsed.hostname)
+        if valid:
+            # 端口写法非法（如 :abc）或越界时 urlparse 会在这里抛 ValueError
+            valid = parsed.port is None or parsed.port > 0
+    except ValueError:
+        valid = False
+    if not valid:
+        return None, {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": "proxy 需为 http/https/socks4/socks5 代理 URL，如 http://127.0.0.1:7890",
+            "retryable": False,
+        }
+    return text, None
 
 
 def _denied_payload(url: str, code: str, message: str) -> dict:
@@ -322,6 +351,7 @@ async def _fetch_html(
     bypass_cache: bool = False,
     session: str = "default",
     deadline: float | None = None,
+    proxy: str | None = None,
 ) -> tuple[FetchOutcome | None, dict | None]:
     """抓取单个 URL，返回 (outcome, 错误 payload)。
 
@@ -329,6 +359,7 @@ async def _fetch_html(
     拦截/登录墙统一如实上报，避免把挑战页当正文/当数据。成功时 error 为 None。
     wait_for/scroll/click 为 None 时套用该站 recipe，显式传值优先。
     deadline 是绝对截止时间（见 core.deadline），预算耗尽时不再发起新请求。
+    proxy 为单请求代理，缺省沿用全局配置；L1 与 L2 都走同一个出口。
     """
     recipe = _recipe_for(url)
     if recipe is not None:
@@ -358,6 +389,7 @@ async def _fetch_html(
             bypass_cache=bypass_cache,
             session=session,
             deadline=deadline,
+            proxy=proxy,
         )
 
     code = errors.classify_outcome(outcome)
@@ -543,6 +575,7 @@ async def _fetch_dict(
     debug: bool = False,
     session: str = "default",
     deadline: float | None = None,
+    proxy: str | None = None,
 ) -> dict:
     """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
     settings = get_settings()
@@ -566,7 +599,9 @@ async def _fetch_dict(
     recipe = _recipe_for(url)
     cache: ResultCache | None = None
     key = ""
-    if _cacheable(headers=headers, cookies=cookies, bypass_cache=bypass_cache, debug=debug):
+    if _cacheable(
+        headers=headers, cookies=cookies, bypass_cache=bypass_cache, debug=debug, proxy=proxy
+    ):
         cache = _result_cache("fetch")
         # 命中 key 必须覆盖所有会改变正文的参数：recipe 的正文根与 L2 交互也算在内
         key = _result_key(
@@ -597,6 +632,7 @@ async def _fetch_dict(
         bypass_cache=bypass_cache,
         session=session,
         deadline=deadline,
+        proxy=proxy,
     )
     if error is not None:
         return error
@@ -690,6 +726,7 @@ async def web_fetch(
     bypass_cache: bool = False,
     debug: bool = False,
     session: str = "default",
+    proxy: str | None = None,
 ) -> str:
     """抓取网页并返回极省 token 的紧凑正文（自动辨别反爬拦截页并如实上报）。
 
@@ -717,6 +754,9 @@ async def web_fetch(
         debug: 返回 diagnostics（分层决策、L2 交互命中情况、正文根与候选命中数），
             只含计数与决策、不含页面内容；失败时默认也会带精简版决策轨迹。
         session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致，多身份互不干扰。
+        proxy: 本次请求使用的代理（如 ``http://127.0.0.1:7890``、``socks5://127.0.0.1:1080``），
+            L1 与升级后的 L2 都走该出口；不传则沿用配置 SCRAPE_MCP_PROXY。
+            传了代理的请求不读也不写共享缓存，避免把不同出口的结果混在一起。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -726,6 +766,9 @@ async def web_fetch(
         )
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
@@ -745,6 +788,7 @@ async def web_fetch(
             debug=debug,
             session=session,
             deadline=deadline,
+            proxy=proxy,
         )
     )
 
@@ -763,6 +807,7 @@ async def web_extract(
     bypass_cache: bool = False,
     debug: bool = False,
     session: str = "default",
+    proxy: str | None = None,
 ) -> str:
     """抓取网页并按字段 schema 抽取结构化 JSON（字段级数据，可入库）。
 
@@ -806,6 +851,8 @@ async def web_extract(
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
         debug: 返回 diagnostics（分层决策与 L2 交互命中情况），不含页面内容。
         session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致。
+        proxy: 本次请求使用的代理（如 ``http://127.0.0.1:7890``）；不传则沿用配置。
+            传了代理的请求不读也不写共享缓存。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -815,6 +862,9 @@ async def web_extract(
         )
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
@@ -844,7 +894,9 @@ async def web_extract(
 
     cache: ResultCache | None = None
     key = ""
-    if _cacheable(headers=headers, cookies=cookies, bypass_cache=bypass_cache, debug=debug):
+    if _cacheable(
+        headers=headers, cookies=cookies, bypass_cache=bypass_cache, debug=debug, proxy=proxy
+    ):
         cache = _result_cache("extract")
         # schema 决定字段结果，recipe 的 L2 交互决定渲染后的 DOM，都进 key
         key = _result_key(
@@ -871,6 +923,7 @@ async def web_extract(
         bypass_cache=bypass_cache,
         session=session,
         deadline=deadline,
+        proxy=proxy,
     )
     if error is not None:
         return _payload(**error)
@@ -929,6 +982,7 @@ async def web_batch(
     bypass_cache: bool = False,
     debug: bool = False,
     session: str = "default",
+    proxy: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """并发抓取一批 URL，各自走完整分级链路，返回逐个结果。
@@ -946,11 +1000,15 @@ async def web_batch(
         bypass_cache: 跳过并绕过响应缓存。
         debug: 每条结果附带 diagnostics（决策轨迹与计数，不含页面内容）。
         session: 登录态会话名（默认 default）；对该批所有 URL 生效。
+        proxy: 该批所有 URL 共用的代理；不传则沿用配置。传了代理时不走共享缓存。
         ctx: MCP 上下文，由框架注入，用于逐条上报进度（客户端请求进度时才发通知）。
     """
     settings = get_settings()
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
@@ -998,6 +1056,7 @@ async def web_batch(
                         debug=debug,
                         session=session,
                         deadline=deadline,
+                        proxy=proxy,
                     )
                 except Exception as exc:  # 单条意外异常不应拖垮整批
                     code = errors.classify_exception(exc)
@@ -1031,6 +1090,7 @@ async def _crawl_page(
     next_selector: str | None = None,
     session: str = "default",
     deadline: float | None = None,
+    proxy: str | None = None,
 ) -> tuple[dict, list[str], str | None]:
     """抓一页并顺手抽链接/下一页；失败页返回错误 payload 和空链接列表。"""
     outcome, error = await _fetch_html(
@@ -1041,6 +1101,7 @@ async def _crawl_page(
         bypass_cache=bypass_cache,
         session=session,
         deadline=deadline,
+        proxy=proxy,
     )
     if error is not None:
         return error, [], None
@@ -1107,6 +1168,7 @@ async def web_crawl(
     deadline_ms: int | None = None,
     bypass_cache: bool = False,
     session: str = "default",
+    proxy: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """从起始页发现站内链接并批量抓取，或按"下一页"顺序翻页，适合把一个栏目的前 N 篇读进来。
@@ -1134,6 +1196,7 @@ async def web_crawl(
             已抓到的页面照常返回；排队中的子任务直接返回 timeout。
         bypass_cache: 跳过并绕过响应缓存。
         session: 登录态会话名（默认 default）；对本次所有页面生效。
+        proxy: 本次爬取所有页面共用的代理；不传则沿用配置。传了代理时不走共享缓存。
         ctx: MCP 上下文，由框架注入，用于逐页上报进度（客户端请求进度时才发通知）。
     """
     if not url.startswith(("http://", "https://")):
@@ -1144,6 +1207,9 @@ async def web_crawl(
         )
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
@@ -1200,6 +1266,7 @@ async def web_crawl(
                     next_selector=next_selector,
                     session=session,
                     deadline=deadline,
+                    proxy=proxy,
                 )
             except Exception as exc:  # 单页异常不中断整次爬取
                 code = errors.classify_exception(exc)
@@ -1254,6 +1321,7 @@ async def web_crawl(
                         bypass_cache=bypass_cache,
                         session=session,
                         deadline=deadline,
+                        proxy=proxy,
                     )
                 except Exception as exc:  # 单页异常不中断整次爬取
                     code = errors.classify_exception(exc)

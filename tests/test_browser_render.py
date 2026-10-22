@@ -173,7 +173,7 @@ def test_render_returns_outcome_with_diagnostics(tmp_path, monkeypatch):
     page = _FakePage()
     context = _FakeContext(page)
 
-    async def fake_context(_host: str, session: str = "default"):
+    async def fake_context(_host: str, session: str = "default", **_kwargs):
         return context
 
     monkeypatch.setattr(renderer, "_context_for", fake_context)
@@ -190,7 +190,7 @@ def test_render_returns_outcome_with_diagnostics(tmp_path, monkeypatch):
 def test_render_reports_browser_start_failure(tmp_path, monkeypatch):
     renderer = _renderer(tmp_path)
 
-    async def boom(_host: str, session: str = "default"):
+    async def boom(_host: str, session: str = "default", **_kwargs):
         raise RuntimeError("no chromium")
 
     monkeypatch.setattr(renderer, "_context_for", boom)
@@ -246,7 +246,7 @@ def test_aclose_clears_resources(tmp_path):
         async def stop(self) -> None:
             closed.append(self.name)
 
-    renderer._contexts = {("a.test", "default"): _Resource("context")}
+    renderer._contexts = {("a.test", "default", ""): _Resource("context")}
     renderer._browser = _Resource("browser")
     renderer._playwright = _Resource("playwright")
 

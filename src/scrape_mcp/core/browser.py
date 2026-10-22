@@ -123,8 +123,9 @@ class BrowserRenderer:
         self._playwright: Any = None
         self._browser: Any = None
         # 每站（按会话名隔离）一个 context，各带一份独立的登录态；
-        # 按最近使用排序，超过 l2_max_contexts 时淘汰最久未用的那个
-        self._contexts: OrderedDict[tuple[str, str], Any] = OrderedDict()
+        # 按最近使用排序，超过 l2_max_contexts 时淘汰最久未用的那个。
+        # key 带上代理：不同出口的 context 不能混用，否则请求会走错代理。
+        self._contexts: OrderedDict[tuple[str, str, str], Any] = OrderedDict()
         self._lock = asyncio.Lock()
         # 并发页上限：Semaphore 会绑定首次使用时的事件循环，换循环就重建
         self._slots: asyncio.Semaphore | None = None
@@ -139,15 +140,17 @@ class BrowserRenderer:
 
     # ---------- 生命周期 ----------
 
-    async def _context_for(self, host: str, session: str = "default") -> Any:
-        key = (host, session)
+    async def _context_for(
+        self, host: str, session: str = "default", *, proxy: str | None = None
+    ) -> Any:
+        key = (host, session, proxy or "")
         async with self._lock:
             context = self._contexts.get(key)
             if context is not None:
                 self._contexts.move_to_end(key)
                 return context
             try:
-                context = await self._new_context(host, session)
+                context = await self._new_context(host, session, proxy=proxy)
             except Exception:
                 # 半途失败会留下已启动的浏览器/驱动进程，先收干净再抛，避免每次重试都漏一个
                 await self._shutdown()
@@ -220,7 +223,12 @@ class BrowserRenderer:
         self._playwright = self._browser = None
 
     async def _new_context(
-        self, host: str, session: str = "default", *, headless: bool | None = None
+        self,
+        host: str,
+        session: str = "default",
+        *,
+        headless: bool | None = None,
+        proxy: str | None = None,
     ) -> Any:
         # 延迟导入：没装 playwright 时 L1 仍然可用
         from playwright.async_api import async_playwright
@@ -232,12 +240,14 @@ class BrowserRenderer:
                 self._playwright, headless=self._s.l2_headless if headless is None else headless
             )
         version = getattr(self._browser, "version", "") or ""
+        # 单请求代理优先于全局配置；两者都没有时不开代理
+        server = proxy or self._s.proxy
         kwargs: dict[str, Any] = {
             "locale": self._s.l2_locale,
             "timezone_id": self._s.l2_timezone,
             "user_agent": self._user_agent(version),
             "viewport": {"width": 1440, "height": 900},
-            "proxy": {"server": self._s.proxy} if self._s.proxy else None,
+            "proxy": {"server": server} if server else None,
         }
         # 该站该会话已有登录态则直接带上，跳过登录墙/再登录
         saved = self._sessions.load(host, session)
@@ -314,6 +324,7 @@ class BrowserRenderer:
         click: str | None = None,
         session: str = "default",
         timeout: float | None = None,
+        proxy: str | None = None,
     ) -> BrowserOutcome:
         t0 = time.perf_counter()
         host = host or urlparse(url).netloc.lower()
@@ -331,6 +342,7 @@ class BrowserRenderer:
                     click=click,
                     session=session,
                     timeout=timeout,
+                    proxy=proxy,
                 )
             finally:
                 self._active -= 1
@@ -346,11 +358,12 @@ class BrowserRenderer:
         click: str | None,
         session: str,
         timeout: float | None,
+        proxy: str | None = None,
     ) -> BrowserOutcome:
         # 单步超时可由调用方的总预算压缩（deadline_ms），默认仍取配置值
         nav_ms = int((timeout or self._s.l2_navigate_timeout) * 1000)
         try:
-            context = await self._context_for(host, session)
+            context = await self._context_for(host, session, proxy=proxy)
         except Exception as exc:
             return BrowserOutcome(
                 ok=False,

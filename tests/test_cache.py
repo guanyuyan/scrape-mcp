@@ -137,6 +137,14 @@ async def test_bypass_cache_skips_read_and_write(tmp_path, monkeypatch):
     assert resp.ok and ops == []
 
 
+async def test_proxy_skips_shared_cache(tmp_path, monkeypatch):
+    """不同出口可能拿到不同内容，带代理的请求不读也不写共享缓存。"""
+    client = _client(tmp_path, monkeypatch)
+    ops = _spy_cache(client, monkeypatch)
+    resp = await client.get(URL, proxy="http://127.0.0.1:7890")
+    assert resp.ok and ops == []
+
+
 async def test_response_validators_are_stored(tmp_path, monkeypatch):
     client = _client(
         tmp_path,
