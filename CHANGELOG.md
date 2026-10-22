@@ -7,6 +7,7 @@
 ### Added
 - **HTTP Bearer 鉴权**：设置 `SCRAPE_MCP_HTTP_TOKEN` 后，除 `/healthz` 外所有 HTTP 请求必须携带 `Authorization: Bearer <token>`；缺失或错误统一返回 401（带 `WWW-Authenticate`），响应不含内部路径与版本
 - **启动期保护**：HTTP 绑定非回环地址（如 `0.0.0.0`）但未配置令牌时拒绝启动；未配置令牌时仍可在 `127.0.0.1` / `localhost` / `::1` 上零配置使用
+- **单令牌配额**：`SCRAPE_MCP_HTTP_QPS`（默认 5 次/秒，令牌桶）与 `SCRAPE_MCP_HTTP_DAILY_QUOTA`（默认每日 10000 次，UTC 零点清零）超限返回 429，带 `Retry-After` 头与 `retry_after_s` 字段（`rate_limited` / `quota_exceeded`），客户端可按建议退避；`/healthz` 与未配置令牌的本机模式不受限
 
 ### Changed
 - `/stats` 在配置令牌后由 Bearer 鉴权保护，可远程读取；未配置时保持仅回环访问

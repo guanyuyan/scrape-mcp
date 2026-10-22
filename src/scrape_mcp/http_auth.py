@@ -1,9 +1,11 @@
-"""HTTP 传输访问控制：静态 Bearer Token，未配置时只允许回环访问。"""
+"""HTTP 传输访问控制：静态 Bearer Token、单令牌配额，未配置时只允许回环访问。"""
 
 from __future__ import annotations
 
 import hmac
 import json
+import math
+import time
 
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -35,9 +37,54 @@ def _client_host(scope: Scope) -> str | None:
     return client[0] if client else None
 
 
-async def _send_error(send: Send, status: int, error: str) -> None:
-    """统一的无凭证/越权响应：不返回内部路径、版本或统计信息。"""
-    body = json.dumps({"ok": False, "error": error}, ensure_ascii=False).encode("utf-8")
+class QuotaLimiter:
+    """单令牌的 QPS 与日配额：超限直接拒绝，不做排队等待。
+
+    QPS 用令牌桶（容量等于速率，允许一个有界突发）；日配额按 UTC 自然日计数，
+    跨日自动清零。两项都可以设 0 关闭。
+    """
+
+    def __init__(self, qps: float = 0.0, daily: int = 0) -> None:
+        self._qps = max(float(qps or 0), 0.0)
+        self._daily = max(int(daily or 0), 0)
+        self._tokens = self._qps
+        self._last = time.monotonic()
+        self._day = self._today()
+        self._used = 0
+
+    @staticmethod
+    def _today() -> int:
+        """UTC 日序号：同一个自然日内计数，零点归零。"""
+        return int(time.time() // 86400)
+
+    def hit(self) -> tuple[str, float] | None:
+        """记一次已通过鉴权的请求；超限返回 ``(错误码, 建议重试秒数)``。"""
+        wall = time.time()
+        day = int(wall // 86400)
+        if day != self._day:
+            self._day = day
+            self._used = 0
+        if self._daily and self._used >= self._daily:
+            return "quota_exceeded", max(1.0, 86400.0 - wall % 86400)
+        if self._qps > 0:
+            now = time.monotonic()
+            self._tokens = min(self._qps, self._tokens + (now - self._last) * self._qps)
+            self._last = now
+            if self._tokens < 1.0:
+                return "rate_limited", (1.0 - self._tokens) / self._qps
+            self._tokens -= 1.0
+        self._used += 1
+        return None
+
+
+async def _send_error(
+    send: Send, status: int, error: str, retry_after: float | None = None
+) -> None:
+    """统一的无凭证/越权/超限响应：不返回内部路径、版本或统计信息。"""
+    payload: dict[str, object] = {"ok": False, "error": error}
+    if retry_after is not None:
+        payload["retry_after_s"] = round(retry_after, 1)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = [
         (b"content-type", b"application/json; charset=utf-8"),
         (b"content-length", str(len(body)).encode("ascii")),
@@ -45,16 +92,30 @@ async def _send_error(send: Send, status: int, error: str) -> None:
     ]
     if status == 401:
         headers.append((b"www-authenticate", b'Bearer realm="scrape-mcp"'))
+    if status == 429 and retry_after is not None:
+        headers.append((b"retry-after", str(math.ceil(retry_after)).encode("ascii")))
     await send({"type": "http.response.start", "status": status, "headers": headers})
     await send({"type": "http.response.body", "body": body})
 
 
 class BearerAuthMiddleware:
-    """配置令牌后校验 ``Authorization: Bearer <token>``；未配置时仅放行回环来源。"""
+    """配置令牌后校验 ``Authorization: Bearer <token>``；未配置时仅放行回环来源。
 
-    def __init__(self, app: ASGIApp, token: str | None = None) -> None:
+    令牌通过后再按 QPS / 日配额限流，超限返回 429；未配置令牌（纯回环本地用）
+    不受配额约束。
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        token: str | None = None,
+        *,
+        qps: float = 0.0,
+        daily_quota: int = 0,
+    ) -> None:
         self.app = app
         self.token = (token or "").strip() or None
+        self.quota = QuotaLimiter(qps, daily_quota) if self.token else None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path") in EXEMPT_PATHS:
@@ -67,6 +128,12 @@ class BearerAuthMiddleware:
             if scheme.lower() == "bearer" and hmac.compare_digest(
                 credentials.strip().encode("utf-8"), self.token.encode("utf-8")
             ):
+                if self.quota is not None:
+                    rejected = self.quota.hit()
+                    if rejected is not None:
+                        error, retry_after = rejected
+                        await _send_error(send, 429, error, retry_after=retry_after)
+                        return
                 scope.setdefault("state", {})["scrape_mcp_authenticated"] = True
                 await self.app(scope, receive, send)
                 return

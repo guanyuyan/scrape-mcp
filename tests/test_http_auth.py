@@ -7,13 +7,21 @@ import json
 
 import pytest
 
-from scrape_mcp.http_auth import BearerAuthMiddleware, ensure_http_access
+import scrape_mcp.http_auth as http_auth
+from scrape_mcp.http_auth import BearerAuthMiddleware, QuotaLimiter, ensure_http_access
 
 TOKEN = "s3cret-token"
 
 
 async def _receive() -> dict:
     return {"type": "http.request", "body": b"", "more_body": False}
+
+
+async def _ok_app(scope, receive, send):
+    scope["reached"] = True
+    if scope["type"] == "http":
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
 
 
 def _call(
@@ -23,6 +31,7 @@ def _call(
     headers: tuple[tuple[bytes, bytes], ...] = (),
     client: tuple[str, int] | None = ("127.0.0.1", 5000),
     kind: str = "http",
+    middleware: BearerAuthMiddleware | None = None,
 ):
     scope = {
         "type": kind,
@@ -33,16 +42,11 @@ def _call(
     }
     sent: list[dict] = []
 
-    async def app(scope, receive, send):
-        scope["reached"] = True
-        if scope["type"] == "http":
-            await send({"type": "http.response.start", "status": 200, "headers": []})
-            await send({"type": "http.response.body", "body": b"ok"})
-
     async def send(message):
         sent.append(message)
 
-    asyncio.run(BearerAuthMiddleware(app, token)(scope, _receive, send))
+    auth = middleware or BearerAuthMiddleware(_ok_app, token)
+    asyncio.run(auth(scope, _receive, send))
     return scope, sent
 
 
@@ -153,3 +157,94 @@ def test_binding_public_address_without_token_is_rejected(host):
 
 def test_binding_public_address_with_token_is_allowed():
     ensure_http_access("0.0.0.0", TOKEN)
+
+
+AUTH_HEADERS = ((b"authorization", f"Bearer {TOKEN}".encode()),)
+
+
+def test_qps_exceeded_returns_429_with_retry_after():
+    middleware = BearerAuthMiddleware(_ok_app, TOKEN, qps=1.0, daily_quota=0)
+
+    _, first = _call(TOKEN, headers=AUTH_HEADERS, client=("10.0.0.5", 5000), middleware=middleware)
+    scope, second = _call(
+        TOKEN, headers=AUTH_HEADERS, client=("10.0.0.5", 5000), middleware=middleware
+    )
+
+    assert _start(first)["status"] == 200
+    assert _start(second)["status"] == 429
+    assert (b"retry-after", b"1") in _start(second)["headers"]
+    body = _body(second)
+    assert body["error"] == "rate_limited"
+    assert body["retry_after_s"] > 0
+    assert scope.get("reached") is None
+
+
+def test_daily_quota_exceeded_returns_429():
+    middleware = BearerAuthMiddleware(_ok_app, TOKEN, qps=0.0, daily_quota=1)
+
+    _, first = _call(TOKEN, headers=AUTH_HEADERS, client=("10.0.0.5", 5000), middleware=middleware)
+    _, second = _call(TOKEN, headers=AUTH_HEADERS, client=("10.0.0.5", 5000), middleware=middleware)
+
+    assert _start(first)["status"] == 200
+    assert _start(second)["status"] == 429
+    assert _body(second)["error"] == "quota_exceeded"
+    assert _body(second)["retry_after_s"] > 0
+
+
+def test_healthz_does_not_consume_quota():
+    middleware = BearerAuthMiddleware(_ok_app, TOKEN, qps=0.0, daily_quota=1)
+
+    for _ in range(3):
+        _, sent = _call(TOKEN, path="/healthz", client=("10.0.0.5", 5000), middleware=middleware)
+        assert _start(sent)["status"] == 200
+
+    _, sent = _call(TOKEN, headers=AUTH_HEADERS, client=("10.0.0.5", 5000), middleware=middleware)
+    assert _start(sent)["status"] == 200
+
+
+def test_loopback_without_token_is_not_quota_limited():
+    middleware = BearerAuthMiddleware(_ok_app, None, qps=1.0, daily_quota=1)
+
+    for _ in range(3):
+        _, sent = _call(None, client=("127.0.0.1", 5000), middleware=middleware)
+        assert _start(sent)["status"] == 200
+
+
+class _FakeClock:
+    """同时替换单调钟与墙上时钟，便于稳定验证补令牌与跨日清零。"""
+
+    def __init__(self, wall: float = 86400.0, mono: float = 0.0) -> None:
+        self.wall = wall
+        self.mono = mono
+
+    def time(self) -> float:
+        return self.wall
+
+    def monotonic(self) -> float:
+        return self.mono
+
+
+def test_qps_refills_over_time(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(http_auth, "time", clock)
+    limiter = QuotaLimiter(qps=2.0)
+
+    assert limiter.hit() is None
+    assert limiter.hit() is None
+    assert limiter.hit() is not None
+
+    clock.mono += 0.5  # 补回一个令牌
+    assert limiter.hit() is None
+
+
+def test_daily_quota_resets_on_next_utc_day(monkeypatch):
+    clock = _FakeClock(wall=86400.0 * 100)
+    monkeypatch.setattr(http_auth, "time", clock)
+    limiter = QuotaLimiter(qps=0.0, daily=1)
+
+    assert limiter.hit() is None
+    rejected = limiter.hit()
+    assert rejected is not None and rejected[0] == "quota_exceeded"
+
+    clock.wall += 86400
+    assert limiter.hit() is None

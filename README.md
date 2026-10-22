@@ -184,6 +184,8 @@ cp .env.example .env    # 生成配置模板
 | `DENIED_HOSTS` | — | 主机黑名单（逗号分隔），优先于白名单 |
 | `MAX_QPS` | `10` | 全网抓取限流（每秒请求数）；`0` 不限速 |
 | `HTTP_TOKEN` | — | HTTP 模式访问令牌；设置后除 `/healthz` 外都需 Bearer，绑定非回环地址时必填 |
+| `HTTP_QPS` | `5` | 单令牌每秒请求上限（令牌桶，允许同量突发）；超出返回 429 + `Retry-After`；`0` 不限 |
+| `HTTP_DAILY_QUOTA` | `10000` | 单令牌每日请求配额（UTC 自然日，跨日清零）；超出返回 429；`0` 不限 |
 
 ## HTTP 模式（Postman / curl 直连）
 
@@ -205,6 +207,8 @@ curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000
 ```
 
 未设置令牌时服务只允许绑定 `127.0.0.1` / `localhost` / `::1`；绑定 `0.0.0.0` 等非回环地址会直接退出，避免无鉴权暴露。缺失或错误令牌统一返回 401（带 `WWW-Authenticate`），响应里不含内部路径与版本。令牌只从请求头读取，不写入日志。配置令牌后回环请求同样要携带，避免本机反向代理把外部请求伪装成 `127.0.0.1` 绕过鉴权。
+
+**配额**：配置令牌后，该令牌的请求还受 `HTTP_QPS`（默认 5 次/秒）与 `HTTP_DAILY_QUOTA`（默认每日 10000 次，UTC 零点清零）约束，超限返回 429，响应带 `Retry-After` 头与 `retry_after_s` 字段（`error` 分别为 `rate_limited` / `quota_exceeded`），客户端可按建议时间退避重试。`/healthz` 不消耗配额；未配置令牌的纯本机模式不受配额限制。
 
 健康检查：`GET /healthz` 返回版本与关键开关，始终免鉴权，可用于容器探针/网关巡检。
 

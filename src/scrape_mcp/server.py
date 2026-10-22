@@ -1484,7 +1484,12 @@ def _run_http(settings, port: int, token: str | None) -> None:  # pragma: no cov
         host=settings.http_host,
     )
     uvicorn.run(
-        BearerAuthMiddleware(app, token=token),
+        BearerAuthMiddleware(
+            app,
+            token=token,
+            qps=settings.http_qps,
+            daily_quota=settings.http_daily_quota,
+        ),
         host=settings.http_host,
         port=port,
         log_level=settings.log_level.lower(),

@@ -178,6 +178,8 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `DENIED_HOSTS` | — | Comma-separated denylist, takes precedence over the allowlist |
 | `MAX_QPS` | `10` | Global request rate limit (requests/second); `0` disables |
 | `HTTP_TOKEN` | — | HTTP access token; when set, all endpoints except `/healthz` require Bearer auth, and it is mandatory for non-loopback binds |
+| `HTTP_QPS` | `5` | Per-token request rate (token bucket, allows an equal burst); over-limit returns 429 + `Retry-After`; `0` disables |
+| `HTTP_DAILY_QUOTA` | `10000` | Per-token daily request quota (UTC day, resets at midnight); over-limit returns 429; `0` disables |
 
 ## HTTP mode (Postman / curl)
 
@@ -199,6 +201,8 @@ curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000
 ```
 
 Without a token the server only binds to `127.0.0.1` / `localhost` / `::1`; binding to `0.0.0.0` or any non-loopback address exits immediately to avoid unauthenticated exposure. Missing or wrong tokens get a uniform 401 (with `WWW-Authenticate`), and the response contains no internal paths or version details. The token is read from the request header only and is never logged. Once a token is set, loopback requests must present it too, so a local reverse proxy cannot bypass auth by making every request look like `127.0.0.1`.
+
+**Quota**: with a token configured, its requests are also bounded by `HTTP_QPS` (5 req/s by default) and `HTTP_DAILY_QUOTA` (10000 per UTC day by default, reset at midnight). Over-limit requests get 429 with a `Retry-After` header and a `retry_after_s` field (`error` is `rate_limited` or `quota_exceeded`), so clients can back off as suggested. `/healthz` does not consume quota, and the token-less local mode is not quota-limited.
 
 Health check: `GET /healthz` always stays unauthenticated so container probes and gateways can use it.
 

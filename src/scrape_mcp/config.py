@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     # HTTP 访问令牌：设置后所有请求（/healthz 除外）必须带 Authorization: Bearer <token>；
     # 绑定非回环地址时必须设置，否则拒绝启动
     http_token: str | None = None
+    # 单令牌每秒请求上限（令牌桶，容量同速率）；超出返回 429 + Retry-After；0 不限
+    http_qps: float = 5.0
+    # 单令牌每日请求配额（UTC 自然日，跨日清零）；超出返回 429；0 不限
+    http_daily_quota: int = 10000
 
 
 @lru_cache(maxsize=1)
