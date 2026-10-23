@@ -31,6 +31,75 @@ def normalize_session(name: str | None) -> str:
     raise ValueError("session 只能包含字母、数字、点、下划线和连字符，长度 1-64")
 
 
+class CookieFileError(ValueError):
+    """cookie 文件无法解析；消息可直接回给调用方。"""
+
+
+def _cookies_from_json(text: str) -> list[dict[str, Any]]:
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CookieFileError(f"不是合法 JSON: {exc}") from exc
+    cookies = raw.get("cookies") if isinstance(raw, dict) else raw
+    if not isinstance(cookies, list):
+        raise CookieFileError(
+            "JSON 里没有 cookies 数组（支持 session_export 产物、storage_state 或 cookie 数组）"
+        )
+    return [c for c in cookies if isinstance(c, dict)]
+
+
+def _cookies_from_netscape(text: str) -> list[dict[str, Any]]:
+    """Netscape cookies.txt：domain, includeSubdomains, path, secure, expires, name, value。"""
+    cookies: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        raw = line.rstrip("\r")
+        if not raw.strip():
+            continue
+        http_only = raw.startswith("#HttpOnly_")
+        if http_only:
+            raw = raw[len("#HttpOnly_") :]
+        elif raw.lstrip().startswith("#"):
+            continue
+        fields = raw.split("\t")
+        if len(fields) != 7:
+            continue
+        domain, _subdomains, path, secure, expires, name, value = fields
+        if not name.strip():
+            continue
+        cookie: dict[str, Any] = {
+            "name": name.strip(),
+            "value": value,
+            "domain": domain.strip(),
+            "path": path.strip() or "/",
+        }
+        if secure.strip().upper() == "TRUE":
+            cookie["secure"] = True
+        if http_only:
+            cookie["httpOnly"] = True
+        exp = expires.strip()
+        if exp.isdigit() and int(exp) > 0:
+            cookie["expires"] = int(exp)
+        cookies.append(cookie)
+    if not cookies:
+        raise CookieFileError("没有解析到 cookie（支持 Netscape cookies.txt 或 JSON）")
+    return cookies
+
+
+def parse_cookie_text(text: str) -> list[dict[str, Any]]:
+    """按内容解析 cookie：JSON（导出对象 / storage_state / 数组）或 Netscape cookies.txt。"""
+    stripped = text.lstrip("\ufeff \t\r\n")
+    if not stripped:
+        raise CookieFileError("cookie 文件为空")
+    if stripped.startswith(("{", "[")):
+        return _cookies_from_json(stripped)
+    return _cookies_from_netscape(text)
+
+
+def load_cookie_file(path: Path) -> list[dict[str, Any]]:
+    """读取 cookie 文件，格式由内容判断（浏览器扩展导出的 cookies.txt 也可直接用）。"""
+    return parse_cookie_text(path.read_text(encoding="utf-8"))
+
+
 def _normalize_cookie(raw: Any, host: str) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None

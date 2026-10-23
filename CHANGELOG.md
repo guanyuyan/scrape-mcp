@@ -2,6 +2,15 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [0.10.1] - 2026-10-23
+
+### Added
+- **`scrape-mcp session` 子命令**：`session list` 查看已保存的登录态，`session import` 直接从 cookie 文件导入（不需要浏览器），容器/无显示环境下也能补登录态
+- **Netscape `cookies.txt` 支持**：`session_import` 工具与 CLI 共用同一套解析，兼容浏览器扩展导出格式、`#HttpOnly_` 前缀、secure 与过期时间
+
+### Fixed
+- **容器内 PDF 抓取**：镜像改为安装 `mcp-scrape[pdf]`；此前容器里 `web_fetch` 遇到 PDF 会因缺 `pypdf` 失败
+
 ## [0.10.0] - 2026-10-23
 
 ### Added

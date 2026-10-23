@@ -413,6 +413,20 @@ def test_session_import_rejects_file_without_cookies(monkeypatch, tmp_path):
     assert out["error_code"] == errors.INVALID_ARGUMENT
 
 
+def test_session_import_accepts_netscape_cookies(monkeypatch, tmp_path):
+    store = SessionStore(str(tmp_path))
+    monkeypatch.setattr(server, "_session_store", lambda: store)
+    source = tmp_path / "cookies.txt"
+    source.write_text(
+        "# Netscape HTTP Cookie File\n.a.test\tTRUE\t/\tFALSE\t0\tsid\tabc\n",
+        encoding="utf-8",
+    )
+
+    out = _run(server.session_import(URL, str(source)))
+    assert out["ok"] is True and out["imported"] == 1
+    assert store.load("a.test")["cookies"][0]["value"] == "abc"
+
+
 def test_session_errors_reject_bad_session_name():
     out = _run(server.session_export(URL, session="../evil"))
     assert out["error_code"] == errors.INVALID_ARGUMENT

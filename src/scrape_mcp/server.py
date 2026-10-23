@@ -25,7 +25,7 @@ from .core.proxy import valid_proxy
 from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
-from .core.session import SessionStore, normalize_session
+from .core.session import CookieFileError, SessionStore, load_cookie_file, normalize_session
 from .core.stats import get_stats
 from .extract.compact import LINK_POLICIES, compact_html
 from .extract.links import extract_links, next_link
@@ -1467,14 +1467,14 @@ async def session_import(
     session: str = "default",
     replace: bool = False,
 ) -> str:
-    """从本地 JSON 文件导入 cookie 到某站登录态（仅本地文件，不发起网络请求）。
+    """从本地文件导入 cookie 到某站登录态（仅本地文件，不发起网络请求）。
 
-    文件内容支持三种形态：session_export 导出的对象（含 ``cookies``）、
-    Playwright storage_state（含 ``cookies``），或直接是一个 cookie 数组。
+    文件内容支持：session_export 导出的对象（含 ``cookies``）、Playwright
+    storage_state、直接的 cookie 数组，或浏览器扩展导出的 Netscape ``cookies.txt``。
 
     Args:
         url: 目标站点任一页面 URL（按域名匹配登录态）。
-        path: 本地 JSON 文件路径。
+        path: 本地文件路径（容器部署时用 ``docker cp`` 放进卷，再用容器内路径）。
         session: 会话名（默认 default）；与 web_fetch 使用的会话名保持一致。
         replace: True 时用文件里的 cookie 整体替换该会话；默认 False 为按
             （name, domain, path）合并，同名以导入值为准。
@@ -1491,7 +1491,7 @@ async def session_import(
 
     source = Path(path).expanduser()
     try:
-        raw = json.loads(source.read_text(encoding="utf-8"))
+        cookies = load_cookie_file(source)
     except (OSError, UnicodeDecodeError) as exc:
         return _payload(
             ok=False,
@@ -1499,21 +1499,12 @@ async def session_import(
             error_code=errors.INVALID_ARGUMENT,
             error=f"读取 {source} 失败: {exc}",
         )
-    except json.JSONDecodeError as exc:
+    except CookieFileError as exc:
         return _payload(
             ok=False,
             url=url,
             error_code=errors.INVALID_ARGUMENT,
-            error=f"{source} 不是合法 JSON: {exc}",
-        )
-
-    cookies = raw.get("cookies") if isinstance(raw, dict) else raw
-    if not isinstance(cookies, list):
-        return _payload(
-            ok=False,
-            url=url,
-            error_code=errors.INVALID_ARGUMENT,
-            error="文件里没有 cookies 数组（支持 session_export 产物、storage_state 或 cookie 数组）",
+            error=f"{source} 无法解析: {exc}",
         )
 
     count = _session_store().import_cookies(host, cookies, session, replace=replace)
@@ -1566,8 +1557,8 @@ def main(argv: list[str] | None = None) -> None:
     """
     if argv is None:
         argv = sys.argv[1:]
-    # 子命令（init / schema）走独立模块，不启动服务；其余参数保持原有零配置行为
-    if argv and argv[0] in ("init", "schema"):
+    # 子命令（init / schema / session）走独立模块，不启动服务；其余参数保持原有零配置行为
+    if argv and argv[0] in ("init", "schema", "session"):
         from .cli import run as run_subcommand
 
         raise SystemExit(run_subcommand(argv))
@@ -1578,9 +1569,11 @@ def main(argv: list[str] | None = None) -> None:
             "scrape-mcp — 反爬感知抓取 + 极省 Token 内容精简的 MCP Server\n\n"
             "用法: scrape-mcp [--transport stdio|streamable-http] [--port N] [--version]\n"
             "      scrape-mcp init [--client claude|cursor|vscode|json] [--write]\n"
-            "      scrape-mcp schema [--tool NAME] [--output FILE]\n\n"
+            "      scrape-mcp schema [--tool NAME] [--output FILE]\n"
+            "      scrape-mcp session <list|import> [...]\n\n"
             "零配置默认作为 stdio MCP 服务运行，供 Claude/Cursor 等客户端接管。\n"
-            "init 生成客户端配置（默认只预览 diff），schema 导出工具定义。\n"
+            "init 生成客户端配置（默认只预览 diff），schema 导出工具定义，\n"
+            "session 查看或导入登录态（容器内无法开浏览器时用 import 导入 cookies）。\n"
             "如需 HTTP 直连（Postman/curl），加 --transport streamable-http [--port 8000]；\n"
             "绑定非回环地址时必须设置 SCRAPE_MCP_HTTP_TOKEN。\n"
             "配置详见 .env / SCRAPE_MCP_* 环境变量。"

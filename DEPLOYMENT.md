@@ -47,6 +47,9 @@ docker run -d --name scrape-mcp \
 `SCRAPE_MCP_HTTP_PORT=8002`、`SCRAPE_MCP_DATA_DIR=/data`。入口命令为
 `scrape-mcp --transport streamable-http --port 8002`。
 
+镜像已内置 PDF 文本抽取（`pypdf`），`web_fetch` 在容器里可直接读 PDF；L2 浏览器层按需通过
+`INSTALL_BROWSER=1` 加上，不是所有页面的必需项。
+
 ## 4. 反向代理与 TLS
 
 Caddy 最小配置（自动申请证书）：
@@ -145,4 +148,5 @@ scrape.example.com {
 | 持续 401 | 请求头是否为 `Authorization: Bearer <令牌>`；令牌是否带多余空白；反向代理是否剥掉了该头 |
 | 持续 429 | 命中 `HTTP_QPS` 或日配额，按响应里的 `Retry-After` 退避；`/healthz` 不消耗配额 |
 | 全部抓取失败 | 容器出网/DNS/代理；在容器内请求一个已知站点验证；检查代理池是否整池冷却 |
-| 登录态失效 | 容器内没有图形界面，无法完成手动登录。请在本机用 `login` 登录，把 `~/.scrape_mcp/sessions/` 下对应文件拷进卷的 `/data/sessions/` |
+| 登录态失效 / 需要登录的站 | 容器内没有图形界面，无法手动登录。① 本机已 `login` 过：`docker exec scrape-mcp mkdir -p /data/sessions` 后 `docker cp <宿主>/.scrape_mcp/sessions/<host>.json scrape-mcp:/data/sessions/<host>.json`（保留 localStorage）；② 只有 cookie：`docker cp cookies.txt scrape-mcp:/data/cookies.txt` 再 `docker exec scrape-mcp scrape-mcp session import --url https://<站> --file /data/cookies.txt`，支持 JSON 与 Netscape `cookies.txt` |
+| PDF 抓取报缺依赖 | 镜像已内置 `pypdf`；自己改装镜像时用 `pip install "mcp-scrape[pdf]"` |

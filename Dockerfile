@@ -24,7 +24,8 @@ COPY src ./src
 #   docker build --build-arg PIP_INDEX_URL=https://<镜像源>/simple .
 ARG PIP_INDEX_URL
 # 依赖都有预编译 wheel，这里只负责打好本项目与依赖的 wheel，运行镜像不带任何工具链
-RUN python -m pip wheel ${PIP_INDEX_URL:+--index-url $PIP_INDEX_URL} --wheel-dir /wheels .
+# [pdf] 让容器里的 web_fetch 也能直接吃 PDF（pypdf 为纯 Python 包，不增大构建依赖面）
+RUN python -m pip wheel ${PIP_INDEX_URL:+--index-url $PIP_INDEX_URL} --wheel-dir /wheels ".[pdf]"
 
 # ---- 运行阶段：最小依赖面 + 非 root（uid/gid 10001）----
 FROM python:3.12-slim AS runtime
@@ -46,7 +47,7 @@ ENV PYTHONUNBUFFERED=1 \
     SCRAPE_MCP_HTTP_PORT=8002
 
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-index --find-links=/wheels mcp-scrape \
+RUN python -m pip install --no-index --find-links=/wheels "mcp-scrape[pdf]" \
     && rm -rf /wheels
 
 # L2 浏览器层（可选）：Chromium 与系统库只装进运行镜像，镜像会显著变大；

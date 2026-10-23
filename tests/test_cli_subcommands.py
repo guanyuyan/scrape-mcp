@@ -11,6 +11,7 @@ import pytest
 
 import scrape_mcp
 from scrape_mcp import cli, sdk, server
+from scrape_mcp.config import Settings
 
 
 def _run(argv: list[str]) -> int:
@@ -210,6 +211,37 @@ def test_schema_writes_output_file(monkeypatch, tmp_path):
     assert _run(["schema", "--output", str(target)]) == 0
     payload = json.loads(target.read_text(encoding="utf-8"))
     assert payload["tools"][0]["annotations"] == {"x": 1}
+
+
+def test_session_cli_imports_netscape_and_lists(tmp_path, monkeypatch, capsys):
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr("scrape_mcp.config.get_settings", lambda: Settings(data_dir=str(data_dir)))
+    source = tmp_path / "cookies.txt"
+    source.write_text(
+        "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t0\tsid\tabc\n",
+        encoding="utf-8",
+    )
+
+    code = _run(["session", "import", "--url", "https://www.example.com/a", "--file", str(source)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 条 cookie" in out and "www.example.com" in out
+    assert (data_dir / "sessions" / "www.example.com.json").is_file()
+
+    assert _run(["session", "list"]) == 0
+    assert "www.example.com" in capsys.readouterr().out
+
+
+def test_session_cli_rejects_bad_url_and_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("scrape_mcp.config.get_settings", lambda: Settings(data_dir=str(tmp_path)))
+    bad = tmp_path / "cookies.txt"
+    bad.write_text("nope", encoding="utf-8")
+
+    assert _run(["session", "import", "--url", "www.example.com", "--file", str(bad)]) == 2
+    assert "--url" in capsys.readouterr().err
+
+    assert _run(["session", "import", "--url", "https://a.test", "--file", str(bad)]) == 2
+    assert "无法解析" in capsys.readouterr().err
 
 
 def test_unknown_subcommand_returns_usage(capsys):

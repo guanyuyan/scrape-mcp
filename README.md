@@ -269,6 +269,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
 - 若复用系统浏览器（免下载）：设环境变量 `SCRAPE_MCP_L2_CHANNEL` 为 `chrome` 或 `msedge`。
 - 配对成功后重启客户端，即可在会话里直接调用 `web_fetch` / `web_extract` / `web_batch` / `web_crawl`。
 - 想先看工具定义（名称、说明、入参 schema）：`scrape-mcp schema --tool web_fetch`，或 `--output tools.json` 导出全量。
+- 没有图形界面（容器/服务器）时不必开浏览器：`scrape-mcp session import --url https://<站> --file cookies.txt` 直接导入浏览器扩展导出的 cookies；`scrape-mcp session list` 查看已保存的登录态。
 
 ## MCP 工具
 
@@ -307,8 +308,8 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 多账号场景用不同 `session` 名分别登录，`web_fetch` 时传同一个名字即可，互不覆盖
 - **`session_list()`** → 列出本地已保存的登录态（`session` + `host` + `updated_at`），不含 cookie 内容
 - **`session_export(url, session="default", path=None)`** → 导出该站 cookie（`{host, session, cookies}`）；传 `path` 时同时写入本地文件
-- **`session_import(url, path, session="default", replace=False)`** → 从本地 JSON 导入 cookie
-  - 兼容 `session_export` 产物、Playwright `storage_state` 或裸 cookie 数组
+- **`session_import(url, path, session="default", replace=False)`** → 从本地文件导入 cookie
+  - 兼容 `session_export` 产物、Playwright `storage_state`、裸 cookie 数组，以及浏览器扩展导出的 Netscape `cookies.txt`
   - 默认按 `(name, domain, path)` 合并（同名以导入值为准），`replace=true` 整体替换；只读本地文件，不发网络请求
 
 返回为 JSON 字符串（落在 `content[0].text`，请解析文本，勿依赖 `structured_content`）。

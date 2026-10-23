@@ -263,6 +263,7 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
 - To reuse a system browser: set `SCRAPE_MCP_L2_CHANNEL` to `chrome` or `msedge`.
 - Restart the client, then call `web_fetch` / `web_extract` / `web_batch` / `web_crawl` from a conversation.
 - Inspect tool definitions first: `scrape-mcp schema --tool web_fetch`, or `--output tools.json` for all.
+- No display (container/server)? Skip the browser: `scrape-mcp session import --url https://<site> --file cookies.txt` imports cookies exported by a browser extension, and `scrape-mcp session list` shows what is stored.
 
 ## MCP tools
 
@@ -301,8 +302,8 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Use different `session` names for multiple accounts; pass the same name to `web_fetch`
 - **`session_list()`** → list stored sessions (`session` + `host` + `updated_at`), without cookie values
 - **`session_export(url, session="default", path=None)`** → export cookies as `{host, session, cookies}`; with `path`, also write a file
-- **`session_import(url, path, session="default", replace=False)`** → import cookies from a local JSON file
-  - Accepts `session_export` output, Playwright `storage_state`, or a bare cookie array
+- **`session_import(url, path, session="default", replace=False)`** → import cookies from a local file
+  - Accepts `session_export` output, Playwright `storage_state`, a bare cookie array, or a Netscape `cookies.txt` exported by browser extensions
   - Merges by `(name, domain, path)` by default (imported values win); `replace=true` replaces everything. Reads local files only, no network
 
 Tool results are JSON strings in `content[0].text` — parse the text, do not rely on `structured_content`.

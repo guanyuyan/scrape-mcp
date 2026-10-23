@@ -13,7 +13,13 @@ from scrape_mcp.config import Settings
 from scrape_mcp.core.browser import BrowserOutcome
 from scrape_mcp.core.fetcher import Fetcher
 from scrape_mcp.core.http_client import HttpResponse
-from scrape_mcp.core.session import SessionStore, normalize_session
+from scrape_mcp.core.session import (
+    CookieFileError,
+    SessionStore,
+    load_cookie_file,
+    normalize_session,
+    parse_cookie_text,
+)
 
 
 def test_session_store_roundtrip(tmp_path):
@@ -134,6 +140,54 @@ def test_import_without_valid_cookie_does_not_write(tmp_path):
     store = SessionStore(str(tmp_path))
     assert store.import_cookies("a.test", [{"value": "x"}, "bad"]) == 0
     assert not store.has("a.test")
+
+
+# ---- cookie 文件解析（JSON / Netscape）----
+
+NETSCAPE = (
+    "# Netscape HTTP Cookie File\n"
+    "# https://curl.se/docs/http-cookies.html\n"
+    ".a.test\tTRUE\t/\tFALSE\t0\tsid\tabc\n"
+    "#HttpOnly_www.a.test\tFALSE\t/login\tTRUE\t1893456000\ttoken\txyz\n"
+)
+
+
+def test_parse_netscape_cookies():
+    cookies = parse_cookie_text(NETSCAPE)
+    assert cookies[0] == {
+        "name": "sid",
+        "value": "abc",
+        "domain": ".a.test",
+        "path": "/",
+    }
+    # HttpOnly 前缀、secure 与过期时间都要保留，否则登录态会提前失效
+    assert cookies[1]["name"] == "token"
+    assert cookies[1]["domain"] == "www.a.test"
+    assert cookies[1]["httpOnly"] is True and cookies[1]["secure"] is True
+    assert cookies[1]["expires"] == 1893456000
+
+
+def test_parse_json_accepts_all_three_shapes():
+    assert parse_cookie_text('{"cookies": [{"name": "a"}]}')[0]["name"] == "a"
+    assert parse_cookie_text('[{"name": "b"}]')[0]["name"] == "b"
+    assert parse_cookie_text('{"cookies": [{"name": "c"}], "origins": []}')[0]["name"] == "c"
+
+
+def test_load_cookie_file_ignores_bom(tmp_path):
+    source = tmp_path / "cookies.txt"
+    source.write_text("\ufeff" + NETSCAPE, encoding="utf-8")
+    assert len(load_cookie_file(source)) == 2
+
+
+def test_parse_cookie_text_rejects_unsupported_content():
+    with pytest.raises(CookieFileError):
+        parse_cookie_text("   ")
+    with pytest.raises(CookieFileError):
+        parse_cookie_text("not a cookie file")
+    with pytest.raises(CookieFileError):
+        parse_cookie_text('{"foo": 1}')
+    with pytest.raises(CookieFileError):
+        parse_cookie_text('{"cookies": "oops"}')
 
 
 # ---- fetcher 层面：登录墙上报 ----
