@@ -612,17 +612,25 @@ CI 夜间基线（2026-10-21，修复 PDF 依赖后）：通过 10/10，取正�
 ## Docker
 
 ```bash
-# 仅 L1（镜像小，覆盖大多数页面）
-docker build -t scrape-mcp .
+# 预构建镜像（GHCR：main 推 latest，v* 标签推语义化版本）
+docker pull ghcr.io/guanyuyan/scrape-mcp:latest
 
-# 带 L2 真浏览器（Cloudflare/验证码/SPA）
+# 或者在本地构建；带 L2 真浏览器（Cloudflare/验证码/SPA）时把 INSTALL_BROWSER 设为 1
+docker build -t scrape-mcp .
 docker build --build-arg INSTALL_BROWSER=1 -t scrape-mcp:l2 .
 
-docker run -p 8002:8002 -e SCRAPE_MCP_HTTP_TOKEN=<令牌> scrape-mcp
+docker run -d --name scrape-mcp -p 127.0.0.1:8002:8002 \
+  -e SCRAPE_MCP_HTTP_TOKEN=<令牌> \
+  -v scrape_data:/data \
+  scrape-mcp
 curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 ```
 
-容器默认绑定 `0.0.0.0`，必须通过 `-e SCRAPE_MCP_HTTP_TOKEN=...` 提供令牌；`/healthz` 免鉴权，供 HEALTHCHECK 使用。
+也可以直接 `docker compose up -d --build`（在 `.env` 里设置 `SCRAPE_MCP_HTTP_TOKEN`）。
+
+- 镜像多阶段构建，运行阶段以非 root（uid 10001）启动；`/data` 卷保存登录态与两层缓存
+- 容器绑定 `0.0.0.0`，没有令牌会拒绝启动；`/healthz` 免鉴权，供 HEALTHCHECK 使用
+- 反向代理、容量规划、升级与威胁模型见 [DEPLOYMENT.md](DEPLOYMENT.md)
 
 ## 目录结构
 

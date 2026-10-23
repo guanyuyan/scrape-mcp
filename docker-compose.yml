@@ -1,0 +1,36 @@
+name: scrape-mcp
+
+services:
+  scrape-mcp:
+    image: ghcr.io/guanyuyan/scrape-mcp:latest
+    build:
+      context: .
+      args:
+        # 需要 L2 真浏览器（Cloudflare/验证码/SPA）时改成 1；镜像会显著变大
+        INSTALL_BROWSER: ${INSTALL_BROWSER:-0}
+        # 受限网络下可换 pip 源，例如 https://pypi.tuna.tsinghua.edu.cn/simple
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    ports:
+      # 默认只映射到回环地址，公网入口交给反向代理；需要局域网直连改成 "8002:8002"
+      - "127.0.0.1:${SCRAPE_MCP_HTTP_PORT:-8002}:8002"
+    environment:
+      # 必填：容器绑定 0.0.0.0，没有令牌时服务会拒绝启动
+      SCRAPE_MCP_HTTP_TOKEN: ${SCRAPE_MCP_HTTP_TOKEN:?请先设置 SCRAPE_MCP_HTTP_TOKEN}
+      # 单令牌限流与日配额（令牌桶；0 表示不限）
+      SCRAPE_MCP_HTTP_QPS: ${SCRAPE_MCP_HTTP_QPS:-5}
+      SCRAPE_MCP_HTTP_DAILY_QUOTA: ${SCRAPE_MCP_HTTP_DAILY_QUOTA:-10000}
+      # 出口代理：单个代理与代理池二选一，池优先
+      SCRAPE_MCP_PROXY: ${SCRAPE_MCP_PROXY:-}
+      SCRAPE_MCP_PROXY_POOL: ${SCRAPE_MCP_PROXY_POOL:-}
+      # 两层缓存 TTL（秒）；0 全关
+      SCRAPE_MCP_CACHE_TTL: ${SCRAPE_MCP_CACHE_TTL:-300}
+      SCRAPE_MCP_LOG_LEVEL: ${SCRAPE_MCP_LOG_LEVEL:-WARNING}
+    volumes:
+      # 登录态与缓存落在卷里，重建容器不丢
+      - scrape_data:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  scrape_data:

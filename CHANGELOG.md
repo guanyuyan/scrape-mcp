@@ -10,6 +10,10 @@
 - **单令牌配额**：`SCRAPE_MCP_HTTP_QPS`（默认 5 次/秒，令牌桶）与 `SCRAPE_MCP_HTTP_DAILY_QUOTA`（默认每日 10000 次，UTC 零点清零）超限返回 429，带 `Retry-After` 头与 `retry_after_s` 字段（`rate_limited` / `quota_exceeded`），客户端可按建议退避；`/healthz` 与未配置令牌的本机模式不受限
 - **单请求代理**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` 支持 `proxy` 参数（`http` / `https` / `socks4` / `socks5`），只对本次调用生效，L1 与升级后的 L2 走同一个出口；不传则沿用 `SCRAPE_MCP_PROXY`。带代理的请求不读也不写共享缓存，L2 context 按代理隔离，避免不同出口的内容与登录态混用
 - **代理池**：新增 `SCRAPE_MCP_PROXY_POOL`（逗号/分号/空白分隔，非空时优先于 `SCRAPE_MCP_PROXY`）——出口按轮询分配，同一主机在 `SCRAPE_MCP_PROXY_POOL_STICKY_TTL`（默认 300 秒）内固定走同一个 IP；同一出口连续失败（传输异常，或整条链路走完仍被限流/风控拦截）达 `SCRAPE_MCP_PROXY_POOL_FAIL_THRESHOLD`（默认 2 次）后进入 `SCRAPE_MCP_PROXY_POOL_COOLDOWN`（默认 60 秒）冷却，冷却期内不再分配，整池冷却时回退到最早解冻的出口。单请求 `proxy` 优先级最高且不计入池的失败计数；池化出口属基础设施，结果仍可共享缓存
+- **容器镜像**：`Dockerfile` 改为多阶段构建（构建阶段出 wheel，运行镜像不带编译工具），运行阶段以非 root（uid/gid 10001）启动；`INSTALL_BROWSER=1` 可选安装 Chromium，`/data` 卷持久化登录态与两层缓存
+- **GHCR 发布**：新增 `.github/workflows/docker.yml`——`main` 推 `latest` 与 sha 标签，`v*` 标签推语义化版本，PR 只构建不推送，使用内置 `GITHUB_TOKEN`
+- **`docker-compose.yml`**：开箱可跑；端口默认只映射回环、令牌必填、`no-new-privileges`、独立数据卷，代理与配额通过环境变量透传
+- **部署文档与威胁模型**：新增 `DEPLOYMENT.md`（部署形态、反向代理、容量规划、升级回滚、资产与信任边界、威胁缓解、故障排查）
 
 ### Changed
 - `/stats` 在配置令牌后由 Bearer 鉴权保护，可远程读取；未配置时保持仅回环访问

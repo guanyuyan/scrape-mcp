@@ -575,17 +575,25 @@ Nightly baseline (2026-10-21, after fixing the PDF dependency): 10/10 passed, 9/
 ## Docker
 
 ```bash
-# L1 only (smaller image, covers most pages)
-docker build -t scrape-mcp .
+# Prebuilt image (GHCR: `latest` follows main, `v*` tags publish semver tags)
+docker pull ghcr.io/guanyuyan/scrape-mcp:latest
 
-# With L2 real browser (Cloudflare/captcha/SPA)
+# Or build locally; set INSTALL_BROWSER=1 for the L2 real browser (Cloudflare/captcha/SPA)
+docker build -t scrape-mcp .
 docker build --build-arg INSTALL_BROWSER=1 -t scrape-mcp:l2 .
 
-docker run -p 8002:8002 -e SCRAPE_MCP_HTTP_TOKEN=<token> scrape-mcp
+docker run -d --name scrape-mcp -p 127.0.0.1:8002:8002 \
+  -e SCRAPE_MCP_HTTP_TOKEN=<token> \
+  -v scrape_data:/data \
+  scrape-mcp
 curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 ```
 
-The container binds `0.0.0.0`, so the token must be supplied with `-e SCRAPE_MCP_HTTP_TOKEN=...`; `/healthz` stays unauthenticated for the HEALTHCHECK.
+Or simply run `docker compose up -d --build` with `SCRAPE_MCP_HTTP_TOKEN` set in `.env`.
+
+- Multi-stage image; the runtime stage runs as non-root (uid 10001), and the `/data` volume keeps sessions plus both cache layers
+- The container binds `0.0.0.0`, so the token must be supplied with `-e SCRAPE_MCP_HTTP_TOKEN=...`; `/healthz` stays unauthenticated for the HEALTHCHECK
+- Reverse proxy, capacity planning, upgrades and the threat model live in [DEPLOYMENT.md](DEPLOYMENT.md) (Chinese)
 
 ## Project layout
 
