@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.10.0] - 2026-10-23
 
 ### Added
 - **HTTP Bearer 鉴权**：设置 `SCRAPE_MCP_HTTP_TOKEN` 后，除 `/healthz` 外所有 HTTP 请求必须携带 `Authorization: Bearer <token>`；缺失或错误统一返回 401（带 `WWW-Authenticate`），响应不含内部路径与版本
