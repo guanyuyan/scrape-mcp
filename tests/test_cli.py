@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ import pytest
 
 import scrape_mcp
 from scrape_mcp import server
+from scrape_mcp.http_auth import TokenPolicy
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,6 +68,10 @@ def _http_settings(**overrides: object) -> SimpleNamespace:
         "http_json": False,
         "http_stateless": True,
         "http_token": None,
+        "http_qps": 5.0,
+        "http_daily_quota": 10000,
+        "http_tokens": "",
+        "http_tokens_file": "",
         "log_level": "WARNING",
     }
     values.update(overrides)
@@ -75,13 +81,15 @@ def _http_settings(**overrides: object) -> SimpleNamespace:
 def test_http_transport_port_override(monkeypatch):
     stub = _http_settings()
     monkeypatch.setattr(server, "get_settings", lambda: stub)
-    calls: list[tuple[object, int, str | None]] = []
+    calls: list[tuple[object, int, object]] = []
     monkeypatch.setattr(
-        server, "_run_http", lambda settings, port, token: calls.append((settings, port, token))
+        server,
+        "_run_http",
+        lambda settings, port, policies: calls.append((settings, port, policies)),
     )
     server.main(["--transport", "streamable-http", "--port", "8123"])
 
-    assert calls == [(stub, 8123, None)]
+    assert calls == [(stub, 8123, [])]
 
 
 def test_http_public_bind_without_token_is_rejected(monkeypatch):
@@ -98,13 +106,44 @@ def test_http_public_bind_without_token_is_rejected(monkeypatch):
 def test_http_public_bind_passes_trimmed_token(monkeypatch):
     stub = _http_settings(http_host="0.0.0.0", http_token=" s3cret ")
     monkeypatch.setattr(server, "get_settings", lambda: stub)
-    calls: list[tuple[object, int, str | None]] = []
+    calls: list[tuple[object, int, object]] = []
     monkeypatch.setattr(
-        server, "_run_http", lambda settings, port, token: calls.append((settings, port, token))
+        server,
+        "_run_http",
+        lambda settings, port, policies: calls.append((settings, port, policies)),
     )
     server.main(["--transport", "streamable-http"])
 
-    assert calls == [(stub, 8000, "s3cret")]
+    assert calls == [
+        (stub, 8000, [TokenPolicy(name="default", token="s3cret", qps=5.0, daily_quota=10000)])
+    ]
+
+
+def test_http_multi_tokens_are_loaded_from_env(monkeypatch):
+    """多令牌走 JSON 环境变量时，每个租户带着自己的配额进中间件。"""
+    raw = json.dumps([{"name": "team-a", "token": "token-a", "qps": 2, "daily_quota": 50}])
+    stub = _http_settings(http_host="0.0.0.0", http_tokens=raw)
+    monkeypatch.setattr(server, "get_settings", lambda: stub)
+    calls: list[tuple[object, int, object]] = []
+    monkeypatch.setattr(
+        server,
+        "_run_http",
+        lambda settings, port, policies: calls.append((settings, port, policies)),
+    )
+    server.main(["--transport", "streamable-http"])
+
+    assert calls[0][2] == [TokenPolicy(name="team-a", token="token-a", qps=2.0, daily_quota=50)]
+
+
+def test_http_conflicting_token_config_exits(monkeypatch):
+    stub = _http_settings(http_token="solo", http_tokens="[]")
+    monkeypatch.setattr(server, "get_settings", lambda: stub)
+    monkeypatch.setattr(server, "_run_http", lambda *args: pytest.fail("不应启动服务"))
+
+    with pytest.raises(SystemExit) as exc:
+        server.main(["--transport", "streamable-http"])
+
+    assert "只保留一处" in str(exc.value)
 
 
 def test_entry_point_declared_in_pyproject():

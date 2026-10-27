@@ -181,9 +181,11 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `ALLOWED_HOSTS` | — | Comma-separated allowlist; when set, only these hosts are allowed |
 | `DENIED_HOSTS` | — | Comma-separated denylist, takes precedence over the allowlist |
 | `MAX_QPS` | `10` | Global request rate limit (requests/second); `0` disables |
-| `HTTP_TOKEN` | — | HTTP access token; when set, all endpoints except `/healthz` require Bearer auth, and it is mandatory for non-loopback binds |
-| `HTTP_QPS` | `5` | Per-token request rate (token bucket, allows an equal burst); over-limit returns 429 + `Retry-After`; `0` disables |
-| `HTTP_DAILY_QUOTA` | `10000` | Per-token daily request quota (UTC day, resets at midnight); over-limit returns 429; `0` disables |
+| `HTTP_TOKEN` | — | HTTP access token; when set, all endpoints except `/healthz` require Bearer auth, and it is mandatory for non-loopback binds (mutually exclusive with multi-token) |
+| `HTTP_TOKENS` | — | Multi-token JSON: `[{"name","token","qps","daily_quota"}]`, each tenant gets its own quota; exclusive with `HTTP_TOKEN` |
+| `HTTP_TOKENS_FILE` | — | Path to the same JSON format, handy for keeping tokens on a volume (exclusive with `HTTP_TOKENS`) |
+| `HTTP_QPS` | `5` | Per-token request rate (token bucket, allows an equal burst); also the default for tenants that omit `qps`; `0` disables |
+| `HTTP_DAILY_QUOTA` | `10000` | Per-token daily request quota (UTC day, resets at midnight); also the default for tenants that omit `daily_quota`; `0` disables |
 
 When `PROXY_POOL` is set it takes precedence over `PROXY`: exits are assigned round-robin, and a host keeps the same IP for `PROXY_POOL_STICKY_TTL` so sessions and risk scoring stay stable. An exit that fails `PROXY_POOL_FAIL_THRESHOLD` times in a row (transport error, or still blocked/rate-limited after the whole chain) is cooled down for `PROXY_POOL_COOLDOWN` seconds; if every exit is cooling down, the earliest one is used instead of failing the request. A per-call `proxy` argument always wins and is not counted by the pool.
 
@@ -208,7 +210,21 @@ curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000
 
 Without a token the server only binds to `127.0.0.1` / `localhost` / `::1`; binding to `0.0.0.0` or any non-loopback address exits immediately to avoid unauthenticated exposure. Missing or wrong tokens get a uniform 401 (with `WWW-Authenticate`), and the response contains no internal paths or version details. The token is read from the request header only and is never logged. Once a token is set, loopback requests must present it too, so a local reverse proxy cannot bypass auth by making every request look like `127.0.0.1`.
 
-**Quota**: with a token configured, its requests are also bounded by `HTTP_QPS` (5 req/s by default) and `HTTP_DAILY_QUOTA` (10000 per UTC day by default, reset at midnight). Over-limit requests get 429 with a `Retry-After` header and a `retry_after_s` field (`error` is `rate_limited` or `quota_exceeded`), so clients can back off as suggested. `/healthz` does not consume quota, and the token-less local mode is not quota-limited.
+**Quota**: with a token configured, its requests are also bounded by `HTTP_QPS` (5 req/s by default) and `HTTP_DAILY_QUOTA` (10000 per UTC day by default, reset at midnight). Over-limit requests get 429 with a `Retry-After` header and a `retry_after_s` field (`error` is `rate_limited` or `quota_exceeded`), so clients can back off as suggested. `/healthz` and `/metrics` do not consume quota, and the token-less local mode is not quota-limited.
+
+**Multiple tokens (tenants)**: when several callers each hold a token, configure them at once via `SCRAPE_MCP_HTTP_TOKENS` (JSON) or `SCRAPE_MCP_HTTP_TOKENS_FILE` (same format on disk, handy for a mounted volume). Each tenant is rate-limited independently:
+
+```json
+[
+  {"name": "team-a", "token": "<random>", "qps": 2, "daily_quota": 2000},
+  {"name": "ci", "token": "<random>"}
+]
+```
+
+- Omitted `qps` / `daily_quota` inherit `HTTP_QPS` / `HTTP_DAILY_QUOTA`; `0` means unlimited for that tenant
+- Tenant names and tokens must be unique; invalid config (bad JSON, missing `name`/`token`, duplicates) aborts startup
+- Mutually exclusive with a single `HTTP_TOKEN`, and `HTTP_TOKENS` vs `HTTP_TOKENS_FILE` are exclusive too
+- Each tenant shows up in `/metrics` as `scrape_mcp_tenant_requests_total{tenant}` and `scrape_mcp_tenant_rejections_total{tenant,reason}`; 429 bodies reveal nothing about other callers
 
 Health check: `GET /healthz` always stays unauthenticated so container probes and gateways can use it.
 
@@ -247,6 +263,8 @@ curl http://127.0.0.1:8000/metrics
 | `scrape_mcp_result_cache_hits_total` / `scrape_mcp_http_cache_hits_total` | counter | Hits for each cache layer |
 | `scrape_mcp_tokens_returned_total` / `scrape_mcp_bytes_in_total` | counter | Tokens returned and inbound bytes |
 | `scrape_mcp_http_rejections_total{reason}` | counter | HTTP rejections: `unauthorized` / `forbidden` / `rate_limited` / `quota_exceeded` |
+| `scrape_mcp_tenant_requests_total{tenant}` | counter | Accepted requests per tenant (quota-consuming only; `/healthz` and `/metrics` excluded) |
+| `scrape_mcp_tenant_rejections_total{tenant,reason}` | counter | 429 rejections per tenant (`rate_limited` / `quota_exceeded`) |
 | `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts` | gauge | In-flight L2 renders / resident browser contexts |
 | `scrape_mcp_l2_browser_running` / `scrape_mcp_l2_max_pages` / `scrape_mcp_l2_max_contexts` | gauge | Whether the browser runs, plus page and context limits |
 

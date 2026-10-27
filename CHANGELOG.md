@@ -2,6 +2,17 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- **多令牌与租户级配额**：新增 `SCRAPE_MCP_HTTP_TOKENS`（JSON）与 `SCRAPE_MCP_HTTP_TOKENS_FILE`（同格式文件），一次配置多个调用方令牌；每项 `{"name","token","qps","daily_quota"}` 独立限流与日配额，`qps` / `daily_quota` 省略时继承全局 `HTTP_QPS` / `HTTP_DAILY_QUOTA`，写 `0` 表示该租户不限
+- **租户指标**：`/metrics` 新增 `scrape_mcp_tenant_requests_total{tenant}` 与 `scrape_mcp_tenant_rejections_total{tenant,reason}`，按令牌区分用量与被限流原因
+- **配置校验**：租户名与令牌必须唯一；单令牌与多令牌（环境变量 / 文件）三者互斥，JSON 非法或缺字段时启动即报错退出，不会静默降级为无鉴权
+
+### Changed
+- `HTTP_QPS` / `HTTP_DAILY_QUOTA` 由「单令牌」表述改为每租户默认值；单令牌模式行为不变（租户名 `default`）
+- `/metrics` 继续跳过 QPS 与日配额（鉴权仍生效），Prometheus 固定间隔抓取不会占用任何租户额度
+
 ## [0.11.0] - 2026-10-27
 
 ### Added

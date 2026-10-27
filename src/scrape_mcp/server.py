@@ -31,7 +31,14 @@ from .extract.compact import LINK_POLICIES, compact_html
 from .extract.links import extract_links, next_link
 from .extract.pdf import PdfError, pdf_pages
 from .extract.render import FORMATS, to_blocks, to_plain_text
-from .http_auth import BearerAuthMiddleware, ensure_http_access, is_loopback
+from .http_auth import (
+    BearerAuthMiddleware,
+    TokenConfigError,
+    TokenPolicy,
+    ensure_http_access,
+    is_loopback,
+    load_token_policies,
+)
 from .tokenizer import count_tokens, truncate_to_budget
 
 _fetcher: Fetcher | None = None
@@ -1564,7 +1571,7 @@ async def session_import(
     )
 
 
-def _run_http(settings, port: int, token: str | None) -> None:  # pragma: no cover
+def _run_http(settings, port: int, policies: list[TokenPolicy]) -> None:  # pragma: no cover
     """构建带鉴权的 StreamableHTTP 应用并交给 uvicorn。"""
     import uvicorn
 
@@ -1574,12 +1581,7 @@ def _run_http(settings, port: int, token: str | None) -> None:  # pragma: no cov
         host=settings.http_host,
     )
     uvicorn.run(
-        BearerAuthMiddleware(
-            app,
-            token=token,
-            qps=settings.http_qps,
-            daily_quota=settings.http_daily_quota,
-        ),
+        BearerAuthMiddleware(app, tokens=policies),
         host=settings.http_host,
         port=port,
         log_level=settings.log_level.lower(),
@@ -1638,8 +1640,18 @@ def main(argv: list[str] | None = None) -> None:
             settings.http_port = int(argv[argv.index("--port") + 1])
         base = settings.http_port if settings.http_port else 8000
         token = (settings.http_token or "").strip() or None
-        ensure_http_access(settings.http_host, token)
-        _run_http(settings, base, token)
+        try:
+            policies = load_token_policies(
+                raw=settings.http_tokens,
+                file=settings.http_tokens_file,
+                single=token,
+                default_qps=settings.http_qps,
+                default_daily=settings.http_daily_quota,
+            )
+        except TokenConfigError as exc:
+            raise SystemExit(f"令牌配置有误：{exc}") from exc
+        ensure_http_access(settings.http_host, token, tokens=policies)
+        _run_http(settings, base, policies)
         return
     # 默认 stdio
     mcp.run(transport="stdio")

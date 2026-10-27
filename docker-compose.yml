@@ -14,9 +14,12 @@ services:
       # 默认只映射到回环地址，公网入口交给反向代理；需要局域网直连改成 "8002:8002"
       - "127.0.0.1:${SCRAPE_MCP_HTTP_PORT:-8002}:8002"
     environment:
-      # 必填：容器绑定 0.0.0.0，没有令牌时服务会拒绝启动
-      SCRAPE_MCP_HTTP_TOKEN: ${SCRAPE_MCP_HTTP_TOKEN:?请先设置 SCRAPE_MCP_HTTP_TOKEN}
-      # 单令牌限流与日配额（令牌桶；0 表示不限）
+      # 令牌三选一，至少配置一处，否则容器绑定 0.0.0.0 时会拒绝启动：
+      #   单令牌用 HTTP_TOKEN；多租户用 HTTP_TOKENS（单行 JSON）或 HTTP_TOKENS_FILE（挂卷）
+      SCRAPE_MCP_HTTP_TOKEN: ${SCRAPE_MCP_HTTP_TOKEN:-}
+      SCRAPE_MCP_HTTP_TOKENS: ${SCRAPE_MCP_HTTP_TOKENS:-}
+      SCRAPE_MCP_HTTP_TOKENS_FILE: ${SCRAPE_MCP_HTTP_TOKENS_FILE:-}
+      # 每秒请求上限与日配额（令牌桶；0 表示不限）；多令牌时作为省略 qps/daily_quota 的租户默认值
       SCRAPE_MCP_HTTP_QPS: ${SCRAPE_MCP_HTTP_QPS:-5}
       SCRAPE_MCP_HTTP_DAILY_QUOTA: ${SCRAPE_MCP_HTTP_DAILY_QUOTA:-10000}
       # 出口代理：单个代理与代理池二选一，池优先

@@ -131,6 +131,10 @@ class Settings(BaseSettings):
     http_qps: float = 5.0
     # 单令牌每日请求配额（UTC 自然日，跨日清零）；超出返回 429；0 不限
     http_daily_quota: int = 10000
+    # 多令牌（多租户）JSON：每项 {"name","token","qps","daily_quota"}，qps/daily 省略时
+    # 继承上面的全局值；与 http_token 互斥。也可用 http_tokens_file 指向同格式的 JSON 文件
+    http_tokens: str = ""
+    http_tokens_file: str = ""
 
 
 @lru_cache(maxsize=1)

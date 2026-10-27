@@ -21,15 +21,31 @@ CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 _REJECTION_REASONS = ("unauthorized", "forbidden", "rate_limited", "quota_exceeded")
 _rejections: Counter[str] = Counter()
 
+# 多令牌时按租户统计：只记计入配额的已通过请求，以及带租户归属的 429
+_tenant_requests: Counter[str] = Counter()
+_tenant_rejections: Counter[tuple[str, str]] = Counter()
+
 
 def record_rejection(reason: str) -> None:
     """记一次 HTTP 拒绝；由 BearerAuthMiddleware 在返回 401/403/429 时调用。"""
     _rejections[reason or "unknown"] += 1
 
 
+def record_tenant_request(tenant: str) -> None:
+    """记一次通过鉴权且计入配额的请求（/healthz 与 /metrics 不计）。"""
+    _tenant_requests[tenant] += 1
+
+
+def record_tenant_rejection(tenant: str, reason: str) -> None:
+    """记一次带租户归属的拒绝（目前只有 429 配额类）。"""
+    _tenant_rejections[(tenant, reason or "unknown")] += 1
+
+
 def reset() -> None:
     """清空本模块自有的计数；测试用，避免用例之间互相累加。"""
     _rejections.clear()
+    _tenant_requests.clear()
+    _tenant_rejections.clear()
 
 
 def _escape(value: str) -> str:
@@ -155,6 +171,25 @@ def render(l2: dict[str, int] | None = None) -> str:
         dict.fromkeys(_REJECTION_REASONS, 0) | dict(_rejections),
         "reason",
     )
+    _labelled(
+        lines,
+        "scrape_mcp_tenant_requests_total",
+        "counter",
+        "按租户统计的已通过请求数（只含计入配额的请求，/healthz 与 /metrics 不计）",
+        _tenant_requests,
+        "tenant",
+    )
+    lines.extend(
+        [
+            "# HELP scrape_mcp_tenant_rejections_total 按租户统计的 429 拒绝次数",
+            "# TYPE scrape_mcp_tenant_rejections_total counter",
+        ]
+    )
+    for (tenant, reason), value in sorted(_tenant_rejections.items()):
+        lines.append(
+            f'scrape_mcp_tenant_rejections_total{{tenant="{_escape(tenant)}",'
+            f'reason="{_escape(reason)}"}} {value}'
+        )
 
     _plain(
         lines,

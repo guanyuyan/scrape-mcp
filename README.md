@@ -187,9 +187,11 @@ cp .env.example .env    # 生成配置模板
 | `ALLOWED_HOSTS` | — | 主机白名单（逗号分隔）；非空时仅允许名单内主机 |
 | `DENIED_HOSTS` | — | 主机黑名单（逗号分隔），优先于白名单 |
 | `MAX_QPS` | `10` | 全网抓取限流（每秒请求数）；`0` 不限速 |
-| `HTTP_TOKEN` | — | HTTP 模式访问令牌；设置后除 `/healthz` 外都需 Bearer，绑定非回环地址时必填 |
-| `HTTP_QPS` | `5` | 单令牌每秒请求上限（令牌桶，允许同量突发）；超出返回 429 + `Retry-After`；`0` 不限 |
-| `HTTP_DAILY_QUOTA` | `10000` | 单令牌每日请求配额（UTC 自然日，跨日清零）；超出返回 429；`0` 不限 |
+| `HTTP_TOKEN` | — | HTTP 模式访问令牌；设置后除 `/healthz` 外都需 Bearer，绑定非回环地址时必填（与多令牌互斥） |
+| `HTTP_TOKENS` | — | 多令牌 JSON：`[{"name","token","qps","daily_quota"}]`，每个租户独立配额；与 `HTTP_TOKEN` 互斥 |
+| `HTTP_TOKENS_FILE` | — | 同格式 JSON 文件路径；适合把令牌放卷上保管（与 `HTTP_TOKENS` 互斥） |
+| `HTTP_QPS` | `5` | 每秒请求上限（令牌桶，允许同量突发）；多令牌时作为省略 `qps` 的租户默认值；`0` 不限 |
+| `HTTP_DAILY_QUOTA` | `10000` | 每日请求配额（UTC 自然日，跨日清零）；多令牌时作为省略 `daily_quota` 的租户默认值；`0` 不限 |
 
 代理池非空时优先于 `PROXY`：出口按轮询分配，同一主机在 `PROXY_POOL_STICKY_TTL` 内固定走同一个 IP（登录态与风控都更稳）；同一出口连续失败（传输异常，或整条链路走完仍被限流/风控拦截）达 `PROXY_POOL_FAIL_THRESHOLD` 次后进入 `PROXY_POOL_COOLDOWN` 秒冷却，冷却期内不再分配；整池都在冷却时回退到最早解冻的那个，而不是直接报错。单请求 `proxy` 参数优先级最高，且不参与池的失败计数。
 
@@ -214,7 +216,21 @@ curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000
 
 未设置令牌时服务只允许绑定 `127.0.0.1` / `localhost` / `::1`；绑定 `0.0.0.0` 等非回环地址会直接退出，避免无鉴权暴露。缺失或错误令牌统一返回 401（带 `WWW-Authenticate`），响应里不含内部路径与版本。令牌只从请求头读取，不写入日志。配置令牌后回环请求同样要携带，避免本机反向代理把外部请求伪装成 `127.0.0.1` 绕过鉴权。
 
-**配额**：配置令牌后，该令牌的请求还受 `HTTP_QPS`（默认 5 次/秒）与 `HTTP_DAILY_QUOTA`（默认每日 10000 次，UTC 零点清零）约束，超限返回 429，响应带 `Retry-After` 头与 `retry_after_s` 字段（`error` 分别为 `rate_limited` / `quota_exceeded`），客户端可按建议时间退避重试。`/healthz` 不消耗配额；未配置令牌的纯本机模式不受配额限制。
+**配额**：配置令牌后，该令牌的请求还受 `HTTP_QPS`（默认 5 次/秒）与 `HTTP_DAILY_QUOTA`（默认每日 10000 次，UTC 零点清零）约束，超限返回 429，响应带 `Retry-After` 头与 `retry_after_s` 字段（`error` 分别为 `rate_limited` / `quota_exceeded`），客户端可按建议时间退避重试。`/healthz` 与 `/metrics` 不消耗配额；未配置令牌的纯本机模式不受配额限制。
+
+**多令牌（多租户）**：多个调用方各拿一个令牌时，用 `SCRAPE_MCP_HTTP_TOKENS`（JSON）或 `SCRAPE_MCP_HTTP_TOKENS_FILE`（同格式文件，适合挂卷保管）一次配置多组令牌，每组独立限流，互不挤占：
+
+```json
+[
+  {"name": "team-a", "token": "<随机串>", "qps": 2, "daily_quota": 2000},
+  {"name": "ci", "token": "<随机串>"}
+]
+```
+
+- `qps` / `daily_quota` 省略时继承全局 `HTTP_QPS` / `HTTP_DAILY_QUOTA`，写 `0` 表示该租户不限
+- 租户名与令牌都必须唯一；配置非法（JSON 错误、缺 `name`/`token`、重复）会在启动时报错退出
+- 与单个 `HTTP_TOKEN`、以及 `HTTP_TOKENS` 与 `HTTP_TOKENS_FILE` 之间均互斥，同时设置会拒绝启动
+- 每个租户在 `/metrics` 有独立的 `scrape_mcp_tenant_requests_total{tenant}` 与 `scrape_mcp_tenant_rejections_total{tenant,reason}`；429 响应不区分租户，不泄露其它调用方信息
 
 健康检查：`GET /healthz` 返回版本与关键开关，始终免鉴权，可用于容器探针/网关巡检。
 
@@ -253,6 +269,8 @@ curl http://127.0.0.1:8000/metrics
 | `scrape_mcp_result_cache_hits_total` / `scrape_mcp_http_cache_hits_total` | counter | 两层缓存命中次数 |
 | `scrape_mcp_tokens_returned_total` / `scrape_mcp_bytes_in_total` | counter | 返回 token 与入站字节累计 |
 | `scrape_mcp_http_rejections_total{reason}` | counter | HTTP 拒绝次数：`unauthorized` / `forbidden` / `rate_limited` / `quota_exceeded` |
+| `scrape_mcp_tenant_requests_total{tenant}` | counter | 按租户统计的已通过请求数（只含计入配额的请求，`/healthz`、`/metrics` 不计） |
+| `scrape_mcp_tenant_rejections_total{tenant,reason}` | counter | 按租户统计的 429 拒绝（`rate_limited` / `quota_exceeded`） |
 | `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts` | gauge | 当前在途 L2 渲染页数 / 常驻浏览器上下文数 |
 | `scrape_mcp_l2_browser_running` / `scrape_mcp_l2_max_pages` / `scrape_mcp_l2_max_contexts` | gauge | 浏览器是否运行、并发页与常驻 context 上限 |
 

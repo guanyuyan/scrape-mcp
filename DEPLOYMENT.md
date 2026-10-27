@@ -11,13 +11,14 @@
 | 容器 + 回环端口 | 同机的反向代理或网关转发 | Bearer 令牌 |
 | 容器 + 公网反向代理 | 多客户端共享一个抓取出口 | Bearer 令牌 + TLS + 代理层限流 |
 
-硬性前提：**绑定非回环地址时必须配置 `SCRAPE_MCP_HTTP_TOKEN`**，否则进程直接退出，不会以无鉴权状态启动。
+硬性前提：**绑定非回环地址时必须配置至少一个访问令牌**（`SCRAPE_MCP_HTTP_TOKEN`，或多令牌的 `SCRAPE_MCP_HTTP_TOKENS` / `SCRAPE_MCP_HTTP_TOKENS_FILE`），否则进程直接退出，不会以无鉴权状态启动。
 
 ## 2. 用 Docker Compose 启动
 
 ```bash
 cp .env.example .env
 # 在 .env 里写入至少一项：SCRAPE_MCP_HTTP_TOKEN=<足够长的随机串>
+# 需要每个调用方独立配额时改用 SCRAPE_MCP_HTTP_TOKENS（JSON）或 SCRAPE_MCP_HTTP_TOKENS_FILE
 docker compose up -d --build
 curl http://127.0.0.1:8002/healthz
 ```
@@ -50,6 +51,9 @@ docker run -d --name scrape-mcp \
 镜像已内置 PDF 文本抽取（`pypdf`），`web_fetch` 在容器里可直接读 PDF；L2 浏览器层按需通过
 `INSTALL_BROWSER=1` 加上，不是所有页面的必需项。
 
+多租户时把 `-e SCRAPE_MCP_HTTP_TOKEN=<令牌>` 换成单行 JSON 的 `-e SCRAPE_MCP_HTTP_TOKENS='[...]'`，
+或用 `-v` 挂一个令牌文件并设 `SCRAPE_MCP_HTTP_TOKENS_FILE=/data/tokens.json`（三者互斥）。
+
 ## 4. 反向代理与 TLS
 
 Caddy 最小配置（自动申请证书）：
@@ -68,9 +72,11 @@ scrape.example.com {
 
 | 变量 | 建议 |
 |---|---|
-| `SCRAPE_MCP_HTTP_TOKEN` | 必填。用 `openssl rand -hex 32` 生成；轮换后重启容器即可 |
-| `SCRAPE_MCP_HTTP_QPS` | 单令牌每秒请求上限，默认 5；面向多个客户端时按总预算设置 |
-| `SCRAPE_MCP_HTTP_DAILY_QUOTA` | 单令牌每日请求配额，默认 10000（UTC 零点清零）；`0` 不限 |
+| `SCRAPE_MCP_HTTP_TOKEN` | 单令牌模式（三选一）。用 `openssl rand -hex 32` 生成；轮换后重启容器即可 |
+| `SCRAPE_MCP_HTTP_TOKENS` | 多租户模式（三选一）。单行 JSON：`[{"name":"team-a","token":"...","qps":2,"daily_quota":2000}]`；租户名与令牌都必须唯一 |
+| `SCRAPE_MCP_HTTP_TOKENS_FILE` | 多租户模式（三选一）。同格式 JSON 文件路径，建议放 `/data/tokens.json` 随卷保管 |
+| `SCRAPE_MCP_HTTP_QPS` | 每租户每秒请求上限，默认 5；多令牌时作为省略 `qps` 的租户默认值 |
+| `SCRAPE_MCP_HTTP_DAILY_QUOTA` | 每租户每日请求配额，默认 10000（UTC 零点清零）；多令牌时作为省略 `daily_quota` 的租户默认值；`0` 不限 |
 | `SCRAPE_MCP_MAX_QPS` | 全网抓取限流，默认 10 次/秒；比 HTTP 层限流更贴近目标站压力 |
 | `SCRAPE_MCP_ALLOWED_HOSTS` | 目标站白名单（逗号分隔）。公网部署建议设置，避免被当成任意 URL 抓取器 |
 | `SCRAPE_MCP_DENIED_HOSTS` | 目标站黑名单，优先于白名单；可用来挡内网网段域名 |
@@ -101,7 +107,7 @@ scrape_configs:
       - targets: ["scrape-mcp:8002"]
 ```
 
-建议关注：`rate(scrape_mcp_fetches_total[5m])`（抓取量）、`sum by (tier) (scrape_mcp_fetch_tier_total)`（L1/L2 命中层级）、`rate(scrape_mcp_http_rejections_total[5m])`（被 401/429 拒绝的调用）、`scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts`（浏览器占用）。`/metrics` 不计入 QPS 与日配额（鉴权仍生效），可按 15s~60s 间隔稳定抓取。
+建议关注：`rate(scrape_mcp_fetches_total[5m])`（抓取量）、`sum by (tier) (scrape_mcp_fetch_tier_total)`（L1/L2 命中层级）、`rate(scrape_mcp_http_rejections_total[5m])`（被 401/429 拒绝的调用）、`scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts`（浏览器占用）、`sum by (tenant) (rate(scrape_mcp_tenant_requests_total[5m]))`（各租户用量）与 `sum by (tenant, reason) (rate(scrape_mcp_tenant_rejections_total[5m]))`（哪个租户被限流/超配额）。`/metrics` 不计入 QPS 与日配额（鉴权仍生效），可按 15s~60s 间隔稳定抓取。
 
 ## 7. 容量与资源
 
@@ -138,7 +144,7 @@ scrape_configs:
 
 | 威胁 | 影响 | 缓解 |
 |---|---|---|
-| 无鉴权暴露或令牌被爆破 | 服务被白嫖、目标站被大量抓取 | 非回环绑定强制令牌；高熵令牌；`HTTP_QPS` + `HTTP_DAILY_QUOTA`；反向代理层再加限流 |
+| 无鉴权暴露或令牌被爆破 | 服务被白嫖、目标站被大量抓取 | 非回环绑定强制令牌；高熵令牌；`HTTP_QPS` + `HTTP_DAILY_QUOTA`；多租户时每令牌独立配额，一个租户失陷不影响其它租户额度；反向代理层再加限流 |
 | 令牌进入日志或 URL | 凭证泄露 | 令牌只从请求头读取、不写日志；日志只记 URL/分层/错误码；轮换只需换环境变量并重启 |
 | 批量/爬取打满资源 | 容器 OOM、宿主受影响 | 批次与页面数上限、同域并发上限、`deadline_ms` 预算、响应体截断、L2 页面上限 |
 | 登录态泄露 | 目标站账号被滥用 | 卷仅容器用户可写；镜像与仓库都不含登录态；按 `session` 名隔离多身份；不用时删除对应文件 |
@@ -150,7 +156,7 @@ scrape_configs:
 
 ### 明确不提供的保证
 
-- **没有多租户隔离**：所有调用方共享同一个令牌配额、同一组出口与同一份缓存
+- **多租户只隔离配额，不隔离资源**：多令牌模式下每个令牌有独立的 QPS 与日配额，但所有调用方仍共享同一出口 IP、同一份缓存与登录态，抓取层 `MAX_QPS` 与 L2 浏览器容量也是全局的——某个租户的批量任务会占用公共抓取预算。需要彻底隔离时按租户各起一套实例
 - **不做内容安全审核**：返回的是目标站原文，是否可信由调用方判断
 - **不保证绕过所有反爬**：拿不到正文时如实返回 `blocked` / `login_required`，不会把挑战页伪装成内容
 - **不隐藏客户端身份**：容器出口 IP 即所有请求的出口，需要分散时用代理池
@@ -159,10 +165,10 @@ scrape_configs:
 
 | 现象 | 排查方向 |
 |---|---|
-| 容器启动即退出 | 是否设置了 `SCRAPE_MCP_HTTP_TOKEN`；`docker logs` 里有明确的拒绝原因 |
+| 容器启动即退出 | 是否设置了 `SCRAPE_MCP_HTTP_TOKEN` / `HTTP_TOKENS` / `HTTP_TOKENS_FILE` 之一；多令牌 JSON 是否单行且合法（租户名/令牌重复、缺字段都会拒绝启动）；`docker logs` 里有明确的拒绝原因 |
 | `healthz` 不通 | 容器内端口是否 8002；映射端口是否被占用；先用 `docker exec scrape-mcp python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8002/healthz').status)"` 自检 |
 | 持续 401 | 请求头是否为 `Authorization: Bearer <令牌>`；令牌是否带多余空白；反向代理是否剥掉了该头 |
-| 持续 429 | 命中 `HTTP_QPS` 或日配额，按响应里的 `Retry-After` 退避；`/healthz` 不消耗配额 |
+| 持续 429 | 命中 `HTTP_QPS` 或日配额，按响应里的 `Retry-After` 退避；`/healthz` 与 `/metrics` 不消耗配额；多租户时看 `/metrics` 的 `scrape_mcp_tenant_rejections_total` 确认是哪个租户、被哪条规则拦下 |
 | 全部抓取失败 | 容器出网/DNS/代理；在容器内请求一个已知站点验证；检查代理池是否整池冷却 |
 | 登录态失效 / 需要登录的站 | 容器内没有图形界面，无法手动登录。① 本机已 `login` 过：`docker exec scrape-mcp mkdir -p /data/sessions` 后 `docker cp <宿主>/.scrape_mcp/sessions/<host>.json scrape-mcp:/data/sessions/<host>.json`（保留 localStorage）；② 只有 cookie：`docker cp cookies.txt scrape-mcp:/data/cookies.txt` 再 `docker exec scrape-mcp scrape-mcp session import --url https://<站> --file /data/cookies.txt`，支持 JSON 与 Netscape `cookies.txt` |
 | PDF 抓取报缺依赖 | 镜像已内置 `pypdf`；自己改装镜像时用 `pip install "mcp-scrape[pdf]"` |
