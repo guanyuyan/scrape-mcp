@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.12.0] - 2026-10-27
 
 ### Added
 - **多令牌与租户级配额**：新增 `SCRAPE_MCP_HTTP_TOKENS`（JSON）与 `SCRAPE_MCP_HTTP_TOKENS_FILE`（同格式文件），一次配置多个调用方令牌；每项 `{"name","token","qps","daily_quota"}` 独立限流与日配额，`qps` / `daily_quota` 省略时继承全局 `HTTP_QPS` / `HTTP_DAILY_QUOTA`，写 `0` 表示该租户不限
