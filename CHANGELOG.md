@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.11.0] - 2026-10-27
 
 ### Added
 - **Prometheus `/metrics` 端点**：输出文本格式（`version=0.0.4`），与 `/stats` 同一访问限制（配置令牌后需 Bearer，未配置时仅回环）。含抓取量（`scrape_mcp_fetches_total` / `scrape_mcp_requests_total`）、命中层级（`scrape_mcp_fetch_tier_total{tier}`）、错误码与内容形态分布、两层缓存命中、token/字节累计
