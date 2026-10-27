@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scrape_mcp import server
+from scrape_mcp import metrics, server
 from scrape_mcp.config import Settings
 from scrape_mcp.core import stats as stats_module
 from scrape_mcp.core.recipes import RecipeStore
@@ -33,3 +33,9 @@ def _isolated_data_dir(tmp_path, monkeypatch):
 def _fresh_stats():
     """每个用例从零开始计数，避免 /stats 断言受其他用例影响。"""
     return stats_module.reset_stats()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_metrics():
+    """每个用例从零开始计数，避免 /metrics 的拒绝计数受其他用例影响。"""
+    metrics.reset()

@@ -11,9 +11,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from mcp.server.mcpserver import Context, MCPServer
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
-from . import __version__
+from . import __version__, metrics
 from .config import get_settings
 from .core import deadline as dl
 from .core import errors
@@ -301,6 +301,17 @@ async def healthz(_request) -> JSONResponse:
     )
 
 
+def _loopback_only(request) -> JSONResponse | None:
+    """未配置令牌时只允许回环读取统计/指标；配置令牌后由 Bearer 中间件把关。"""
+    if (get_settings().http_token or "").strip():
+        return None
+    client = getattr(request, "client", None)
+    host = (getattr(client, "host", "") or "").lower()
+    if is_loopback(host):
+        return None
+    return JSONResponse({"ok": False, "error": "仅允许本机访问"}, status_code=403)
+
+
 @mcp.custom_route("/stats", methods=["GET"])
 async def stats_endpoint(request) -> JSONResponse:
     """进程内统计：请求数、分层/错误码分布、缓存命中率。
@@ -308,12 +319,39 @@ async def stats_endpoint(request) -> JSONResponse:
     未配置 ``SCRAPE_MCP_HTTP_TOKEN`` 时只接受本机回环访问；配置令牌后
     由 Bearer 鉴权保护，可远程读取。
     """
-    if not (get_settings().http_token or "").strip():
-        client = getattr(request, "client", None)
-        host = (getattr(client, "host", "") or "").lower()
-        if not is_loopback(host):
-            return JSONResponse({"ok": False, "error": "仅允许本机访问"}, status_code=403)
+    denied = _loopback_only(request)
+    if denied is not None:
+        return denied
     return JSONResponse(get_stats().snapshot())
+
+
+def _l2_snapshot() -> dict[str, int]:
+    """L2 占用：浏览器没启动过时，占用计 0、上限仍按配置给出，便于告警对齐容量。"""
+    fetcher = _fetcher
+    snap = fetcher.browser_snapshot() if fetcher is not None else None
+    if snap is not None:
+        return snap
+    settings = get_settings()
+    return {
+        "running": 0,
+        "active_pages": 0,
+        "contexts": 0,
+        "max_pages": max(1, int(settings.l2_max_pages)),
+        "max_contexts": max(1, int(settings.l2_max_contexts)),
+    }
+
+
+@mcp.custom_route("/metrics", methods=["GET"])
+async def metrics_endpoint(request) -> Response:
+    """Prometheus 文本格式指标：抓取量、命中层级、拒绝计数与 L2 浏览器占用。
+
+    访问限制与 ``/stats`` 一致：未配置 ``SCRAPE_MCP_HTTP_TOKEN`` 时只接受回环，
+    配置令牌后由 Bearer 鉴权保护，可被 Prometheus 远程抓取。
+    """
+    denied = _loopback_only(request)
+    if denied is not None:
+        return denied
+    return Response(metrics.render(_l2_snapshot()), media_type=metrics.CONTENT_TYPE)
 
 
 # 大页面 + 极小正文 → 疑似 JS 登录墙/骨架页，加 note 提示（不判失败，避免误杀超短正文）。

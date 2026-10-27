@@ -2,6 +2,16 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- **Prometheus `/metrics` 端点**：输出文本格式（`version=0.0.4`），与 `/stats` 同一访问限制（配置令牌后需 Bearer，未配置时仅回环）。含抓取量（`scrape_mcp_fetches_total` / `scrape_mcp_requests_total`）、命中层级（`scrape_mcp_fetch_tier_total{tier}`）、错误码与内容形态分布、两层缓存命中、token/字节累计
+- **拒绝计数**：`scrape_mcp_http_rejections_total{reason}` 按 `unauthorized` / `forbidden` / `rate_limited` / `quota_exceeded` 记录鉴权与限流拒绝
+- **L2 占用指标**：`scrape_mcp_l2_browser_running` / `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts` 与 `l2_max_pages` / `l2_max_contexts` 上限，浏览器未启动时占用为 0、上限照配置输出
+- **监控不计配额**：`/metrics` 与 `/healthz` 一样跳过 QPS 与日配额（鉴权仍生效），Prometheus 按固定间隔抓取不会吃掉调用额度
+
+不引入 `prometheus_client`，按文本格式直接拼装；指标不含 URL 与页面内容。
+
 ## [0.10.1] - 2026-10-23
 
 ### Added

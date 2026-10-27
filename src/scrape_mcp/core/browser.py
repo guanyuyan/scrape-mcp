@@ -138,6 +138,19 @@ class BrowserRenderer:
     def has_session(self, host: str, session: str = "default") -> bool:
         return self._sessions.has(host, session)
 
+    def snapshot(self) -> dict[str, int]:
+        """当前占用（给 `/metrics` 用）：在途页数、常驻 context 数与两项上限。
+
+        只读、不触发任何浏览器操作；未启动时各项都是 0/配置值。
+        """
+        return {
+            "running": 1 if self._browser is not None else 0,
+            "active_pages": max(0, self._active),
+            "contexts": len(self._contexts),
+            "max_pages": max(1, int(self._s.l2_max_pages)),
+            "max_contexts": max(1, int(self._s.l2_max_contexts)),
+        }
+
     # ---------- 生命周期 ----------
 
     async def _context_for(

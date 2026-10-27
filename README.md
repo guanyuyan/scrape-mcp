@@ -234,6 +234,30 @@ curl http://127.0.0.1:8000/stats
 
 `by_tier` 是实际生效的层级分布，`by_code` 复用工具返回的错误码（成功为 `ok`），`cache_hit_rate` 是结果缓存命中数 ÷ 总请求数。统计只记计数与字节数，不记 URL、不记页面内容，进程重启后归零。
 
+指标：`GET /metrics` 输出 Prometheus 文本格式（`version=0.0.4`），访问限制与 `/stats` 完全相同，同样不含 URL 与页面内容：
+
+```bash
+curl http://127.0.0.1:8000/metrics
+# scrape_mcp_fetches_total 5
+# scrape_mcp_fetch_tier_total{tier="l1"} 4
+# scrape_mcp_fetch_tier_total{tier="l2"} 1
+# scrape_mcp_http_rejections_total{reason="unauthorized"} 0
+# scrape_mcp_l2_active_pages 0
+```
+
+| 指标 | 类型 | 含义 |
+| --- | --- | --- |
+| `scrape_mcp_requests_total` / `scrape_mcp_fetches_total` | counter | 总请求数 / 进入抓取链路的次数（后者含 HTTP 缓存命中、不含结果缓存命中） |
+| `scrape_mcp_fetch_tier_total{tier}` | counter | 命中层级分布（`l1` = curl_cffi，`l2` = Playwright） |
+| `scrape_mcp_fetch_code_total{code}` / `scrape_mcp_fetch_kind_total{kind}` | counter | 按错误码 / 内容形态（`html`/`pdf`/`text`）分布 |
+| `scrape_mcp_result_cache_hits_total` / `scrape_mcp_http_cache_hits_total` | counter | 两层缓存命中次数 |
+| `scrape_mcp_tokens_returned_total` / `scrape_mcp_bytes_in_total` | counter | 返回 token 与入站字节累计 |
+| `scrape_mcp_http_rejections_total{reason}` | counter | HTTP 拒绝次数：`unauthorized` / `forbidden` / `rate_limited` / `quota_exceeded` |
+| `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts` | gauge | 当前在途 L2 渲染页数 / 常驻浏览器上下文数 |
+| `scrape_mcp_l2_browser_running` / `scrape_mcp_l2_max_pages` / `scrape_mcp_l2_max_contexts` | gauge | 浏览器是否运行、并发页与常驻 context 上限 |
+
+`/metrics` 不额外引入 `prometheus_client`，按文本格式直接拼装。鉴权与 `/stats` 相同，但**不计入 QPS 与日配额**，可放心让 Prometheus 按固定间隔抓取；抓取配置见 [DEPLOYMENT.md](DEPLOYMENT.md#6-健康检查与观测)。
+
 必需项：请求头 `MCP-Method`、`Mcp-Name`；body 内 `params` 需带 `_meta`（`protocolVersion` + `clientCapabilities`）。完整示例见下。
 
 ## 接入 MCP 客户端（Claude / Cursor 等）
@@ -645,6 +669,7 @@ src/scrape_mcp
 ├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）
 ├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/batch/aclose）
 ├── config.py          # 环境变量配置
+├── metrics.py         # Prometheus 文本格式指标（/metrics 端点）
 ├── tokenizer.py       # tiktoken 计数 + 预算截断
 ├── core/
 │   ├── http_client.py # L1 curl_cffi + 磁盘缓存

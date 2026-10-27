@@ -10,11 +10,17 @@ import time
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from . import metrics
+
 # 绑定与来源判断共用的回环地址集合（含 IPv4-mapped IPv6）
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"})
 
 # 容器探针与网关巡检需要无凭证访问；响应里只有版本与开关，不含抓取数据
 EXEMPT_PATHS = frozenset({"/healthz"})
+
+# 指标端点按固定间隔被抓取，若计入 QPS/日配额，监控自己就会吃掉调用额度；
+# 这里只跳过配额，鉴权照旧（配置令牌后仍需 Bearer）
+QUOTA_EXEMPT_PATHS = frozenset({"/metrics"})
 
 
 def is_loopback(host: str | None) -> bool:
@@ -128,19 +134,22 @@ class BearerAuthMiddleware:
             if scheme.lower() == "bearer" and hmac.compare_digest(
                 credentials.strip().encode("utf-8"), self.token.encode("utf-8")
             ):
-                if self.quota is not None:
+                if self.quota is not None and scope.get("path") not in QUOTA_EXEMPT_PATHS:
                     rejected = self.quota.hit()
                     if rejected is not None:
                         error, retry_after = rejected
+                        metrics.record_rejection(error)
                         await _send_error(send, 429, error, retry_after=retry_after)
                         return
                 scope.setdefault("state", {})["scrape_mcp_authenticated"] = True
                 await self.app(scope, receive, send)
                 return
+            metrics.record_rejection("unauthorized")
             await _send_error(send, 401, "unauthorized")
             return
 
         if is_loopback(_client_host(scope)):
             await self.app(scope, receive, send)
             return
+        metrics.record_rejection("forbidden")
         await _send_error(send, 403, "forbidden")

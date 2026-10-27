@@ -514,6 +514,10 @@ class Fetcher:
         host = urlparse(url).netloc.lower()
         return self._get_browser().has_session(host, session)
 
+    def browser_snapshot(self) -> dict[str, int] | None:
+        """浏览器当前占用；还没启动过浏览器时返回 None（调用方按 0 处理）。"""
+        return self._browser.snapshot() if self._browser is not None else None
+
 
 def _host_of(url: str) -> str:
     return (urlparse(url).netloc or "").lower().split(":")[0]

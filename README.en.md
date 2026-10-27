@@ -228,6 +228,30 @@ curl http://127.0.0.1:8000/stats
 
 `by_tier` is the tier that actually ran, `by_code` reuses the tool error codes (`ok` on success), and `cache_hit_rate` is result-cache hits over total requests. Only counters and byte sizes are kept — no URLs, no page content — and everything resets on restart.
 
+Metrics: `GET /metrics` serves the Prometheus text format (`version=0.0.4`). Access rules are identical to `/stats`, and it also keeps no URLs or page content:
+
+```bash
+curl http://127.0.0.1:8000/metrics
+# scrape_mcp_fetches_total 5
+# scrape_mcp_fetch_tier_total{tier="l1"} 4
+# scrape_mcp_fetch_tier_total{tier="l2"} 1
+# scrape_mcp_http_rejections_total{reason="unauthorized"} 0
+# scrape_mcp_l2_active_pages 0
+```
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `scrape_mcp_requests_total` / `scrape_mcp_fetches_total` | counter | All requests / fetches entering the pipeline (the latter includes HTTP cache hits, excludes result-cache hits) |
+| `scrape_mcp_fetch_tier_total{tier}` | counter | Tier distribution (`l1` = curl_cffi, `l2` = Playwright) |
+| `scrape_mcp_fetch_code_total{code}` / `scrape_mcp_fetch_kind_total{kind}` | counter | Split by error code / content kind (`html`/`pdf`/`text`) |
+| `scrape_mcp_result_cache_hits_total` / `scrape_mcp_http_cache_hits_total` | counter | Hits for each cache layer |
+| `scrape_mcp_tokens_returned_total` / `scrape_mcp_bytes_in_total` | counter | Tokens returned and inbound bytes |
+| `scrape_mcp_http_rejections_total{reason}` | counter | HTTP rejections: `unauthorized` / `forbidden` / `rate_limited` / `quota_exceeded` |
+| `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts` | gauge | In-flight L2 renders / resident browser contexts |
+| `scrape_mcp_l2_browser_running` / `scrape_mcp_l2_max_pages` / `scrape_mcp_l2_max_contexts` | gauge | Whether the browser runs, plus page and context limits |
+
+`/metrics` adds no `prometheus_client` dependency — the text format is assembled directly. Auth matches `/stats`, but it **does not consume QPS or the daily quota**, so Prometheus can scrape it on a fixed interval; see [DEPLOYMENT.md](DEPLOYMENT.md#6-health-checks-and-observability) for a scrape config.
+
 Required: headers `MCP-Method`, `Mcp-Name`; the body's `params` must include `_meta` (`protocolVersion` + `clientCapabilities`).
 
 ## MCP client setup (Claude / Cursor / VS Code)
@@ -608,6 +632,7 @@ src/scrape_mcp
 ├── cli.py             # Subcommands: init (client config) / schema (export tool definitions)
 ├── sdk.py             # Python SDK wrappers (fetch/extract/crawl/batch/aclose)
 ├── config.py          # Environment configuration
+├── metrics.py         # Prometheus text metrics (source for /metrics)
 ├── tokenizer.py       # tiktoken counting + budget truncation
 ├── core/
 │   ├── http_client.py # L1 curl_cffi + disk cache
