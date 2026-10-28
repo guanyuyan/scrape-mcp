@@ -622,37 +622,50 @@ python scripts/bench_sites.py --reference trafilatura
 
 仓库里保留一份夜间子集基线 [benchmarks/baseline.json](benchmarks/baseline.json)，首次记录于 2026-10-21（10/10 通过，p50 453 ms / p95 2813 ms）。它只覆盖夜间子集，用于看趋势，不代表全量站点通过率；每月挑一次夜间结果更新：下载当次 `bench-sites.json`，把 `sites_file` 改为相对路径、补上 `source` 字段后替换该文件。
 
-**本机实测（2026-10-21，24 站）**：通过 18/24，完整度 17/19，拦截符合 3/3，延迟 p50 2809 ms / p95 9294 ms。
-未通过的 6 项里，5 项是本机网络不可达（MDN / GitHub / Hacker News / V2EX / arXiv 超时），1 项被站点拦截（Stack Overflow 返回 `blocked`）；
+**本机实测（2026-10-28，37 站）**：通过 32/37，完整度 33/33，拦截符合 3/3，延迟 p50 1705 ms / p95 9011 ms。
+未通过的 5 项里，3 项是本机网络不可达（Hacker News / V2EX / arXiv 超时），2 项被站点拦截（Stack Overflow、Bilibili 返回 `login_required`）；
 这些站点在 GitHub 网络的夜间任务里会重新跑，结果以 `site-quality-<run_id>` 工件为准。
 CI 夜间基线（2026-10-21，修复 PDF 依赖后）：通过 10/10，取正文 9/9，完整度 10/10，p50 453 ms / p95 2813 ms。
 
 | 站点 | 分类 | 层级 | 结果 | 字符 | token | 完整度 | 耗时 |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| py-asyncio | docs | l1 | 通过 | 31049 | 7222 | 2/2 | 5817 ms |
-| mdn-fetch | docs | l1 | timeout（本机网络） | 0 | 0 | 0/2 | 25007 ms |
-| fastapi-first-steps | docs | l1 | 通过 | 8777 | 4124 | 2/2 | 1969 ms |
-| vue-intro | docs | l1 | 通过 | 4833 | 3101 | 2/2 | 2210 ms |
-| ruanyifeng-blog | blog | l1 | 通过 | 914 | 547 | 2/2 | 4492 ms |
-| cnblogs-home | blog | l1 | 通过 | 4947 | 3886 | - | 233 ms |
-| sspai-home | blog | l2 | 通过 | 1555 | 1203 | 2/2 | 9930 ms |
-| solidot-home | blog | l1 | 通过 | 8801 | 7197 | 2/2 | 912 ms |
-| chinanews-home | news | l1 | 通过 | 1046 | 238 | - | 182 ms |
-| tencent-news-home | news | l2 | 通过 | 2212 | 1439 | - | 2809 ms |
-| thepaper-home | news | l2 | 通过 | 2121 | 1704 | - | 6115 ms |
-| 36kr-home | news | l2 | 通过 | 1168 | 1002 | - | 8083 ms |
-| github-trending | list | l1 | timeout（本机网络） | 0 | 0 | - | 25007 ms |
-| hacker-news | list | l1 | timeout（本机网络） | 0 | 0 | - | 25017 ms |
-| v2ex-home | list | l1 | timeout（本机网络） | 0 | 0 | - | 25015 ms |
-| stackoverflow-questions | list | l1 | blocked | 0 | 0 | - | 25343 ms |
-| react-learn | spa | l1 | 通过 | 13986 | 3514 | 2/2 | 9294 ms |
-| apple-cn-home | spa | l2 | 通过 | 198 | 90 | 2/2 | 1604 ms |
-| zhihu-question | anti_bot | - | 按预期拦截 | 0 | 0 | - | 109 ms |
-| xiaohongshu-explore | anti_bot | - | 按预期拦截 | 0 | 0 | - | 77 ms |
-| weibo-home | anti_bot | - | 按预期拦截 | 0 | 0 | - | 105 ms |
-| bilibili-home | anti_bot | l2 | 通过 | 789 | 719 | - | 5919 ms |
-| arxiv-attention | pdf | l1 | timeout（本机网络） | 0 | 0 | - | 25020 ms |
-| w3c-dummy-pdf | pdf | l1 | 通过 | 14 | 3 | 1/1 | 1623 ms |
+| py-asyncio | docs | l1 | 通过 | 31049 | 7222 | 2/2 | 2001 ms |
+| mdn-fetch | docs | l1 | 通过 | 2639 | 1110 | 2/2 | 2975 ms |
+| fastapi-first-steps | docs | l1 | 通过 | 8777 | 4124 | 2/2 | 1705 ms |
+| vue-intro | docs | l1 | 通过 | 4833 | 3101 | 2/2 | 2479 ms |
+| py-json | docs | l1 | 通过 | 27368 | 6903 | 2/2 | 256 ms |
+| django-tutorial | docs | l1 | 通过 | 8026 | 4243 | 2/2 | 2318 ms |
+| rust-ownership | docs | l1 | 通过 | 24033 | 5740 | 2/2 | 1717 ms |
+| ruanyifeng-blog | blog | l1 | 通过 | 908 | 543 | 2/2 | 2432 ms |
+| cnblogs-home | blog | l1 | 通过 | 5135 | 3976 | - | 218 ms |
+| sspai-home | blog | l1 | 通过 | 1613 | 1285 | 2/2 | 511 ms |
+| solidot-home | blog | l1 | 通过 | 8862 | 7166 | 2/2 | 553 ms |
+| cnblogs-article | blog | l1 | 通过 | 5883 | 5267 | - | 75 ms |
+| meituan-tech | blog | l1 | 通过 | 10561 | 7472 | 1/1 | 1611 ms |
+| chinanews-home | news | l1 | 通过 | 935 | 207 | - | 149 ms |
+| tencent-news-home | news | l2 | 通过 | 2022 | 1378 | - | 4893 ms |
+| thepaper-home | news | l2 | 通过 | 2025 | 1649 | - | 11940 ms |
+| 36kr-home | news | l2 | 通过 | 1119 | 1060 | - | 2437 ms |
+| thepaper-article | news | l2 | 通过 | 2829 | 3090 | 1/1 | 1520 ms |
+| netease-home | news | l1 | 通过 | 10485 | 7313 | 1/1 | 304 ms |
+| sina-home | news | l1 | 通过 | 6360 | 7549 | 1/1 | 406 ms |
+| github-trending | list | l1 | 通过 | 4913 | 1787 | - | 3682 ms |
+| hacker-news | list | l1 | timeout（本机网络） | 0 | 0 | - | 45005 ms |
+| v2ex-home | list | l1 | timeout（本机网络） | 0 | 0 | - | 45020 ms |
+| stackoverflow-questions | list | l2 | login_required（站点拦截） | 0 | 0 | - | 11110 ms |
+| douban-home | list | l1 | 通过 | 1354 | 1028 | 1/1 | 330 ms |
+| react-learn | spa | l1 | 通过 | 13986 | 3514 | 2/2 | 597 ms |
+| apple-cn-home | spa | l2 | 通过 | 198 | 90 | 2/2 | 1564 ms |
+| svelte-dev | spa | l2 | 通过 | 2320 | 620 | 1/1 | 5797 ms |
+| tailwind-home | spa | l1 | 通过 | 6240 | 1778 | 1/1 | 3773 ms |
+| zhihu-question | anti_bot | - | 按预期拦截 | 0 | 0 | - | 107 ms |
+| xiaohongshu-explore | anti_bot | - | 按预期拦截 | 0 | 0 | - | 76 ms |
+| weibo-home | anti_bot | - | 按预期拦截 | 0 | 0 | - | 106 ms |
+| bilibili-home | anti_bot | l2 | login_required（站点拦截） | 0 | 0 | - | 2919 ms |
+| taobao-home | anti_bot | l2 | 通过 | 5234 | 7563 | - | 2472 ms |
+| arxiv-attention | pdf | l1 | timeout（本机网络） | 0 | 0 | - | 45007 ms |
+| w3c-dummy-pdf | pdf | l1 | 通过 | 14 | 3 | 1/1 | 1333 ms |
+| pdf-orimi | pdf | l1 | 通过 | 391 | 103 | 1/1 | 9011 ms |
 
 `--reference trafilatura` 的对照只统计纯正文；本工具输出保留标题、列表与链接结构，token 数不是等价口径，只看量级即可。
 

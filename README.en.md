@@ -612,8 +612,8 @@ The output covers pass rate, fetch rate, interception rate, completeness, tokens
 
 The repo keeps a nightly-subset baseline in [benchmarks/baseline.json](benchmarks/baseline.json), first recorded on 2026-10-21 (10/10 passed, p50 453 ms / p95 2813 ms). It only covers the nightly subset and is meant for trend checking, not as the pass rate of the full corpus. Update it monthly: download a `bench-sites.json`, set `sites_file` to a relative path, add a `source` field, and replace the file.
 
-**Local run (2026-10-21, 24 sites)**: 18/24 passed, completeness 17/19, interception 3/3, latency p50 2809 ms / p95 9294 ms.
-Of the 6 failures, 5 were unreachable from the local network (MDN / GitHub / Hacker News / V2EX / arXiv timed out) and 1 was blocked by the site (Stack Overflow returned `blocked`).
+**Local run (2026-10-28, 37 sites)**: 32/37 passed, completeness 33/33, interception 3/3, latency p50 1705 ms / p95 9011 ms.
+Of the 5 failures, 3 were unreachable from the local network (Hacker News / V2EX / arXiv timed out) and 2 were blocked by the site (Stack Overflow and Bilibili returned `login_required`).
 The nightly job reruns these sites on GitHub's network; its `site-quality-<run_id>` artifact is the durable record.
 Nightly baseline (2026-10-21, after fixing the PDF dependency): 10/10 passed, 9/9 content fetched, 10/10 completeness, p50 453 ms / p95 2813 ms.
 

@@ -2,6 +2,15 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- **真实站点基准扩容**：`benchmarks/sites.json` 从 24 站扩到 37 站，新增 Python `json`、Django 教程、Rust 所有权章节、博客园文章、美团技术团队、澎湃固定文章、网易 / 新浪首页、豆瓣话题、Svelte / Tailwind 首页、淘宝首页与第二份文本层 PDF；夜间回归子集同步增加到 14 站
+- 夜间工作流新增 `scope` 输入（`nightly` / `all`），可在 GitHub 网络上按需跑全量站点集，扩容后先用它校验期望值再依赖夜间子集
+
+### Changed
+- 夜间任务超时从 35 分钟放宽到 45 分钟，给扩容后的全量跑留出余量
+
 ## [0.14.0] - 2026-10-28
 
 ### Added

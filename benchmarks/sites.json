@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-21",
+  "updated": "2026-10-28",
   "note": "分层真实站点集。expect=ok 表示应取到正文；expect 为错误码表示该站应被如实拦截（登录墙/反爬/robots）而不是伪装成功。checks 是正文中必须出现的稳定片段，只给结构稳定的页面配置（文档/固定文章/PDF），首页类动态内容只校验最小字符数。",
   "sites": [
     {
@@ -36,6 +36,29 @@
       "nightly": true
     },
     {
+      "id": "py-json",
+      "url": "https://docs.python.org/3/library/json.html",
+      "category": "docs",
+      "min_chars": 3000,
+      "checks": ["json.dumps", "JSONEncoder"],
+      "nightly": true
+    },
+    {
+      "id": "django-tutorial",
+      "url": "https://docs.djangoproject.com/zh-hans/5.0/intro/tutorial01/",
+      "category": "docs",
+      "min_chars": 2000,
+      "checks": ["django-admin", "startproject"]
+    },
+    {
+      "id": "rust-ownership",
+      "url": "https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html",
+      "category": "docs",
+      "min_chars": 3000,
+      "checks": ["ownership", "Rust"],
+      "nightly": true
+    },
+    {
       "id": "ruanyifeng-blog",
       "url": "https://www.ruanyifeng.com/blog/",
       "category": "blog",
@@ -65,6 +88,20 @@
       "checks": ["Solidot", "热门文章"]
     },
     {
+      "id": "cnblogs-article",
+      "url": "https://www.cnblogs.com/wang_yb/p/22981033",
+      "category": "blog",
+      "min_chars": 1500,
+      "checks": []
+    },
+    {
+      "id": "meituan-tech",
+      "url": "https://tech.meituan.com/",
+      "category": "blog",
+      "min_chars": 2000,
+      "checks": ["美团技术团队"]
+    },
+    {
       "id": "chinanews-home",
       "url": "https://www.chinanews.com.cn/",
       "category": "news",
@@ -92,6 +129,28 @@
       "category": "news",
       "min_chars": 500,
       "checks": []
+    },
+    {
+      "id": "thepaper-article",
+      "url": "https://www.thepaper.cn/newsDetail_forward_23443163",
+      "category": "news",
+      "min_chars": 1200,
+      "checks": ["云南"],
+      "nightly": true
+    },
+    {
+      "id": "netease-home",
+      "url": "https://www.163.com/",
+      "category": "news",
+      "min_chars": 1000,
+      "checks": ["网易新闻"]
+    },
+    {
+      "id": "sina-home",
+      "url": "https://www.sina.com.cn/",
+      "category": "news",
+      "min_chars": 1000,
+      "checks": ["新浪"]
     },
     {
       "id": "github-trending",
@@ -124,6 +183,13 @@
       "checks": []
     },
     {
+      "id": "douban-home",
+      "url": "https://www.douban.com/",
+      "category": "list",
+      "min_chars": 800,
+      "checks": ["热门话题"]
+    },
+    {
       "id": "react-learn",
       "url": "https://react.dev/learn",
       "category": "spa",
@@ -136,6 +202,20 @@
       "category": "spa",
       "min_chars": 100,
       "checks": ["Apple", "快速链接"]
+    },
+    {
+      "id": "svelte-dev",
+      "url": "https://svelte.dev/",
+      "category": "spa",
+      "min_chars": 800,
+      "checks": ["Svelte"]
+    },
+    {
+      "id": "tailwind-home",
+      "url": "https://tailwindcss.com/",
+      "category": "spa",
+      "min_chars": 1500,
+      "checks": ["Rapidly build modern websites"]
     },
     {
       "id": "zhihu-question",
@@ -170,6 +250,13 @@
       "checks": []
     },
     {
+      "id": "taobao-home",
+      "url": "https://www.taobao.com/",
+      "category": "anti_bot",
+      "min_chars": 1500,
+      "checks": []
+    },
+    {
       "id": "arxiv-attention",
       "url": "https://arxiv.org/pdf/1706.03762",
       "category": "pdf",
@@ -183,6 +270,14 @@
       "category": "pdf",
       "min_chars": 10,
       "checks": ["Dummy PDF file"]
+    },
+    {
+      "id": "pdf-orimi",
+      "url": "https://www.orimi.com/pdf-test.pdf",
+      "category": "pdf",
+      "min_chars": 300,
+      "checks": ["PDF Test File"],
+      "nightly": true
     }
   ]
 }

@@ -8,6 +8,14 @@ on:
   schedule:
     - cron: "0 16 * * *" # UTC 16:00 = 北京时间次日 00:00
   workflow_dispatch:
+    inputs:
+      scope:
+        description: "抓取范围：nightly = 夜间回归子集，all = 全量站点集（扩容后校验用）"
+        type: choice
+        options:
+          - nightly
+          - all
+        default: nightly
 
 permissions:
   contents: read
@@ -16,7 +24,7 @@ permissions:
 jobs:
   real-sites:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,8 +43,10 @@ jobs:
         id: bench
         if: always()
         continue-on-error: true
+        env:
+          SCOPE_FLAG: ${{ inputs.scope == 'all' && '' || '--nightly' }}
         run: |
-          python scripts/bench_sites.py --nightly \
+          python scripts/bench_sites.py $SCOPE_FLAG \
             --deadline-ms 45000 \
             --fail-under 0.6 \
             --json bench-sites.json \
