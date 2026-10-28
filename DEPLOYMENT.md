@@ -91,7 +91,7 @@ scrape.example.com {
 
 - `GET /healthz`：免鉴权，返回 `version` / `l2_enabled` / `respect_robots`，不触发任何抓取
 - `GET /stats`：进程内计数（请求数、分层、错误码、缓存命中、延迟分位）。配置令牌后需 Bearer；未配置时只允许回环访问
-- `GET /metrics`：Prometheus 文本格式（`version=0.0.4`），访问限制与 `/stats` 相同。抓取量按层级/错误码/内容形态分列，另有鉴权与限流拒绝计数、L2 浏览器占用
+- `GET /metrics`：Prometheus 文本格式（`version=0.0.4`），访问限制与 `/stats` 相同。抓取量按层级/错误码/内容形态分列，另有耗时直方图、鉴权与限流拒绝计数、租户配额余量、L2 与代理池占用
 - 日志：JSON 行写 stderr，`docker logs -f scrape-mcp` 直接可读；`SCRAPE_MCP_LOG_LEVEL=INFO` 可看到每次抓取的分层与耗时
 
 Prometheus 抓取（容器与 Prometheus 同网络时用服务名；否则写宿主地址）：
@@ -107,7 +107,7 @@ scrape_configs:
       - targets: ["scrape-mcp:8002"]
 ```
 
-建议关注：`rate(scrape_mcp_fetches_total[5m])`（抓取量）、`sum by (tier) (scrape_mcp_fetch_tier_total)`（L1/L2 命中层级）、`rate(scrape_mcp_http_rejections_total[5m])`（被 401/429 拒绝的调用）、`scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts`（浏览器占用）、`sum by (tenant) (rate(scrape_mcp_tenant_requests_total[5m]))`（各租户用量）与 `sum by (tenant, reason) (rate(scrape_mcp_tenant_rejections_total[5m]))`（哪个租户被限流/超配额）。`/metrics` 不计入 QPS 与日配额（鉴权仍生效），可按 15s~60s 间隔稳定抓取。
+建议关注：`rate(scrape_mcp_fetches_total[5m])`（抓取量）、`sum by (tier) (scrape_mcp_fetch_tier_total)`（L1/L2 命中层级）、`histogram_quantile(0.95, sum by (le, tier) (rate(scrape_mcp_fetch_duration_seconds_bucket[5m])))`（分层 p95 耗时）、`rate(scrape_mcp_http_rejections_total[5m])`（被 401/429 拒绝的调用）、`scrape_mcp_l2_active_pages` / `scrape_mcp_l2_queued_pages` / `scrape_mcp_l2_contexts`（浏览器占用与排队）、`scrape_mcp_proxy_pool_healthy`（可用出口数，仅为 0 说明整池冷却，需查代理）、`sum by (tenant) (rate(scrape_mcp_tenant_requests_total[5m]))`（各租户用量）与 `sum by (tenant, reason) (rate(scrape_mcp_tenant_rejections_total[5m]))`（哪个租户被限流/超配额）。`/metrics` 不计入 QPS 与日配额（鉴权仍生效），可按 15s~60s 间隔稳定抓取。
 
 ## 7. 容量与资源
 

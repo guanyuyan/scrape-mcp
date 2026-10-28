@@ -21,7 +21,7 @@ from .core.cache import ResultCache
 from .core.fetcher import Fetcher, FetchOutcome
 from .core.hostlimit import HostLimiter
 from .core.logging import configure, log_event
-from .core.proxy import valid_proxy
+from .core.proxy import split_pool, valid_proxy
 from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
@@ -342,15 +342,29 @@ def _l2_snapshot() -> dict[str, int]:
     return {
         "running": 0,
         "active_pages": 0,
+        "queued": 0,
         "contexts": 0,
         "max_pages": max(1, int(settings.l2_max_pages)),
         "max_contexts": max(1, int(settings.l2_max_contexts)),
     }
 
 
+def _pool_snapshot() -> dict[str, int] | None:
+    """代理池健康度；未配置 ``PROXY_POOL`` 时返回 None，指标里不出现该组样本。
+
+    抓取器懒加载：首个工具调用前还没有实例，此时按配置给出初始状态（全部健康），
+    避免首次抓取前看板把“尚未初始化”误读成“没配代理池”。
+    """
+    fetcher = _fetcher
+    if fetcher is not None:
+        return fetcher.proxy_snapshot()
+    size = len(split_pool(get_settings().proxy_pool))
+    return {"size": size, "healthy": size, "cooling": 0} if size else None
+
+
 @mcp.custom_route("/metrics", methods=["GET"])
 async def metrics_endpoint(request) -> Response:
-    """Prometheus 文本格式指标：抓取量、命中层级、拒绝计数与 L2 浏览器占用。
+    """Prometheus 文本格式指标：抓取量、耗时分布、拒绝计数、租户配额与 L2/代理池占用。
 
     访问限制与 ``/stats`` 一致：未配置 ``SCRAPE_MCP_HTTP_TOKEN`` 时只接受回环，
     配置令牌后由 Bearer 鉴权保护，可被 Prometheus 远程抓取。
@@ -358,7 +372,9 @@ async def metrics_endpoint(request) -> Response:
     denied = _loopback_only(request)
     if denied is not None:
         return denied
-    return Response(metrics.render(_l2_snapshot()), media_type=metrics.CONTENT_TYPE)
+    return Response(
+        metrics.render(_l2_snapshot(), _pool_snapshot()), media_type=metrics.CONTENT_TYPE
+    )
 
 
 # 大页面 + 极小正文 → 疑似 JS 登录墙/骨架页，加 note 提示（不判失败，避免误杀超短正文）。
@@ -446,6 +462,7 @@ async def _fetch_html(
         html_bytes=len(outcome.html),
         elapsed_ms=outcome.elapsed_ms,
     )
+    metrics.observe_latency(outcome.tier, outcome.elapsed_ms)
 
     if outcome.error:
         return None, {

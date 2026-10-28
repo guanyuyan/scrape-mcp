@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from collections.abc import Callable
 
 from . import __version__
 from .core.stats import get_stats
@@ -24,6 +25,34 @@ _rejections: Counter[str] = Counter()
 # 多令牌时按租户统计：只记计入配额的已通过请求，以及带租户归属的 429
 _tenant_requests: Counter[str] = Counter()
 _tenant_rejections: Counter[tuple[str, str]] = Counter()
+
+# 抓取耗时直方图（秒）：桶边界与 `/stats` 的毫秒分桶一致，累计值在渲染时求和
+_LATENCY_BUCKETS: tuple[float, ...] = (0.1, 0.3, 1.0, 3.0, 10.0)
+_latency_buckets: Counter[tuple[str, int]] = Counter()
+_latency_sum_ms: Counter[str] = Counter()
+_latency_count: Counter[str] = Counter()
+
+# 租户配额余量由中间件注入（它持有各租户的限流器），这里只负责渲染
+_tenant_quota_provider: Callable[[], dict[str, int]] | None = None
+
+
+def observe_latency(tier: str, ms: int) -> None:
+    """记一次抓取耗时；按层级落进直方图桶，未落入任何桶的归到 ``+Inf``。"""
+    name = tier or "unknown"
+    elapsed_ms = max(0, int(ms))
+    secs = elapsed_ms / 1000.0
+    idx = next(
+        (i for i, bound in enumerate(_LATENCY_BUCKETS) if secs < bound), len(_LATENCY_BUCKETS)
+    )
+    _latency_buckets[(name, idx)] += 1
+    _latency_sum_ms[name] += elapsed_ms
+    _latency_count[name] += 1
+
+
+def set_tenant_quota_provider(provider: Callable[[], dict[str, int]] | None) -> None:
+    """注册租户配额余量的读取函数；传 None 表示不再输出该指标。"""
+    global _tenant_quota_provider
+    _tenant_quota_provider = provider
 
 
 def record_rejection(reason: str) -> None:
@@ -43,9 +72,14 @@ def record_tenant_rejection(tenant: str, reason: str) -> None:
 
 def reset() -> None:
     """清空本模块自有的计数；测试用，避免用例之间互相累加。"""
+    global _tenant_quota_provider
     _rejections.clear()
     _tenant_requests.clear()
     _tenant_rejections.clear()
+    _latency_buckets.clear()
+    _latency_sum_ms.clear()
+    _latency_count.clear()
+    _tenant_quota_provider = None
 
 
 def _escape(value: str) -> str:
@@ -76,8 +110,8 @@ def _labelled(
         lines.append(f'{name}{{{label}="{_escape(str(key))}"}} {int(values[key])}')
 
 
-def render(l2: dict[str, int] | None = None) -> str:
-    """渲染当前进程的指标文本；l2 为空表示浏览器从未启动（各项计 0）。"""
+def render(l2: dict[str, int] | None = None, proxy: dict[str, int] | None = None) -> str:
+    """渲染当前进程的指标文本；l2 为空表示浏览器从未启动，proxy 为空表示未配置代理池。"""
     stats = get_stats()
     requests = stats.fetches + stats.result_cache_hits
     snap = l2 or {}
@@ -163,6 +197,31 @@ def render(l2: dict[str, int] | None = None) -> str:
         stats.by_kind,
         "kind",
     )
+    lines.extend(
+        [
+            "# HELP scrape_mcp_fetch_duration_seconds 抓取耗时分布（按实际层级，单位秒）",
+            "# TYPE scrape_mcp_fetch_duration_seconds histogram",
+        ]
+    )
+    # 桶值需累计：Prometheus histogram 的 le 是“小于等于”，这里把离散桶累加后再输出
+    for tier in sorted(_latency_count.keys() | {"l1", "l2"}):
+        label = _escape(tier)
+        cumulative = 0
+        for idx, bound in enumerate(_LATENCY_BUCKETS):
+            cumulative += _latency_buckets[(tier, idx)]
+            lines.append(
+                f'scrape_mcp_fetch_duration_seconds_bucket{{tier="{label}",'
+                f'le="{bound:g}"}} {cumulative}'
+            )
+        total = _latency_count[tier]
+        lines.append(
+            f'scrape_mcp_fetch_duration_seconds_bucket{{tier="{label}",le="+Inf"}} {total}'
+        )
+        lines.append(
+            f'scrape_mcp_fetch_duration_seconds_sum{{tier="{label}"}} '
+            f"{_latency_sum_ms[tier] / 1000:.3f}"
+        )
+        lines.append(f'scrape_mcp_fetch_duration_seconds_count{{tier="{label}"}} {total}')
     _labelled(
         lines,
         "scrape_mcp_http_rejections_total",
@@ -191,6 +250,17 @@ def render(l2: dict[str, int] | None = None) -> str:
             f'reason="{_escape(reason)}"}} {value}'
         )
 
+    quotas = _tenant_quota_provider() if _tenant_quota_provider is not None else {}
+    if quotas:
+        _labelled(
+            lines,
+            "scrape_mcp_tenant_quota_remaining",
+            "gauge",
+            "租户当日剩余请求配额（只输出设置了 daily_quota 的租户）",
+            quotas,
+            "tenant",
+        )
+
     _plain(
         lines,
         "scrape_mcp_l2_browser_running",
@@ -204,6 +274,13 @@ def render(l2: dict[str, int] | None = None) -> str:
         "gauge",
         "当前在途的 L2 渲染页数（不含排队等待的请求）",
         int(snap.get("active_pages", 0)),
+    )
+    _plain(
+        lines,
+        "scrape_mcp_l2_queued_pages",
+        "gauge",
+        "排队等待 L2 渲染页位的请求数",
+        int(snap.get("queued", 0)),
     )
     _plain(
         lines,
@@ -226,4 +303,28 @@ def render(l2: dict[str, int] | None = None) -> str:
         "常驻 L2 上下文上限（配置 L2_MAX_CONTEXTS）",
         int(snap.get("max_contexts", 0)),
     )
+
+    pool = proxy or {}
+    if pool:
+        _plain(
+            lines,
+            "scrape_mcp_proxy_pool_size",
+            "gauge",
+            "代理池出口总数（未配置代理池时无此指标）",
+            int(pool.get("size", 0)),
+        )
+        _plain(
+            lines,
+            "scrape_mcp_proxy_pool_healthy",
+            "gauge",
+            "代理池中未处于冷却期的出口数",
+            int(pool.get("healthy", 0)),
+        )
+        _plain(
+            lines,
+            "scrape_mcp_proxy_pool_cooling",
+            "gauge",
+            "代理池中处于失败冷却期的出口数",
+            int(pool.get("cooling", 0)),
+        )
     return "\n".join(lines) + "\n"

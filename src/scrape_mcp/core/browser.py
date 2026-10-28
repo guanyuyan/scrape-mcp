@@ -132,6 +132,8 @@ class BrowserRenderer:
         self._slots_loop: asyncio.AbstractEventLoop | None = None
         # 在途渲染/登录数：>0 时不做空闲回收，避免把正在用的浏览器关掉
         self._active = 0
+        # 等待页位（l2_max_pages）的请求数：只用于 /metrics 观测排队压力
+        self._queued = 0
         self._last_used = time.monotonic()
         self._reaper: asyncio.Task[None] | None = None
 
@@ -146,6 +148,7 @@ class BrowserRenderer:
         return {
             "running": 1 if self._browser is not None else 0,
             "active_pages": max(0, self._active),
+            "queued": max(0, self._queued),
             "contexts": len(self._contexts),
             "max_pages": max(1, int(self._s.l2_max_pages)),
             "max_contexts": max(1, int(self._s.l2_max_contexts)),
@@ -342,23 +345,29 @@ class BrowserRenderer:
         t0 = time.perf_counter()
         host = host or urlparse(url).netloc.lower()
         # 并发页上限：超出时排队；排队期间不计入在途，空闲回收仍可正常关浏览器
-        async with self._page_slots():
-            self._active += 1
-            self._touch()
-            try:
-                return await self._render_once(
-                    url,
-                    host,
-                    t0,
-                    wait_for=wait_for,
-                    scroll=scroll,
-                    click=click,
-                    session=session,
-                    timeout=timeout,
-                    proxy=proxy,
-                )
-            finally:
-                self._active -= 1
+        slots = self._page_slots()
+        self._queued += 1
+        try:
+            await slots.acquire()
+        finally:
+            self._queued -= 1
+        self._active += 1
+        self._touch()
+        try:
+            return await self._render_once(
+                url,
+                host,
+                t0,
+                wait_for=wait_for,
+                scroll=scroll,
+                click=click,
+                session=session,
+                timeout=timeout,
+                proxy=proxy,
+            )
+        finally:
+            self._active -= 1
+            slots.release()
 
     async def _render_once(
         self,

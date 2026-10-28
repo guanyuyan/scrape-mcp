@@ -103,6 +103,10 @@ class Fetcher:
             self._browser = BrowserRenderer(self._settings)
         return self._browser
 
+    def proxy_snapshot(self) -> dict[str, int] | None:
+        """代理池状态（出口数/健康/冷却）；未配置代理池时返回 None。"""
+        return self._pool.snapshot() if self._pool else None
+
     async def aclose(self) -> None:
         if self._browser is not None:
             await self._browser.aclose()

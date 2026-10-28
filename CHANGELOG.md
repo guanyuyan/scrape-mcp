@@ -2,6 +2,14 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- **耗时直方图**：`scrape_mcp_fetch_duration_seconds`（按 `tier` 分桶 `0.1`/`0.3`/`1`/`3`/`10`/`+Inf` 秒），可直接用 `histogram_quantile` 算分层 p95，不再需要读 `/stats` 的窗口分位数
+- **租户配额余量**：`scrape_mcp_tenant_quota_remaining{tenant}`，只输出设置了 `daily_quota` 的租户，可用于余量告警
+- **代理池健康度**：`scrape_mcp_proxy_pool_size` / `_healthy` / `_cooling`；未配置 `PROXY_POOL` 时不输出这组指标
+- **L2 排队数**：`scrape_mcp_l2_queued_pages`，等待渲染页位的请求数，与在途页数一起看容量是否吃紧
+
 ## [0.12.0] - 2026-10-27
 
 ### Added

@@ -266,13 +266,16 @@ curl http://127.0.0.1:8000/metrics
 | `scrape_mcp_requests_total` / `scrape_mcp_fetches_total` | counter | 总请求数 / 进入抓取链路的次数（后者含 HTTP 缓存命中、不含结果缓存命中） |
 | `scrape_mcp_fetch_tier_total{tier}` | counter | 命中层级分布（`l1` = curl_cffi，`l2` = Playwright） |
 | `scrape_mcp_fetch_code_total{code}` / `scrape_mcp_fetch_kind_total{kind}` | counter | 按错误码 / 内容形态（`html`/`pdf`/`text`）分布 |
+| `scrape_mcp_fetch_duration_seconds` | histogram | 抓取耗时分布（按层级，单位秒；桶 `0.1`/`0.3`/`1`/`3`/`10`/`+Inf`），可直接算 p95 与平均耗时 |
 | `scrape_mcp_result_cache_hits_total` / `scrape_mcp_http_cache_hits_total` | counter | 两层缓存命中次数 |
 | `scrape_mcp_tokens_returned_total` / `scrape_mcp_bytes_in_total` | counter | 返回 token 与入站字节累计 |
 | `scrape_mcp_http_rejections_total{reason}` | counter | HTTP 拒绝次数：`unauthorized` / `forbidden` / `rate_limited` / `quota_exceeded` |
 | `scrape_mcp_tenant_requests_total{tenant}` | counter | 按租户统计的已通过请求数（只含计入配额的请求，`/healthz`、`/metrics` 不计） |
 | `scrape_mcp_tenant_rejections_total{tenant,reason}` | counter | 按租户统计的 429 拒绝（`rate_limited` / `quota_exceeded`） |
-| `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts` | gauge | 当前在途 L2 渲染页数 / 常驻浏览器上下文数 |
+| `scrape_mcp_tenant_quota_remaining{tenant}` | gauge | 租户当日剩余配额（只输出设置了 `daily_quota` 的租户，可用来做余量告警） |
+| `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_queued_pages` / `scrape_mcp_l2_contexts` | gauge | 当前在途 L2 渲染页数 / 排队等待页位的请求数 / 常驻浏览器上下文数 |
 | `scrape_mcp_l2_browser_running` / `scrape_mcp_l2_max_pages` / `scrape_mcp_l2_max_contexts` | gauge | 浏览器是否运行、并发页与常驻 context 上限 |
+| `scrape_mcp_proxy_pool_size` / `_healthy` / `_cooling` | gauge | 代理池出口总数 / 未冷却数 / 冷却中数；未配置 `PROXY_POOL` 时不输出这组指标 |
 
 `/metrics` 不额外引入 `prometheus_client`，按文本格式直接拼装。鉴权与 `/stats` 相同，但**不计入 QPS 与日配额**，可放心让 Prometheus 按固定间隔抓取；抓取配置见 [DEPLOYMENT.md](DEPLOYMENT.md#6-健康检查与观测)。
 

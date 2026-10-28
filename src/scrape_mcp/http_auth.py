@@ -183,6 +183,14 @@ class QuotaLimiter:
         """UTC 日序号：同一个自然日内计数，零点归零。"""
         return int(time.time() // 86400)
 
+    def remaining(self) -> int | None:
+        """当前 UTC 日剩余配额；未设置日配额时返回 None（表示不限）。"""
+        if not self._daily:
+            return None
+        if int(time.time() // 86400) != self._day:
+            return self._daily
+        return max(0, self._daily - self._used)
+
     def hit(self) -> tuple[str, float] | None:
         """记一次已通过鉴权的请求；超限返回 ``(错误码, 建议重试秒数)``。"""
         wall = time.time()
@@ -247,6 +255,17 @@ class BearerAuthMiddleware:
         # 每个租户独立令牌桶与日计数，互不挤占
         self._limiters = {
             policy.name: QuotaLimiter(policy.qps, policy.daily_quota) for policy in self.policies
+        }
+        if self.policies:
+            # 配额余量是动态值，交给 /metrics 在渲染时回调，避免维护第二份计数
+            metrics.set_tenant_quota_provider(self._quota_snapshot)
+
+    def _quota_snapshot(self) -> dict[str, int]:
+        """各租户的当日剩余配额；未设置日配额的租户不输出（“不限”不适合当数字展示）。"""
+        return {
+            name: left
+            for name, limiter in self._limiters.items()
+            if (left := limiter.remaining()) is not None
         }
 
     def _match(self, credentials: str) -> TokenPolicy | None:

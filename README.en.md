@@ -260,13 +260,16 @@ curl http://127.0.0.1:8000/metrics
 | `scrape_mcp_requests_total` / `scrape_mcp_fetches_total` | counter | All requests / fetches entering the pipeline (the latter includes HTTP cache hits, excludes result-cache hits) |
 | `scrape_mcp_fetch_tier_total{tier}` | counter | Tier distribution (`l1` = curl_cffi, `l2` = Playwright) |
 | `scrape_mcp_fetch_code_total{code}` / `scrape_mcp_fetch_kind_total{kind}` | counter | Split by error code / content kind (`html`/`pdf`/`text`) |
+| `scrape_mcp_fetch_duration_seconds` | histogram | Fetch duration by tier in seconds (buckets `0.1`/`0.3`/`1`/`3`/`10`/`+Inf`), enough for p95 and averages |
 | `scrape_mcp_result_cache_hits_total` / `scrape_mcp_http_cache_hits_total` | counter | Hits for each cache layer |
 | `scrape_mcp_tokens_returned_total` / `scrape_mcp_bytes_in_total` | counter | Tokens returned and inbound bytes |
 | `scrape_mcp_http_rejections_total{reason}` | counter | HTTP rejections: `unauthorized` / `forbidden` / `rate_limited` / `quota_exceeded` |
 | `scrape_mcp_tenant_requests_total{tenant}` | counter | Accepted requests per tenant (quota-consuming only; `/healthz` and `/metrics` excluded) |
 | `scrape_mcp_tenant_rejections_total{tenant,reason}` | counter | 429 rejections per tenant (`rate_limited` / `quota_exceeded`) |
-| `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_contexts` | gauge | In-flight L2 renders / resident browser contexts |
+| `scrape_mcp_tenant_quota_remaining{tenant}` | gauge | Remaining daily quota per tenant (only tenants with `daily_quota` set; usable for low-quota alerts) |
+| `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_queued_pages` / `scrape_mcp_l2_contexts` | gauge | In-flight L2 renders / requests queued for a page slot / resident browser contexts |
 | `scrape_mcp_l2_browser_running` / `scrape_mcp_l2_max_pages` / `scrape_mcp_l2_max_contexts` | gauge | Whether the browser runs, plus page and context limits |
+| `scrape_mcp_proxy_pool_size` / `_healthy` / `_cooling` | gauge | Proxy pool entries / healthy / cooling; omitted when `PROXY_POOL` is unset |
 
 `/metrics` adds no `prometheus_client` dependency — the text format is assembled directly. Auth matches `/stats`, but it **does not consume QPS or the daily quota**, so Prometheus can scrape it on a fixed interval; see [DEPLOYMENT.md](DEPLOYMENT.md#6-health-checks-and-observability) for a scrape config.
 

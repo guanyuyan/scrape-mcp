@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from scrape_mcp import __version__, metrics, server
 from scrape_mcp.config import Settings
 from scrape_mcp.core import stats
-from scrape_mcp.http_auth import BearerAuthMiddleware
+from scrape_mcp.http_auth import BearerAuthMiddleware, TokenPolicy
 
 URL = "https://a.test/x"
 
@@ -73,13 +73,53 @@ def test_render_reports_rejections_by_reason():
     assert values['scrape_mcp_http_rejections_total{reason="quota_exceeded"}'] == 0
 
 
+def test_render_reports_latency_histogram():
+    """耗时按层级进直方图：桶值累计，+Inf 等于该层样本总数。"""
+    metrics.observe_latency("l1", 30)
+    metrics.observe_latency("l1", 250)
+    metrics.observe_latency("l2", 1500)
+
+    values = _samples(metrics.render())
+
+    assert values['scrape_mcp_fetch_duration_seconds_bucket{tier="l1",le="0.1"}'] == 1
+    assert values['scrape_mcp_fetch_duration_seconds_bucket{tier="l1",le="0.3"}'] == 2
+    assert values['scrape_mcp_fetch_duration_seconds_bucket{tier="l1",le="1"}'] == 2
+    assert values['scrape_mcp_fetch_duration_seconds_bucket{tier="l1",le="+Inf"}'] == 2
+    assert values['scrape_mcp_fetch_duration_seconds_count{tier="l1"}'] == 2
+    assert values['scrape_mcp_fetch_duration_seconds_sum{tier="l1"}'] == 0.28
+    assert values['scrape_mcp_fetch_duration_seconds_bucket{tier="l2",le="3"}'] == 1
+    assert values['scrape_mcp_fetch_duration_seconds_count{tier="l2"}'] == 1
+    assert "# TYPE scrape_mcp_fetch_duration_seconds histogram" in metrics.render()
+
+
+def test_render_reports_proxy_pool_health():
+    values = _samples(metrics.render(proxy={"size": 3, "healthy": 2, "cooling": 1}))
+
+    assert values["scrape_mcp_proxy_pool_size"] == 3
+    assert values["scrape_mcp_proxy_pool_healthy"] == 2
+    assert values["scrape_mcp_proxy_pool_cooling"] == 1
+
+
+def test_render_omits_proxy_pool_when_unconfigured():
+    """没配代理池时不输出这组 gauge，避免看板把“未配置”误读成 0 个可用出口。"""
+    assert "scrape_mcp_proxy_pool" not in metrics.render()
+
+
 def test_render_reports_l2_occupancy():
-    snap = {"running": 1, "active_pages": 2, "contexts": 3, "max_pages": 3, "max_contexts": 8}
+    snap = {
+        "running": 1,
+        "active_pages": 2,
+        "queued": 1,
+        "contexts": 3,
+        "max_pages": 3,
+        "max_contexts": 8,
+    }
 
     values = _samples(metrics.render(snap))
 
     assert values["scrape_mcp_l2_browser_running"] == 1
     assert values["scrape_mcp_l2_active_pages"] == 2
+    assert values["scrape_mcp_l2_queued_pages"] == 1
     assert values["scrape_mcp_l2_contexts"] == 3
     assert values["scrape_mcp_l2_max_pages"] == 3
     assert values["scrape_mcp_l2_max_contexts"] == 8
@@ -91,6 +131,7 @@ def test_render_without_browser_reports_zero_occupancy():
 
     assert values["scrape_mcp_l2_browser_running"] == 0
     assert values["scrape_mcp_l2_active_pages"] == 0
+    assert values["scrape_mcp_l2_queued_pages"] == 0
     assert values["scrape_mcp_l2_contexts"] == 0
 
 
@@ -135,10 +176,14 @@ def test_metrics_endpoint_exposes_fetcher_l2_snapshot(monkeypatch):
             return {
                 "running": 1,
                 "active_pages": 1,
+                "queued": 0,
                 "contexts": 2,
                 "max_pages": 3,
                 "max_contexts": 8,
             }
+
+        def proxy_snapshot(self) -> dict[str, int]:
+            return {"size": 2, "healthy": 1, "cooling": 1}
 
     monkeypatch.setattr(server, "_fetcher", _Fetcher())
 
@@ -146,6 +191,43 @@ def test_metrics_endpoint_exposes_fetcher_l2_snapshot(monkeypatch):
 
     assert b"scrape_mcp_l2_active_pages 1" in resp.body
     assert b"scrape_mcp_l2_contexts 2" in resp.body
+    assert b"scrape_mcp_proxy_pool_size 2" in resp.body
+    assert b"scrape_mcp_proxy_pool_cooling 1" in resp.body
+
+
+def test_metrics_endpoint_reports_pool_before_first_fetch(tmp_path, monkeypatch):
+    """抓取器懒加载：首个请求前也要按配置显示代理池规模，而不是缺样本。"""
+    settings = Settings(
+        data_dir=str(tmp_path / "data"),
+        cache_ttl=0,
+        proxy_pool="http://127.0.0.1:9001,http://127.0.0.1:9002",
+    )
+    monkeypatch.setattr(server, "get_settings", lambda: settings)
+    monkeypatch.setattr(server, "_fetcher", None)
+
+    resp = asyncio.run(server.metrics_endpoint(_request("127.0.0.1")))
+
+    assert b"scrape_mcp_proxy_pool_size 2" in resp.body
+    assert b"scrape_mcp_proxy_pool_healthy 2" in resp.body
+    assert b"scrape_mcp_proxy_pool_cooling 0" in resp.body
+
+
+def test_tenant_quota_remaining_is_exposed(monkeypatch):
+    """配额余量由中间件回调渲染：只输出设了日配额的租户，用一次就减一。"""
+    policies = [
+        TokenPolicy(name="team-a", token="token-a", daily_quota=3),
+        TokenPolicy(name="ci", token="token-ci", daily_quota=0),
+    ]
+    middleware = BearerAuthMiddleware(_ok_app, tokens=policies)
+    authed = ((b"authorization", b"Bearer token-a"),)
+
+    assert _call_auth(middleware, headers=authed) == 200
+    assert _call_auth(middleware, headers=authed) == 200
+
+    body = metrics.render()
+
+    assert 'scrape_mcp_tenant_quota_remaining{tenant="team-a"} 1' in body
+    assert 'scrape_mcp_tenant_quota_remaining{tenant="ci"' not in body
 
 
 def test_metrics_endpoint_allows_remote_when_token_configured(tmp_path, monkeypatch):
