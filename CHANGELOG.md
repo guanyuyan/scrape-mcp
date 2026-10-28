@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.14.4] - 2026-10-28
 
 ### Added
 - 基准新增逐站耗时门禁：`--baseline` 的同一份基线同时用于耗时对比，某站超过 `max(基线 × 3, 基线 + 3000ms)` 即判为退化、退出码非零（`--latency-factor` / `--latency-floor-ms` 可调）；夜间工作流带上 `benchmarks/baseline.json`，超阈值时按「夜间基准未达阈值」开 issue
