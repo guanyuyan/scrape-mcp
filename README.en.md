@@ -615,7 +615,7 @@ The repo keeps a nightly-subset baseline in [benchmarks/baseline.json](benchmark
 **Local run (2026-10-28, 37 sites)**: 33/37 passed, completeness 33/33, interception 4/4, latency p50 1705 ms / p95 9011 ms.
 Of the 4 failures, 3 were unreachable from the local network (Hacker News / V2EX / arXiv timed out) and 1 was blocked by the site (Bilibili returned `login_required`).
 The nightly job reruns these sites on GitHub's network; its `site-quality-<run_id>` artifact is the durable record.
-CI full corpus (2026-10-28): 37/37 passed, 32/33 content fetched, 4/4 intercepted, completeness 33/33, p50 1064 ms / p95 5525 ms.
+CI full corpus (2026-10-28): 37/37 passed, 32/33 content fetched, 4/4 intercepted, completeness 33/33, p50 1456 ms / p95 4953 ms.
 The Paper's homepage is consistently rejected with `403`/`blocked=waf` from GitHub Actions egress (three full runs), while the same site's article page still returns 2827 characters, so the homepage is counted as an honestly-reported block with `expect: ["ok", "blocked", "login_required"]`; content quality for that site is covered by the article page.
 CI nightly subset (2026-10-28, 14 sites): 14/14 passed, 13/13 content fetched, 1/1 intercepted, 16/16 completeness, p50 504 ms / p95 1642 ms.
 

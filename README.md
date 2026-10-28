@@ -625,7 +625,7 @@ python scripts/bench_sites.py --reference trafilatura
 **本机实测（2026-10-28，37 站）**：通过 33/37，完整度 33/33，拦截符合 4/4，延迟 p50 1705 ms / p95 9011 ms。
 未通过的 4 项里，3 项是本机网络不可达（Hacker News / V2EX / arXiv 超时），1 项被站点拦截（Bilibili 返回 `login_required`）；
 这些站点在 GitHub 网络的夜间任务里会重新跑，结果以 `site-quality-<run_id>` 工件为准。
-CI 全量（2026-10-28）：通过 37/37，取正文 32/33，拦截符合 4/4，完整度 33/33，延迟 p50 1064 ms / p95 5525 ms。
+CI 全量（2026-10-28）：通过 37/37，取正文 32/33，拦截符合 4/4，完整度 33/33，延迟 p50 1456 ms / p95 4953 ms。
 其中澎湃首页在 GitHub Actions 出口被站点 WAF 恒定 403（三次全量运行都是 `status=403`、`blocked=waf`、0 字），而同站的文章页 `thepaper-article` 正常取到 2827 字，故首页按「如实上报拦截」计入，期望值写为 `["ok", "blocked", "login_required"]`：两种出口都不算退化，正文质量由文章页覆盖。
 CI 夜间子集（2026-10-28，14 站）：通过 14/14，取正文 13/13，拦截符合 1/1，完整度 16/16，p50 504 ms / p95 1642 ms。
 
