@@ -102,6 +102,11 @@ def _missing_checks(content: str, checks: list[str]) -> list[str]:
     return [c for c in checks if c.casefold() not in folded]
 
 
+def _expect_codes(expect: str | list[str]) -> list[str]:
+    """把站点期望归一化成候选结果集合；列表表示任一结果都算符合预期。"""
+    return list(expect) if isinstance(expect, list) else [expect]
+
+
 async def run_site(site: dict[str, Any], max_tokens: int, deadline_ms: int) -> dict[str, Any]:
     started = time.perf_counter()
     payload = await fetch(
@@ -118,7 +123,10 @@ async def run_site(site: dict[str, Any], max_tokens: int, deadline_ms: int) -> d
     ok = bool(payload.get("ok"))
     error_code = payload.get("error_code")
     expect = site.get("expect", "ok")
-    matched = ok if expect == "ok" else (not ok and error_code == expect)
+    # expect 可以是单个值，也可以是列表：某些站在不同出口表现不同（如澎湃首页在
+    # GitHub Actions 出口被 WAF 403、在住宅出口正常取正文），列表内任一结果都算符合预期
+    codes = _expect_codes(expect)
+    matched = (ok and "ok" in codes) or (not ok and error_code in codes)
 
     checks = site.get("checks") or []
     missing = _missing_checks(content, checks) if ok else list(checks)
@@ -152,8 +160,8 @@ async def run_site(site: dict[str, Any], max_tokens: int, deadline_ms: int) -> d
 
 
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
-    expected_ok = [r for r in records if r["expect"] == "ok"]
-    expected_block = [r for r in records if r["expect"] != "ok"]
+    expected_ok = [r for r in records if "ok" in _expect_codes(r["expect"])]
+    expected_block = [r for r in records if "ok" not in _expect_codes(r["expect"])]
     fetched = [r for r in expected_ok if r["ok"]]
     intercepted = [r for r in expected_block if r["matched"]]
     latencies = [float(r["elapsed_ms"]) for r in fetched]

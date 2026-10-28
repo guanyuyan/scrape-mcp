@@ -1,7 +1,7 @@
 {
   "version": 1,
   "updated": "2026-10-28",
-  "note": "分层真实站点集。expect=ok 表示应取到正文；expect 为错误码表示该站应被如实拦截（登录墙/反爬/robots）而不是伪装成功。checks 是正文中必须出现的稳定片段，只给结构稳定的页面配置（文档/固定文章/PDF），首页类动态内容只校验最小字符数。",
+  "note": "分层真实站点集。expect=ok 表示应取到正文；expect 为错误码表示该站应被如实拦截（登录墙/反爬/robots）而不是伪装成功；expect 也可写成列表，表示不同出口下结果不同、任一都算符合预期（如澎湃首页：GitHub Actions 出口被 WAF 403，住宅出口可取正文）。checks 是正文中必须出现的稳定片段，只给结构稳定的页面配置（文档/固定文章/PDF），首页类动态内容只校验最小字符数。",
   "sites": [
     {
       "id": "py-asyncio",
@@ -121,7 +121,8 @@
       "url": "https://www.thepaper.cn/",
       "category": "news",
       "min_chars": 500,
-      "checks": []
+      "checks": [],
+      "expect": ["ok", "login_required"]
     },
     {
       "id": "36kr-home",
