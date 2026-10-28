@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.14.2] - 2026-10-28
 
 ### Changed
 - 裸 403 不再提示登录：`waf` 类拦截（401/403/451/5xx）只有页面确实出现登录入口（密码框或「登录/密码/sign in」字样）才报 `login_required`，否则按 `blocked` 如实上报。此前澎湃首页这类出口/IP 风控的拒绝页会附上「调用 login 手动登录」，对用户是误导；Stack Overflow 的期望值随之放宽为 `["blocked", "login_required"]`
