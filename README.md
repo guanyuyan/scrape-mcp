@@ -622,10 +622,11 @@ python scripts/bench_sites.py --reference trafilatura
 
 仓库里保留一份夜间子集基线 [benchmarks/baseline.json](benchmarks/baseline.json)，首次记录于 2026-10-21（10/10 通过，p50 453 ms / p95 2813 ms）。它只覆盖夜间子集，用于看趋势，不代表全量站点通过率；每月挑一次夜间结果更新：下载当次 `bench-sites.json`，把 `sites_file` 改为相对路径、补上 `source` 字段后替换该文件。
 
-**本机实测（2026-10-28，37 站）**：通过 32/37，完整度 33/33，拦截符合 3/3，延迟 p50 1705 ms / p95 9011 ms。
-未通过的 5 项里，3 项是本机网络不可达（Hacker News / V2EX / arXiv 超时），2 项被站点拦截（Stack Overflow、Bilibili 返回 `login_required`）；
+**本机实测（2026-10-28，37 站）**：通过 33/37，完整度 33/33，拦截符合 4/4，延迟 p50 1705 ms / p95 9011 ms。
+未通过的 4 项里，3 项是本机网络不可达（Hacker News / V2EX / arXiv 超时），1 项被站点拦截（Bilibili 返回 `login_required`）；
 这些站点在 GitHub 网络的夜间任务里会重新跑，结果以 `site-quality-<run_id>` 工件为准。
-CI 夜间基线（2026-10-21，修复 PDF 依赖后）：通过 10/10，取正文 9/9，完整度 10/10，p50 453 ms / p95 2813 ms。
+CI 全量（2026-10-28）：通过 36/37，取正文 32/33，拦截符合 4/4，完整度 33/33，延迟 p50 1145 ms / p95 4863 ms。
+CI 夜间子集基线（2026-10-28，14 站）：通过 14/14，取正文 13/13，完整度 16/16，p50 412 ms / p95 2994 ms。
 
 | 站点 | 分类 | 层级 | 结果 | 字符 | token | 完整度 | 耗时 |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
@@ -647,12 +648,12 @@ CI 夜间基线（2026-10-21，修复 PDF 依赖后）：通过 10/10，取正�
 | thepaper-home | news | l2 | 通过 | 2025 | 1649 | - | 11940 ms |
 | 36kr-home | news | l2 | 通过 | 1119 | 1060 | - | 2437 ms |
 | thepaper-article | news | l2 | 通过 | 2829 | 3090 | 1/1 | 1520 ms |
-| netease-home | news | l1 | 通过 | 10485 | 7313 | 1/1 | 304 ms |
-| sina-home | news | l1 | 通过 | 6360 | 7549 | 1/1 | 406 ms |
+| netease-home | news | l1 | 通过 | 10485 | 7313 | 1/1 | 406 ms |
+| sina-home | news | l1 | 通过 | 6360 | 7549 | 1/1 | 330 ms |
 | github-trending | list | l1 | 通过 | 4913 | 1787 | - | 3682 ms |
 | hacker-news | list | l1 | timeout（本机网络） | 0 | 0 | - | 45005 ms |
 | v2ex-home | list | l1 | timeout（本机网络） | 0 | 0 | - | 45020 ms |
-| stackoverflow-questions | list | l2 | login_required（站点拦截） | 0 | 0 | - | 11110 ms |
+| stackoverflow-questions | list | l2 | 按预期拦截 | 0 | 0 | - | 11110 ms |
 | douban-home | list | l1 | 通过 | 1354 | 1028 | 1/1 | 330 ms |
 | react-learn | spa | l1 | 通过 | 13986 | 3514 | 2/2 | 597 ms |
 | apple-cn-home | spa | l2 | 通过 | 198 | 90 | 2/2 | 1564 ms |

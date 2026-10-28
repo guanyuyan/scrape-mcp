@@ -612,10 +612,11 @@ The output covers pass rate, fetch rate, interception rate, completeness, tokens
 
 The repo keeps a nightly-subset baseline in [benchmarks/baseline.json](benchmarks/baseline.json), first recorded on 2026-10-21 (10/10 passed, p50 453 ms / p95 2813 ms). It only covers the nightly subset and is meant for trend checking, not as the pass rate of the full corpus. Update it monthly: download a `bench-sites.json`, set `sites_file` to a relative path, add a `source` field, and replace the file.
 
-**Local run (2026-10-28, 37 sites)**: 32/37 passed, completeness 33/33, interception 3/3, latency p50 1705 ms / p95 9011 ms.
-Of the 5 failures, 3 were unreachable from the local network (Hacker News / V2EX / arXiv timed out) and 2 were blocked by the site (Stack Overflow and Bilibili returned `login_required`).
+**Local run (2026-10-28, 37 sites)**: 33/37 passed, completeness 33/33, interception 4/4, latency p50 1705 ms / p95 9011 ms.
+Of the 4 failures, 3 were unreachable from the local network (Hacker News / V2EX / arXiv timed out) and 1 was blocked by the site (Bilibili returned `login_required`).
 The nightly job reruns these sites on GitHub's network; its `site-quality-<run_id>` artifact is the durable record.
-Nightly baseline (2026-10-21, after fixing the PDF dependency): 10/10 passed, 9/9 content fetched, 10/10 completeness, p50 453 ms / p95 2813 ms.
+CI full corpus (2026-10-28): 36/37 passed, 32/33 content fetched, 4/4 intercepted, completeness 33/33, p50 1145 ms / p95 4863 ms.
+CI nightly baseline (2026-10-28, 14 sites): 14/14 passed, 13/13 content fetched, 16/16 completeness, p50 412 ms / p95 2994 ms.
 
 `--reference trafilatura` only counts plain body text; this tool keeps headings, lists and links, so token counts are not directly equivalent — treat them as an order-of-magnitude check.
 

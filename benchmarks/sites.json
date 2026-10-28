@@ -179,8 +179,9 @@
       "id": "stackoverflow-questions",
       "url": "https://stackoverflow.com/questions",
       "category": "list",
-      "min_chars": 500,
-      "checks": []
+      "min_chars": 0,
+      "checks": [],
+      "expect": "login_required"
     },
     {
       "id": "douban-home",
