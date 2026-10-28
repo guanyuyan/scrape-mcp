@@ -2,6 +2,12 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Changed
+- 基准的 `expect` 支持写成列表：同一站在不同出口结果不同时（如澎湃首页在 GitHub Actions 出口被 WAF 恒定 403、在住宅出口正常取正文），列表内任一结果都算符合预期
+- `thepaper-home` 期望值改为 `["ok", "login_required"]`。三次全量 CI 工件里它都是 `status=403`、`blocked=waf`、0 字，而同站 `thepaper-article` 稳定取到 2827 字——是首页路径对数据中心出口的 WAF 拦截，此前被记作「间歇性 `login_required`」；全量回归回到 37/37
+
 ## [0.14.1] - 2026-10-28
 
 ### Added
