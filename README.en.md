@@ -86,7 +86,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 | A news portal home | portal/listing | L2 | 338 KB | ~1.4k tokens (~1.6%) | dynamic page, browser render |
 | A tech blog home | SPA | L2 | 12 KB | ~1.4k tokens | JS shell, needs rendering |
 
-**Shape**: a local MCP server (stdio or HTTP) with privacy under your control. Tools: `web_fetch`, `web_batch`, `web_extract`, `web_crawl`, `login`, `session_*`. Caching is on by default.
+**Shape**: a local MCP server (stdio or HTTP) with privacy under your control. Tools: `web_fetch`, `web_batch`, `web_extract`, `web_crawl`, `web_watch`, `login`, `session_*`. Caching is on by default.
 
 ---
 
@@ -104,6 +104,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Single-flight per URL**: concurrent requests for the same page (multiple tenants, or duplicate links inside a batch/crawl) fetch it once and share the response — less egress and fewer anti-bot triggers. Both L1 and L2 renders are coalesced. Requests with custom headers/credentials or `bypass_cache=true` may be caller-specific, so they are never merged.
 - **Two cache layers**: HTTP responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; compacted content and extraction results get their own cache so repeat calls return immediately. `bypass_cache=true` skips both layers. `web_batch` fetches a list concurrently.
 - **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped.
+- **Change detection**: `web_watch` keeps a snapshot of the body after every successful fetch and reports `changed` plus an added/removed line summary on the next call; pass `selector` to watch just one block (leaderboard, price box). Failed fetches never overwrite the snapshot, so changes that happened during a block are still visible afterwards.
 - **Total budget with degradation**: `web_fetch` / `web_extract` / `web_batch` / `web_crawl` accept `deadline_ms`. When time runs short it degrades step by step — cap each request → skip retries → skip L2 rendering → return `timeout` — while any content already fetched is still returned. Degraded results are never cached, so later calls with a larger budget cannot inherit truncated content. The budget also covers the compliance stage (rate-limit wait and robots.txt fetch): if it is too tight, the call returns `timeout` early instead of burning the budget on preparation.
 - **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent.
 - **Site recipes**: keep per-site rendering hints, root selector, extraction schema and pagination rules in a JSON file; later calls need no arguments, and per-call arguments still win.
@@ -344,6 +345,12 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `proxy` applies to every page of the crawl; omit it to use the proxy pool, then `SCRAPE_MCP_PROXY`
   - `deadline_ms` budgets the whole crawl: no new pages are started once it runs out, and pages already fetched are returned
   - Reports progress per page when requested (`已翻到第 n/N 页` in paginate mode, `已抓取 n/N 页` in link mode)
+- **`web_watch(url, selector=None, reset=False, bypass_cache=True, ...)`** → compare a page against the last time it was fetched
+  - Each successful fetch stores a body snapshot under `DATA_DIR/watch/`; the next call returns `changed`, `added_lines` / `removed_lines` and a `diff` preview (at most 40 lines, `diff_truncated` marks truncation)
+  - `first_seen=true` means this is the first snapshot for that URL (nothing to compare against, so no diff); `previous_hash` / `previous_chars` help manual verification
+  - `selector` narrows the watch to one block (all matched nodes joined); different selectors keep separate snapshots
+  - `reset=true` drops the old snapshot and rebuilds the baseline; comparison ignores trailing whitespace and blank lines so render noise does not count
+  - Failed fetches (blocked/timeout/login wall) never overwrite the snapshot; `bypass_cache` defaults to `true` so the content is fresh
 - **`login(url, timeout=180, session="default")`** → open a visible browser for a manual login and persist it
   - Use different `session` names for multiple accounts; pass the same name to `web_fetch`
 - **`session_list()`** → list stored sessions (`session` + `host` + `updated_at`), without cookie values
@@ -652,10 +659,10 @@ benchmarks/
 ├── sites.json         # Real-site quality corpus (tiers, expected outcome, completeness checks)
 └── baseline.json      # Nightly-subset baseline for trend checks (updated monthly)
 src/scrape_mcp
-├── server.py          # MCP entry + tools (web_fetch/web_extract/web_batch/web_crawl/login/session_*)
+├── server.py          # MCP entry + tools (web_fetch/web_extract/web_batch/web_crawl/web_watch/login/session_*)
 ├── http_auth.py       # HTTP Bearer middleware + non-loopback bind guard
 ├── cli.py             # Subcommands: init (client config) / schema (export tool definitions)
-├── sdk.py             # Python SDK wrappers (fetch/extract/crawl/batch/aclose)
+├── sdk.py             # Python SDK wrappers (fetch/extract/crawl/batch/watch/aclose)
 ├── config.py          # Environment configuration
 ├── metrics.py         # Prometheus text metrics (source for /metrics)
 ├── tokenizer.py       # tiktoken counting + budget truncation
@@ -668,6 +675,7 @@ src/scrape_mcp
 │   ├── recipes.py     # Site recipes (longest-suffix match, mtime reload)
 │   ├── cache.py       # HTTP response cache + content/extraction result cache
 │   ├── stats.py       # In-process counters (source for /stats)
+│   ├── watch.py       # Change detection (body snapshot + diff summary)
 │   ├── errors.py      # Stable error codes
 │   └── hostlimit.py   # Per-host concurrency gate
 └── extract/

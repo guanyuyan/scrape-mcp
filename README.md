@@ -89,7 +89,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 | 腾讯新闻首页 | 列表/门户 | L2 | 338KB | ~1.4k token（约 1.6%） | 动态页升级浏览器渲染 |
 | 极客邦首页 | SPA/动态 | L2 | 12KB | ~1.4k token | JS 骨架页，需渲染才有正文 |
 
-**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、登录持久化 `login`，缓存默认开启。
+**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、变更检测 `web_watch`、登录持久化 `login`，缓存默认开启。
 
 ---
 
@@ -108,6 +108,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **同 URL 单飞（singleflight）**：同一页面被并发请求时（多租户同时抓、批量/爬取里重复链接）只真抓一次，其余等待并复用同一份响应，省出口流量也少踩目标站风控；L1 与 L2 渲染都会合并。带自定义头/凭证或 `bypass_cache=true` 的请求可能因人而异，不参与合并。
 - **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。
+- **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
 - **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
 - **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`。
 - **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
@@ -350,6 +351,12 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `proxy` 对该次所有页面生效；缺省按代理池分配，未配池时沿用全局配置
   - `deadline_ms` 为整次爬取的预算：耗尽后不再抓新页，已抓到的页面照常返回
   - 客户端请求进度时逐页上报（分页模式为 `已翻到第 n/N 页`，链接模式为 `已抓取 n/N 页`）
+- **`web_watch(url, selector=None, reset=False, bypass_cache=True, ...)`** → 对比页面自上次抓取以来的变化
+  - 每次成功抓取都把正文存一份快照到 `DATA_DIR/watch/`，下次调用与它对比：返回 `changed`、`added_lines` / `removed_lines` 与 `diff` 预览（最多 40 行，`diff_truncated` 标明是否截断）
+  - `first_seen=true` 表示这是该 URL 的第一份快照（没有可比对象，故不给 diff）；`previous_hash` / `previous_chars` 便于人工核对
+  - `selector` 只看页面内某一块（按命中的全部节点拼接），适合盯榜单/价格/公告位；不同 `selector` 各存一份快照，互不覆盖
+  - `reset=true` 丢弃旧快照重建基线；比较口径忽略行尾空白与空行，避免渲染噪声误报
+  - 抓取失败（拦截/超时/登录墙）不会覆盖快照，恢复后仍能对比出期间变化；`bypass_cache` 默认 `true`，保证拿到的是最新内容
 - **`login(url, timeout=180, session="default")`** → 打开带界面浏览器手动登录并持久化登录态
   - 多账号场景用不同 `session` 名分别登录，`web_fetch` 时传同一个名字即可，互不覆盖
 - **`session_list()`** → 列出本地已保存的登录态（`session` + `host` + `updated_at`），不含 cookie 内容
@@ -702,10 +709,10 @@ benchmarks/
 ├── sites.json         # 真实站点质量基准站点集（分层、期望结果、完整性检查项）
 └── baseline.json      # 夜间子集基线（趋势参照，每月更新）
 src/scrape_mcp
-├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/login/session_*）
+├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/web_watch/login/session_*）
 ├── http_auth.py       # HTTP Bearer 鉴权中间件 + 非回环绑定校验
 ├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）
-├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/batch/aclose）
+├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/batch/watch/aclose）
 ├── config.py          # 环境变量配置
 ├── metrics.py         # Prometheus 文本格式指标（/metrics 端点）
 ├── tokenizer.py       # tiktoken 计数 + 预算截断
@@ -718,6 +725,7 @@ src/scrape_mcp
 │   ├── recipes.py     # 站点 recipe（按 host 最长后缀匹配、mtime 重载）
 │   ├── cache.py       # HTTP 响应缓存 + 正文/抽取结果缓存
 │   ├── stats.py       # 进程内计数（/stats 端点数据源）
+│   ├── watch.py       # 变更检测（正文快照 + diff 摘要）
 │   ├── errors.py      # 统一错误码
 │   └── hostlimit.py   # 同域并发闸门
 └── extract/

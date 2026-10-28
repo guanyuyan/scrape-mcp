@@ -16,6 +16,8 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=2.0.0,<3",
+    # mcp 依赖 pyjwt，这里显式抬下限以排除已披露的 2.14.x 漏洞（pip-audit 门禁）
+    "pyjwt>=2.15.0",
     "curl_cffi>=0.7.0",
     "selectolax>=0.4.11",
     "tiktoken>=0.7.0",
@@ -27,7 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # PDF 文本抽取是可选能力，不装也能用其余工具，装上后 web_fetch 直接吃 PDF
-pdf = ["pypdf>=4.0"]
+pdf = ["pypdf>=6.21.2"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -35,7 +37,7 @@ dev = [
     "ruff>=0.6.0",
     "pre-commit>=3.8",
     # 测试要覆盖 PDF 解析路径，运行时仍按可选依赖安装
-    "pypdf>=4.0",
+    "pypdf>=6.21.2",
 ]
 
 [tool.ruff]

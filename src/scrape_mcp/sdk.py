@@ -20,7 +20,7 @@ from . import server
 from .config import get_settings
 from .core.logging import configure
 
-__all__ = ["aclose", "batch", "crawl", "extract", "fetch"]
+__all__ = ["aclose", "batch", "crawl", "extract", "fetch", "watch"]
 
 _logging_ready = False
 
@@ -59,6 +59,12 @@ async def batch(urls: list[str], **options: Any) -> dict[str, Any]:
     """并发抓取一组 URL；参数同 ``web_batch``。"""
     _ensure_logging()
     return _parse(await server.web_batch(urls, **options))
+
+
+async def watch(url: str, **options: Any) -> dict[str, Any]:
+    """对比页面自上次抓取以来的变化；参数同 ``web_watch``。"""
+    _ensure_logging()
+    return _parse(await server.web_watch(url, **options))
 
 
 async def aclose() -> None:

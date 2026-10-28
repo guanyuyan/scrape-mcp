@@ -27,6 +27,7 @@ from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
 from .core.session import CookieFileError, SessionStore, load_cookie_file, normalize_session
 from .core.stats import get_stats
+from .core.watch import MAX_SNAPSHOT_CHARS, WatchStore, content_hash, diff_summary, watch_key
 from .extract.compact import LINK_POLICIES, compact_html
 from .extract.links import extract_links, next_link
 from .extract.pdf import PdfError, pdf_pages
@@ -1427,6 +1428,114 @@ async def web_crawl(
         ok_count=ok_count,
         links_discovered=len(visited) - 1,
         results=results,
+    )
+
+
+def _watch_text(html: str, url: str, selector: str | None) -> str:
+    """把页面折成用于对比的文本：指定选择器就取该区块，否则取整页正文。"""
+    if not selector:
+        return compact_html(html, url).content
+    from .extract.schema import extract_from_html
+
+    # list 类型能一次收下选择器命中的全部节点，适合盯一块列表区的增删
+    result = extract_from_html(
+        html,
+        {"fields": {"v": {"selector": selector, "type": "list", "list_key": "text"}}},
+        base_url=url,
+    )
+    value = result.fields.get("v")
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value if item is not None)
+    return "" if value is None else str(value)
+
+
+@mcp.tool()
+async def web_watch(
+    url: str,
+    selector: str | None = None,
+    reset: bool = False,
+    bypass_cache: bool = True,
+    session: str = "default",
+    deadline_ms: int | None = None,
+    proxy: str | None = None,
+) -> str:
+    """检测网页（或页面内某个区块）自上次调用以来的变化。
+
+    每次成功抓取都会保存一份正文快照，下次调用与它对比，返回 changed 与增删行摘要，
+    适合"每天看一眼这个页面有没有新内容"的场景；无变化时 changed=false 且 diff 为空。
+    抓取失败（拦截/超时/登录墙）不会覆盖旧快照，等问题解决后仍能对比到真实变化。
+
+    Args:
+        url: 目标网页完整 URL。
+        selector: 只看页面内的某个区块（CSS 选择器），如 "main .article"；不传则对比整页正文。
+        reset: 丢弃该 URL 的旧快照并重建基线（本次返回 first_seen=true）。
+        bypass_cache: 默认 true，强制拿最新内容；false 时允许命中 CACHE_TTL 内的正文缓存。
+        session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致。
+        deadline_ms: 整次调用的总预算（毫秒），不传表示不限。
+        proxy: 本次请求使用的代理；不传则按代理池分配，未配池时沿用全局配置。
+    """
+    if not url.startswith(("http://", "https://")):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
+
+    outcome, error = await _fetch_html(
+        url,
+        bypass_cache=bypass_cache,
+        session=session,
+        deadline=deadline,
+        proxy=proxy,
+    )
+    if error is not None:
+        # 失败不覆盖快照：一次风控就把基线冲掉的话，恢复后反而看不出这期间的变化
+        return _payload(**error)
+
+    text = _watch_text(outcome.html, url, selector)[:MAX_SNAPSHOT_CHARS]
+    digest = content_hash(text)
+    store = WatchStore(Path(get_settings().data_dir))
+    key = watch_key(url, selector)
+    previous = None if reset else store.load(key)
+    changed = previous is None or previous.get("hash") != digest
+    summary = (
+        diff_summary(str(previous.get("text") or ""), text)
+        if previous is not None and changed
+        else {"added_lines": 0, "removed_lines": 0, "diff": [], "diff_truncated": False}
+    )
+    store.save(
+        key,
+        {
+            "url": url,
+            "selector": selector,
+            "hash": digest,
+            "chars": len(text),
+            "text": text,
+        },
+    )
+    return _payload(
+        ok=True,
+        url=url,
+        final_url=outcome.final_url,
+        status=outcome.status,
+        tier=outcome.tier,
+        elapsed_ms=outcome.elapsed_ms,
+        selector=selector,
+        changed=changed,
+        first_seen=previous is None,
+        hash=digest,
+        previous_hash=(previous or {}).get("hash"),
+        chars=len(text),
+        previous_chars=(previous or {}).get("chars"),
+        **summary,
     )
 
 
