@@ -610,13 +610,13 @@ The corpus lives in [benchmarks/sites.json](benchmarks/sites.json) and is groupe
 The output covers pass rate, fetch rate, interception rate, completeness, tokens, p50/p95 latency and tier distribution, and can be saved as JSON / Markdown.
 `--baseline` compares per site with a previous run and flags a regression when content characters drop by more than 20%.
 
-The repo keeps a nightly-subset baseline in [benchmarks/baseline.json](benchmarks/baseline.json), first recorded on 2026-10-21 (10/10 passed, p50 453 ms / p95 2813 ms). It only covers the nightly subset and is meant for trend checking, not as the pass rate of the full corpus. Update it monthly: download a `bench-sites.json`, set `sites_file` to a relative path, add a `source` field, and replace the file.
+The repo keeps a nightly-subset baseline in [benchmarks/baseline.json](benchmarks/baseline.json), re-recorded on 2026-10-28 along with the corpus expansion (14/14 passed, p50 504 ms / p95 1642 ms). It only covers the nightly subset and is meant for trend checking, not as the pass rate of the full corpus. Update it monthly: download a `bench-sites.json`, set `sites_file` to a relative path, add a `source` field, and replace the file.
 
 **Local run (2026-10-28, 37 sites)**: 33/37 passed, completeness 33/33, interception 4/4, latency p50 1705 ms / p95 9011 ms.
 Of the 4 failures, 3 were unreachable from the local network (Hacker News / V2EX / arXiv timed out) and 1 was blocked by the site (Bilibili returned `login_required`).
 The nightly job reruns these sites on GitHub's network; its `site-quality-<run_id>` artifact is the durable record.
-CI full corpus (2026-10-28): 36/37 passed, 32/33 content fetched, 4/4 intercepted, completeness 33/33, p50 1145 ms / p95 4863 ms.
-CI nightly baseline (2026-10-28, 14 sites): 14/14 passed, 13/13 content fetched, 16/16 completeness, p50 412 ms / p95 2994 ms.
+CI full corpus (2026-10-28): 36/37 passed, 32/33 content fetched, 4/4 intercepted, completeness 33/33, p50 1240 ms / p95 5420 ms; the only failure was The Paper's homepage, which intermittently returned `login_required`.
+CI nightly subset (2026-10-28, 14 sites): 14/14 passed, 13/13 content fetched, 1/1 intercepted, 16/16 completeness, p50 504 ms / p95 1642 ms.
 
 `--reference trafilatura` only counts plain body text; this tool keeps headings, lists and links, so token counts are not directly equivalent — treat them as an order-of-magnitude check.
 
