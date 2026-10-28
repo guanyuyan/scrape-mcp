@@ -92,6 +92,12 @@ _LAUNCH_ARGS = (
 
 _SETTLE_INTERVAL_MS = 400
 
+# settle 阶段判定"还在等骨架页"的可见文本下限，比 detector 的 L1 口径（2000 字）低。
+# 浏览器已经把 JS 跑过一遍，此时仍有上千字可见文本的页面就不是骨架页了：
+# 首页类页面（如 svelte.dev 1943 字、thepaper.cn 1431 字）正文早已稳定，
+# 继续按 2000 字判定只会空转到 shell 封顶，白等几秒。
+_SETTLE_SHELL_MAX_VISIBLE = 1000
+
 # 空闲检查的最小间隔（秒）：阈值很小时不至于把检查开成忙轮询
 _REAP_MIN_INTERVAL = 1.0
 
@@ -636,8 +642,9 @@ def _pending_kind(html: str) -> str | None:
     blocked, _ = detect_block(200, html)
     if blocked in _CHALLENGE_TYPES:
         return blocked
-    # 骨架页的可见文本在渲染后会涨上来，故用同一把尺子判断"是否还在等"
-    return "shell" if looks_like_shell(html) else None
+    # 骨架页的可见文本在渲染后会涨上来，故仍按可见文本判断"是否还在等"；
+    # 但渲染后门槛放低：上千字可见文本已经不是骨架页，再等也等不出新正文
+    return "shell" if looks_like_shell(html, max_visible=_SETTLE_SHELL_MAX_VISIBLE) else None
 
 
 # 登录页 URL 上的常见路径特征；命中说明用户还停留在登录页、尚未完成登录

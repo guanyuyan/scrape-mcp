@@ -126,6 +126,20 @@ def test_pending_kind_reads_challenge_and_shell():
     assert b._pending_kind(shell) == "shell"
 
 
+def test_pending_kind_stops_early_for_text_light_but_real_pages():
+    """渲染后上千字可见文本就不是骨架页：不再等，避免空转到 shell 封顶。
+
+    这类首页（svelte.dev 1943 字、thepaper.cn 1431 字）在 L1 阶段仍会被判成骨架页
+    并升级浏览器，那是"要不要渲染"的保守口径，与 settle 的"要不要继续等"不同。
+    """
+    rich = (
+        "<html><body><article>" + "<span></span>" * 2500 + "正文" * 600 + "</article></body></html>"
+    )
+    assert len(rich) >= 30000
+    assert b.looks_like_shell(rich) is True  # L1 口径：仍算骨架页
+    assert b._pending_kind(rich) is None  # settle 口径：正文已够，收工
+
+
 def test_is_logged_in_requires_content_and_left_login_path():
     assert b._is_logged_in("https://a.test/home", NORMAL_HTML) is True
     assert b._is_logged_in("https://a.test/passport/signin", NORMAL_HTML) is False

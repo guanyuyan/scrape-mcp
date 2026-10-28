@@ -68,8 +68,13 @@ _SHELL_MIN_HTML = 30_000
 _SHELL_MAX_VISIBLE = 2000
 
 
-def looks_like_shell(html: str) -> bool:
-    return len(html) >= _SHELL_MIN_HTML and visible_text_length(html) < _SHELL_MAX_VISIBLE
+def looks_like_shell(html: str, max_visible: int = _SHELL_MAX_VISIBLE) -> bool:
+    """HTML 够大但可见文本太少 → 骨架页/登录墙（正文靠 JS 拉）。
+
+    ``max_visible`` 允许调用方放宽门槛：渲染后再判断时浏览器已跑过一遍 JS，
+    门槛可以比 L1 阶段（决定"要不要上浏览器"）更低。
+    """
+    return len(html) >= _SHELL_MIN_HTML and visible_text_length(html) < max_visible
 
 
 def detect_block(status: int, html: str, content_type: str = "") -> tuple[BlockType, str]:
