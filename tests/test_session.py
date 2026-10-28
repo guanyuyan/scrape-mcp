@@ -252,6 +252,45 @@ async def test_login_required_reported_when_still_blocked_after_l2(tmp_path):
     assert outcome.session_loaded is False
 
 
+BARE_403 = "<html><body><h1>403 Forbidden</h1><p>Your access is blocked.</p></body></html>"
+
+
+async def test_bare_403_is_reported_as_blocked_not_login_required(tmp_path):
+    """裸 403（WAF/出口风控）页面上没有登录入口：登录也救不了，不该提示 login。"""
+    blocked_page = BrowserOutcome(
+        ok=True,
+        url="https://www.thepaper.cn/",
+        final_url="https://www.thepaper.cn/",
+        status=403,
+        html=BARE_403,
+        elapsed_ms=100,
+    )
+    fetcher = Fetcher(Settings(data_dir=str(tmp_path)))
+    fetcher._http = FakeHttp(status=403, text=BARE_403)
+    fetcher._browser = FakeBrowser(blocked_page)
+    outcome = await fetcher.fetch("https://www.thepaper.cn/")
+    assert outcome.blocked == "waf"
+    assert outcome.login_required is False
+
+
+async def test_403_with_login_form_still_reports_login_required(tmp_path):
+    login_page = '<html><body><form><input type="password"></form></body></html>'
+    blocked_page = BrowserOutcome(
+        ok=True,
+        url="https://example.com/private",
+        final_url="https://example.com/private",
+        status=403,
+        html=login_page,
+        elapsed_ms=100,
+    )
+    fetcher = Fetcher(Settings(data_dir=str(tmp_path)))
+    fetcher._http = FakeHttp(status=403, text=login_page)
+    fetcher._browser = FakeBrowser(blocked_page)
+    outcome = await fetcher.fetch("https://example.com/private")
+    assert outcome.blocked == "waf"
+    assert outcome.login_required is True
+
+
 async def test_session_loaded_when_state_exists(tmp_path):
     # 预置一个登录态文件，模拟之前 login 过
     host = "www.zhihu.com"

@@ -122,7 +122,7 @@
       "category": "news",
       "min_chars": 500,
       "checks": [],
-      "expect": ["ok", "login_required"]
+      "expect": ["ok", "blocked", "login_required"]
     },
     {
       "id": "36kr-home",
@@ -182,7 +182,7 @@
       "category": "list",
       "min_chars": 0,
       "checks": [],
-      "expect": "login_required"
+      "expect": ["blocked", "login_required"]
     },
     {
       "id": "douban-home",

@@ -77,6 +77,26 @@ def looks_like_shell(html: str, max_visible: int = _SHELL_MAX_VISIBLE) -> bool:
     return len(html) >= _SHELL_MIN_HTML and visible_text_length(html) < max_visible
 
 
+# 登录入口特征：密码框或"登录"字样。只有这类页面才值得提示用户去 login。
+# 裸 403（出口/IP 风控、WAF 拒绝页）没有登录入口，提示登录是误导——换出口或等冷却才有用。
+_LOGIN_MARKERS = (
+    'type="password"',
+    "type='password'",
+    "登录",
+    "登陆",
+    "密码",
+    "sign in",
+    "log in",
+    "signin",
+)
+
+
+def looks_like_login_wall(html: str) -> bool:
+    """页面是否给出了登录入口（密码框或登录字样）。"""
+    low = html[:200_000].lower()
+    return any(marker in low for marker in _LOGIN_MARKERS)
+
+
 def detect_block(status: int, html: str, content_type: str = "") -> tuple[BlockType, str]:
     low = html[:200_000].lower()
     visible = visible_text_length(html)

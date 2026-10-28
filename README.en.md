@@ -368,7 +368,7 @@ With `deadline_ms`, a degraded call shows up in `diagnostics.decisions` as `dead
 | `http_5xx` | ✅ | Upstream error; retry with backoff |
 | `http_4xx` | ❌ | 404/410 etc.; the page itself is invalid |
 | `blocked` | ❌ | Anti-bot blocked (Cloudflare/WAF/rate limit); retry later or verify manually |
-| `login_required` | ❌ | Login needed; call `login` first |
+| `login_required` | ❌ | The page actually offers a login affordance (password field / login wording); call `login` first. A bare 403 rejection page is reported as `blocked` |
 | `denied` / `robots_disallowed` | ❌ | Rejected by allow/deny lists or robots.txt |
 | `missing_required` | ❌ | A required field is missing; see `required_missing` |
 | `unsupported_content` | ❌ | Content type unsupported by this tool (e.g. PDF via `web_extract`); use `web_fetch`, install the `[pdf]` extra for PDFs |
@@ -616,7 +616,7 @@ The repo keeps a nightly-subset baseline in [benchmarks/baseline.json](benchmark
 Of the 4 failures, 3 were unreachable from the local network (Hacker News / V2EX / arXiv timed out) and 1 was blocked by the site (Bilibili returned `login_required`).
 The nightly job reruns these sites on GitHub's network; its `site-quality-<run_id>` artifact is the durable record.
 CI full corpus (2026-10-28): 37/37 passed, 32/33 content fetched, 4/4 intercepted, completeness 33/33, p50 842 ms / p95 5157 ms.
-The Paper's homepage is consistently rejected with `403`/`blocked=waf` from GitHub Actions egress (three full runs), while the same site's article page still returns 2827 characters, so the homepage is counted as an honestly-reported block with `expect: ["ok", "login_required"]`; content quality for that site is covered by the article page.
+The Paper's homepage is consistently rejected with `403`/`blocked=waf` from GitHub Actions egress (three full runs), while the same site's article page still returns 2827 characters, so the homepage is counted as an honestly-reported block with `expect: ["ok", "blocked", "login_required"]`; content quality for that site is covered by the article page.
 CI nightly subset (2026-10-28, 14 sites): 14/14 passed, 13/13 content fetched, 1/1 intercepted, 16/16 completeness, p50 504 ms / p95 1642 ms.
 
 `--reference trafilatura` only counts plain body text; this tool keeps headings, lists and links, so token counts are not directly equivalent — treat them as an order-of-magnitude check.

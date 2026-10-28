@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scrape_mcp.core.detector import detect_block
+from scrape_mcp.core.detector import detect_block, looks_like_login_wall
 
 NORMAL = "<html><body><article>" + "<p>正常正文内容。</p>" * 40 + "</article></body></html>"
 CF = "<html><head><title>Just a moment...</title></head><body>Checking your browser</body></html>"
@@ -46,3 +46,14 @@ def test_captcha_word_in_long_article_is_not_block():
 def test_empty_and_spa():
     assert detect_block(200, SPA)[0] == "empty_spa"
     assert detect_block(200, "<html><body></body></html>")[0] == "empty"
+
+
+def test_login_wall_needs_a_login_affordance():
+    login_page = '<html><body><form><input name="user"><input type="password"></form></body></html>'
+    assert looks_like_login_wall(login_page) is True
+    assert looks_like_login_wall("<html><body><a>登录</a></body></html>") is True
+    # 裸 403 拒绝页：没有密码框也没有登录字样，不该提示用户去登录
+    bare_block = (
+        "<html><head><title>Just a moment...</title></head><body>403 Forbidden</body></html>"
+    )
+    assert looks_like_login_wall(bare_block) is False

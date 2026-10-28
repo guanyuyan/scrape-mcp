@@ -5,8 +5,9 @@
 ## [Unreleased]
 
 ### Changed
+- 裸 403 不再提示登录：`waf` 类拦截（401/403/451/5xx）只有页面确实出现登录入口（密码框或「登录/密码/sign in」字样）才报 `login_required`，否则按 `blocked` 如实上报。此前澎湃首页这类出口/IP 风控的拒绝页会附上「调用 login 手动登录」，对用户是误导；Stack Overflow 的期望值随之放宽为 `["blocked", "login_required"]`
 - 基准的 `expect` 支持写成列表：同一站在不同出口结果不同时（如澎湃首页在 GitHub Actions 出口被 WAF 恒定 403、在住宅出口正常取正文），列表内任一结果都算符合预期
-- `thepaper-home` 期望值改为 `["ok", "login_required"]`。三次全量 CI 工件里它都是 `status=403`、`blocked=waf`、0 字，而同站 `thepaper-article` 稳定取到 2827 字——是首页路径对数据中心出口的 WAF 拦截，此前被记作「间歇性 `login_required`」；全量回归回到 37/37
+- `thepaper-home` 期望值改为 `["ok", "blocked", "login_required"]`。三次全量 CI 工件里它都是 `status=403`、`blocked=waf`、0 字，而同站 `thepaper-article` 稳定取到 2827 字——是首页路径对数据中心出口的 WAF 拦截，此前被记作「间歇性 `login_required`」；全量回归回到 37/37
 
 ## [0.14.1] - 2026-10-28
 

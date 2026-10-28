@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from ..config import Settings
 from . import deadline as budget
 from .browser import BrowserRenderer
-from .detector import detect_block, looks_like_shell
+from .detector import detect_block, looks_like_login_wall, looks_like_shell
 from .http_client import HttpClient
 from .proxy import ProxyPool, split_pool
 
@@ -489,7 +489,11 @@ class Fetcher:
             )
 
         blocked, reason = detect_block(result.status, result.html)
-        login_required = blocked in _LOGIN_CANDIDATES
+        # 只有页面上真的有登录入口时才提示用户去 login：裸 403（出口/IP 风控、WAF
+        # 拒绝页）登录也救不了，按 blocked 如实上报，别把人往没用的操作上引
+        login_required = blocked in _LOGIN_CANDIDATES and (
+            blocked != "waf" or looks_like_login_wall(result.html)
+        )
         return FetchOutcome(
             url=url,
             final_url=result.final_url or url,
