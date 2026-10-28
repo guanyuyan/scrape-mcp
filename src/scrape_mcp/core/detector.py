@@ -97,6 +97,33 @@ def looks_like_login_wall(html: str) -> bool:
     return any(marker in low for marker in _LOGIN_MARKERS)
 
 
+def is_terminal_rejection(status: int, html: str) -> bool:
+    """这次的拒绝是不是"等也没用"，可以立刻收工。
+
+    L2 的 settle 会反复重取页面等 JS 与挑战放行，所以那里刻意不看状态码
+    （Cloudflare 挑战的首个响应常是 403，几秒后自己放行）。但裸 4xx/5xx 拒绝页
+    （出口/IP 风控、WAF 拒绝）既没有挑战特征、也没有登录入口、还不是待渲染的
+    骨架页，等满整个窗口拿到的仍是同一个拒绝页——澎湃首页在数据中心出口就是这样
+    白等 8 秒、单站总耗时 10.5 秒。哪一类都算不上时，才判为已成定局。
+    """
+    if status < 400:
+        return False
+    # 页面还没渲染出任何内容时不能下定论：挑战脚本可能随后才注入
+    if not html.strip():
+        return False
+    low = html[:200_000].lower()
+    if any(marker in low for marker in _CLOUDFLARE_MARKERS):
+        return False
+    if any(marker in low for marker in _CAPTCHA_MARKERS):
+        return False
+    if looks_like_login_wall(html):
+        return False
+    # 骨架页（含 SPA 挂载点）的正文要等 JS 填，哪怕状态码是 4xx 也再给它一点时间
+    if any(marker in low for marker in _SPA_SHELL_MARKERS):
+        return False
+    return not looks_like_shell(html)
+
+
 def detect_block(status: int, html: str, content_type: str = "") -> tuple[BlockType, str]:
     low = html[:200_000].lower()
     visible = visible_text_length(html)

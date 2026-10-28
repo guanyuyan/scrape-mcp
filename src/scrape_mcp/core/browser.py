@@ -18,7 +18,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..config import Settings
-from .detector import detect_block, looks_like_shell
+from .detector import detect_block, is_terminal_rejection, looks_like_shell
 from .session import SessionStore
 from .singleflight import SingleFlight
 
@@ -461,7 +461,7 @@ class BrowserRenderer:
             wait_for_hit, clicked, scroll_rounds = await self._interact(
                 page, wait_for=wait_for, scroll=scroll, click=click, notes=notes, timeout=timeout
             )
-            html = await self._settle(page)
+            html = await self._settle(page, status=status)
             return BrowserOutcome(
                 ok=True,
                 url=url,
@@ -612,11 +612,14 @@ class BrowserRenderer:
             except Exception:
                 pass
 
-    async def _settle(self, page: Any) -> str:
+    async def _settle(self, page: Any, status: int | None = None) -> str:
         """等 JS 渲染/挑战放行：反复取内容，一旦得到"正常页"就提前返回。
 
         这里刻意用 status=200 调 detector：Cloudflare 挑战的首个响应常是 403/503，
         若带上真实状态码，页面放行后仍会因状态码被判成 waf，永远等不到出口。
+
+        ``status`` 是导航的真实响应码，只用于识别"已成定局的拒绝"：裸 4xx/5xx 拒绝页
+        等满窗口也只会拿到同一份内容，提前收工；挑战页/登录墙/骨架页照旧等下去。
         """
         start = time.perf_counter()
         deadline = start + self._s.l2_settle_timeout
@@ -625,6 +628,8 @@ class BrowserRenderer:
         while True:
             kind = _pending_kind(html)
             if kind is None:
+                return html
+            if status is not None and is_terminal_rejection(status, html):
                 return html
             cap = _SETTLE_CAP.get(kind)
             if cap is not None:

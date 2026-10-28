@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scrape_mcp.core.detector import detect_block, looks_like_login_wall
+from scrape_mcp.core.detector import detect_block, is_terminal_rejection, looks_like_login_wall
 
 NORMAL = "<html><body><article>" + "<p>正常正文内容。</p>" * 40 + "</article></body></html>"
 CF = "<html><head><title>Just a moment...</title></head><body>Checking your browser</body></html>"
@@ -57,3 +57,19 @@ def test_login_wall_needs_a_login_affordance():
         "<html><head><title>Just a moment...</title></head><body>403 Forbidden</body></html>"
     )
     assert looks_like_login_wall(bare_block) is False
+
+
+def test_terminal_rejection_only_for_bare_error_pages():
+    bare_block = "<html><body><h1>403 Forbidden</h1></body></html>"
+    assert is_terminal_rejection(403, bare_block) is True
+    assert is_terminal_rejection(500, bare_block) is True
+    # 正常页面即使状态码是 4xx 也不收工：还有挑战/放行的可能，交给原等待逻辑
+    assert is_terminal_rejection(200, NORMAL) is False
+    # Cloudflare 挑战常以 403 返回、几秒后自己放行，必须继续等
+    assert is_terminal_rejection(403, CF) is False
+    # 验证码、登录墙、待渲染的骨架页都要人/JS 参与，也不能提前收工
+    assert is_terminal_rejection(403, CAPTCHA) is False
+    assert is_terminal_rejection(403, '<html><body><input type="password"></body></html>') is False
+    assert is_terminal_rejection(403, SPA) is False
+    # 页面还没拿到任何内容时不下定论
+    assert is_terminal_rejection(403, "  ") is False

@@ -31,6 +31,7 @@ class _FakePage:
         self._fail_click = fail_click
         self._fail_scroll = fail_scroll
         self.scrolls = 0
+        self.content_calls = 0
         self.closed = False
 
     async def goto(self, _url: str, **_kwargs):
@@ -40,6 +41,7 @@ class _FakePage:
         return _Resp()
 
     async def content(self) -> str:
+        self.content_calls += 1
         return self._html
 
     async def wait_for_selector(self, _selector: str, **_kwargs) -> None:
@@ -138,6 +140,25 @@ def test_pending_kind_stops_early_for_text_light_but_real_pages():
     assert len(rich) >= 30000
     assert b.looks_like_shell(rich) is True  # L1 口径：仍算骨架页
     assert b._pending_kind(rich) is None  # settle 口径：正文已够，收工
+
+
+def test_settle_returns_at_once_for_bare_403(tmp_path):
+    """裸 403 拒绝页等也没用：只取一次内容就收工，不再空转整个等待窗口。"""
+    renderer = _renderer(tmp_path, l2_settle_timeout=8)
+    page = _FakePage(html="<html><body><h1>403 Forbidden</h1></body></html>")
+    html = asyncio.run(renderer._settle(page, status=403))
+
+    assert "403 Forbidden" in html
+    assert page.content_calls == 1
+
+
+def test_settle_keeps_waiting_for_challenge_pages(tmp_path):
+    """Cloudflare 挑战即使以 403 返回也照旧等：它不是已成定局的拒绝。"""
+    renderer = _renderer(tmp_path, l2_settle_timeout=0.05)
+    page = _FakePage(html="<html><body>Just a moment...</body></html>")
+    asyncio.run(renderer._settle(page, status=403))
+
+    assert page.content_calls > 1
 
 
 def test_is_logged_in_requires_content_and_left_login_path():
