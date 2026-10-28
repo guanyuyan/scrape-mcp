@@ -201,6 +201,59 @@ def test_render_reports_browser_start_failure(tmp_path, monkeypatch):
     assert "浏览器启动失败" in (out.error or "")
 
 
+async def test_concurrent_identical_renders_share_one_page(tmp_path, monkeypatch):
+    """完全相同的渲染请求并发时只开一次页面，其余复用同一份 HTML。"""
+    renderer = _renderer(tmp_path)
+    gate = asyncio.Event()
+    calls = 0
+
+    async def fake_render(url, host, t0, **_kwargs):
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        return b.BrowserOutcome(
+            ok=True, url=url, final_url=url, status=200, html=NORMAL_HTML, elapsed_ms=1
+        )
+
+    monkeypatch.setattr(renderer, "_render_once", fake_render)
+
+    first = asyncio.create_task(renderer.render(URL))
+    await asyncio.sleep(0.05)
+    second = asyncio.create_task(renderer.render(URL))
+    await asyncio.sleep(0.05)
+    gate.set()
+    one, two = await asyncio.gather(first, second)
+
+    assert calls == 1
+    assert one is two
+
+
+async def test_renders_with_different_options_are_independent(tmp_path, monkeypatch):
+    """交互参数不同就是不同的渲染，不能合并。"""
+    renderer = _renderer(tmp_path)
+    gate = asyncio.Event()
+    calls = 0
+
+    async def fake_render(url, host, t0, **_kwargs):
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        return b.BrowserOutcome(
+            ok=True, url=url, final_url=url, status=200, html=NORMAL_HTML, elapsed_ms=1
+        )
+
+    monkeypatch.setattr(renderer, "_render_once", fake_render)
+
+    first = asyncio.create_task(renderer.render(URL, scroll=True))
+    await asyncio.sleep(0.05)
+    second = asyncio.create_task(renderer.render(URL, scroll=False))
+    await asyncio.sleep(0.05)
+    gate.set()
+    await asyncio.gather(first, second)
+
+    assert calls == 2
+
+
 def test_launch_falls_back_across_channels(tmp_path):
     calls: list[dict] = []
 

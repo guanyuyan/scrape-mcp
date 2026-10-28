@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from ..config import Settings
 from .detector import detect_block, looks_like_shell
 from .session import SessionStore
+from .singleflight import SingleFlight
 
 # 挑战特征：命中说明 JS 还在跑或还没放行，值得继续等
 _CHALLENGE_TYPES = ("cloudflare", "captcha", "empty_spa", "empty")
@@ -136,6 +137,8 @@ class BrowserRenderer:
         self._queued = 0
         self._last_used = time.monotonic()
         self._reaper: asyncio.Task[None] | None = None
+        # 完全相同的渲染请求合并：并发打开同一页面时只跑一次
+        self._inflight = SingleFlight()
 
     def has_session(self, host: str, session: str = "default") -> bool:
         return self._sessions.has(host, session)
@@ -344,6 +347,46 @@ class BrowserRenderer:
     ) -> BrowserOutcome:
         t0 = time.perf_counter()
         host = host or urlparse(url).netloc.lower()
+        # 渲染结果只由 URL + 会话 + 交互参数决定；完全相同的并发请求合并成一次，
+        # 其余等待并复用同一份 HTML（多租户/批量同时打开同一页面时很常见）
+        identify = (
+            url,
+            host,
+            wait_for or "",
+            bool(scroll),
+            click or "",
+            session,
+            proxy or "",
+            timeout or 0.0,
+        )
+        return await self._inflight.run(
+            identify,
+            lambda: self._render_queued(
+                url,
+                host,
+                t0,
+                wait_for=wait_for,
+                scroll=scroll,
+                click=click,
+                session=session,
+                timeout=timeout,
+                proxy=proxy,
+            ),
+        )
+
+    async def _render_queued(
+        self,
+        url: str,
+        host: str,
+        t0: float,
+        *,
+        wait_for: str | None,
+        scroll: bool,
+        click: str | None,
+        session: str,
+        timeout: float | None,
+        proxy: str | None = None,
+    ) -> BrowserOutcome:
         # 并发页上限：超出时排队；排队期间不计入在途，空闲回收仍可正常关浏览器
         slots = self._page_slots()
         self._queued += 1

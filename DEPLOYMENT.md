@@ -112,6 +112,7 @@ scrape_configs:
 ## 7. 容量与资源
 
 - 并发上限由三层共同约束：HTTP 层 `HTTP_QPS`、抓取层 `MAX_QPS`、同域 `HOST_MAX_CONCURRENCY`（默认 2）
+- 同一 URL 的并发抓取会合并成一次（L1 响应与 L2 渲染都生效），重复链接不会成倍占用出口与浏览器页位；带自定义头/凭证或 `bypass_cache=true` 的请求不参与合并
 - 批量与爬取另有限额：`BATCH_MAX_CONCURRENCY`（4）、`BATCH_MAX_URLS`（20）、`CRAWL_MAX_PAGES`（20）
 - L2 同时打开的页面上限 `L2_MAX_PAGES`（3），常驻 context 上限 `L2_MAX_CONTEXTS`（8）
 - 内存：仅 L1 时 512MB 起步即可；启用 L2 建议 2GB 起步

@@ -9,11 +9,13 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from typing import Any
 
 from curl_cffi.requests import AsyncSession
 
 from ..config import Settings
 from .cache import HttpCache
+from .singleflight import SingleFlight
 
 _META_CHARSET = re.compile(rb'charset\s*=\s*["\']?\s*([\w-]+)', re.I)
 _HEADER_CHARSET = re.compile(r"charset\s*=\s*([\w-]+)", re.I)
@@ -78,6 +80,8 @@ class HttpClient:
         self._cache = HttpCache(settings.data_dir, settings.cache_ttl)
         # 指纹模板 → (创建时的事件循环, 会话)。同一指纹共用连接池，省 TLS 握手与 DNS 解析
         self._sessions: dict[str, tuple[asyncio.AbstractEventLoop, AsyncSession]] = {}
+        # 同 URL 的在途请求合并：并发命中同一页面时只真发一次
+        self._inflight = SingleFlight()
 
     def _session(self, impersonate: str) -> AsyncSession:
         """取复用会话；换事件循环（多次 asyncio.run）时丢弃旧会话重建。
@@ -116,7 +120,6 @@ class HttpClient:
         # 单请求显式代理可能因出口而异，调用方传 allow_cache=False。
         # 池化/全局代理属基础设施，结果仍可共享缓存。
         use_cache = allow_cache and not bypass_cache and not headers and not cookies
-        saved = None
         if use_cache:
             saved = self._cache.get(url)
             if saved is not None:
@@ -130,12 +133,43 @@ class HttpClient:
                     cached=True,
                 )
 
+        # 过期缓存不直接丢：带 ETag/Last-Modified 去问一次，304 就复用正文
+        stale = self._cache.get(url, allow_stale=True) if use_cache else None
+
+        async def send() -> HttpResponse:
+            return await self._request(
+                url,
+                headers=headers,
+                cookies=cookies,
+                impersonate=impersonate,
+                timeout=timeout,
+                proxy=proxy,
+                use_cache=use_cache,
+                stale=stale,
+            )
+
+        if not use_cache:
+            return await send()
+        # 共享缓存路径的结果与调用方身份无关，可合并并发的同一请求：
+        # 多个租户同时要同一页面时只抓一次，其余等结果后各自解析
+        return await self._inflight.run((impersonate or self._s.impersonate, url), send)
+
+    async def _request(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None,
+        cookies: dict[str, str] | None,
+        impersonate: str | None,
+        timeout: float | None,
+        proxy: str | None,
+        use_cache: bool,
+        stale: dict[str, Any] | None,
+    ) -> HttpResponse:
         t0 = time.perf_counter()
         merged = {"Accept-Language": self._s.accept_language}
         if headers:
             merged.update(headers)
-        # 过期缓存不直接丢：带 ETag/Last-Modified 去问一次，304 就复用正文
-        stale = self._cache.get(url, allow_stale=True) if use_cache else None
         if stale:
             if stale.get("etag"):
                 merged["If-None-Match"] = stale["etag"]

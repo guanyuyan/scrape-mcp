@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import ClassVar
 
@@ -208,3 +209,57 @@ def test_retry_after_parses_seconds_and_http_date():
     assert hc._parse_retry_after("not-a-date") is None
     future = hc._parse_retry_after("Wed, 21 Oct 2099 07:28:00 GMT")
     assert future is not None and future > 0
+
+
+async def test_concurrent_same_url_is_fetched_once(tmp_path, monkeypatch):
+    """同一 URL 的并发请求只真发一次，其余等待并复用同一份响应。"""
+    gate = asyncio.Event()
+    calls = 0
+
+    class _SlowSession(_FakeSession):
+        async def get(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            await gate.wait()
+            return type(self).response
+
+    monkeypatch.setattr(hc, "AsyncSession", _SlowSession)
+    _SlowSession.response = _FakeResponse()
+    client = hc.HttpClient(hc.Settings(data_dir=str(tmp_path), cache_ttl=300))
+
+    first = asyncio.create_task(client.get(URL))
+    await asyncio.sleep(0.05)
+    second = asyncio.create_task(client.get(URL))
+    await asyncio.sleep(0.05)
+    gate.set()
+    one, two = await asyncio.gather(first, second)
+
+    assert calls == 1
+    assert one.ok and two.ok
+    assert one.text == two.text == "<html><body>hi</body></html>"
+
+
+async def test_requests_with_identity_material_are_not_merged(tmp_path, monkeypatch):
+    """带自定义头/凭证的请求可能因人而异，不能合并。"""
+    gate = asyncio.Event()
+    calls = 0
+
+    class _SlowSession(_FakeSession):
+        async def get(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            await gate.wait()
+            return type(self).response
+
+    monkeypatch.setattr(hc, "AsyncSession", _SlowSession)
+    _SlowSession.response = _FakeResponse()
+    client = hc.HttpClient(hc.Settings(data_dir=str(tmp_path), cache_ttl=300))
+
+    first = asyncio.create_task(client.get(URL, headers={"X-Test": "1"}))
+    await asyncio.sleep(0.05)
+    second = asyncio.create_task(client.get(URL, cookies={"sid": "1"}))
+    await asyncio.sleep(0.05)
+    gate.set()
+    await asyncio.gather(first, second)
+
+    assert calls == 2
