@@ -119,6 +119,26 @@ def test_compare_baseline_flags_content_regression():
     assert rows[0]["char_delta"] == -0.3
 
 
+def test_compare_latency_flags_only_big_slowdowns():
+    baseline = {"records": [{"id": "a", "elapsed_ms": 1000}, {"id": "b", "elapsed_ms": 10000}]}
+    # a：阈值 max(1s×3, 1s+3s)=4s，5s 判退化
+    # b：阈值 max(10s×3, 10s+3s)=30s，20s 仍在正常抖动范围
+    rows = bench.compare_latency(
+        [_record(id="a", elapsed_ms=5000), _record(id="b", elapsed_ms=20000)], baseline
+    )
+    assert [row["id"] for row in rows] == ["a"]
+    assert rows[0]["limit_ms"] == 4000
+    assert rows[0]["ratio"] == 5.0
+
+
+def test_compare_latency_ignores_jitter_and_unknown_sites():
+    baseline = {"records": [{"id": "a", "elapsed_ms": 300}]}
+    # 快站从 300ms 抖到 900ms 属正常，不报警
+    assert bench.compare_latency([_record(id="a", elapsed_ms=900)], baseline) == []
+    # 基线里没有的站点不参与对比
+    assert bench.compare_latency([_record(id="gone", elapsed_ms=99000)], baseline) == []
+
+
 def test_render_markdown_includes_reference_ratio():
     records = [_record(id="a", tokens=100)]
     text = bench.render_markdown(

@@ -2,8 +2,8 @@ name: Nightly real-site regression
 
 # 每天跑一遍真实站点，尽早发现"站点改版 / 我们的链路退化"。
 # 1) demo.py：覆盖三类页面的可用性冒烟，全部失败视为整条链路故障。
-# 2) bench_sites.py：分层站点集的质量基准，通过率低于阈值时开 issue，
-#    结果以 Markdown/JSON 工件留档，便于对比历史。
+# 2) bench_sites.py：分层站点集的质量基准，通过率低于阈值、或有站点耗时超出基线
+#    倍数时开 issue，结果以 Markdown/JSON 工件留档，便于对比历史。
 on:
   schedule:
     - cron: "0 16 * * *" # UTC 16:00 = 北京时间次日 00:00
@@ -51,6 +51,7 @@ jobs:
           python scripts/bench_sites.py $FLAG \
             --deadline-ms 45000 \
             --fail-under 0.6 \
+            --baseline benchmarks/baseline.json \
             --json bench-sites.json \
             --md bench-sites.md
       - name: Upload benchmark result
@@ -76,5 +77,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh issue create \
-            --title "夜间质量基准通过率过低 $(date -u +%F)" \
-            --body "分层站点集的通过率低于阈值，请查看本次运行的站点质量工件（site-quality-${{ github.run_id }}）与日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --title "夜间基准未达阈值 $(date -u +%F)" \
+            --body "分层站点集的通过率低于阈值，或有站点耗时超过基线倍数（3× 且至少慢 3 秒），请查看本次运行的站点质量工件（site-quality-${{ github.run_id }}）与日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

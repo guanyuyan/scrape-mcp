@@ -374,6 +374,52 @@ def print_baseline(rows: list[dict[str, Any]]) -> None:
         )
 
 
+def compare_latency(
+    records: list[dict[str, Any]],
+    baseline: dict[str, Any],
+    *,
+    factor: float = 3.0,
+    floor_ms: int = 3000,
+) -> list[dict[str, Any]]:
+    """逐站耗时与基线对比，返回超出阈值的站点。
+
+    阈值取 ``max(基线 × factor, 基线 + floor_ms)``：跨 runner、跨出口的抖动常见在
+    一两秒量级，绝对下限先挡掉这部分；倍数再挡"基线本身就慢"的站——对 10 秒的站
+    放宽到 30 秒才有意义，否则一次网络抖动就会天天报警。
+    """
+    previous = {r["id"]: r for r in baseline.get("records", [])}
+    rows: list[dict[str, Any]] = []
+    for r in records:
+        old = previous.get(r["id"])
+        if not old or not old.get("elapsed_ms") or not r.get("elapsed_ms"):
+            continue
+        limit = max(old["elapsed_ms"] * factor, old["elapsed_ms"] + floor_ms)
+        if r["elapsed_ms"] <= limit:
+            continue
+        rows.append(
+            {
+                "id": r["id"],
+                "baseline_ms": old["elapsed_ms"],
+                "elapsed_ms": r["elapsed_ms"],
+                "limit_ms": int(limit),
+                "ratio": r["elapsed_ms"] / old["elapsed_ms"],
+            }
+        )
+    return sorted(rows, key=lambda row: -row["ratio"])
+
+
+def print_latency(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        print("\n耗时对比：没有站点超出基线阈值")
+        return
+    print("\n耗时回归（超出基线阈值）")
+    for row in rows:
+        print(
+            f"  {row['id']}: {row['baseline_ms']}ms → {row['elapsed_ms']}ms"
+            f"（{row['ratio']:.1f}×，阈值 {row['limit_ms']}ms）"
+        )
+
+
 async def reference_stats(url: str, timeout: float, proxy: str | None) -> dict[str, Any] | None:
     """用第三方正文抽取器做同页对照；未安装或失败时返回 None。"""
     try:
@@ -403,7 +449,19 @@ async def main() -> int:
     parser.add_argument("--deadline-ms", type=int, default=60000, help="单站总预算（毫秒）")
     parser.add_argument("--json", type=Path, help="把完整结果写入 JSON")
     parser.add_argument("--md", type=Path, help="把结果表格写入 Markdown")
-    parser.add_argument("--baseline", type=Path, help="与上次 JSON 结果对比")
+    parser.add_argument("--baseline", type=Path, help="与上次 JSON 结果对比（正文与逐站耗时）")
+    parser.add_argument(
+        "--latency-factor",
+        type=float,
+        default=3.0,
+        help="逐站耗时超过基线的多少倍算退化（与 --baseline 一起用）",
+    )
+    parser.add_argument(
+        "--latency-floor-ms",
+        type=int,
+        default=3000,
+        help="耗时退化的绝对下限（毫秒）：比基线慢不超过这个量级不算退化",
+    )
     parser.add_argument(
         "--reference",
         choices=["trafilatura"],
@@ -449,9 +507,17 @@ async def main() -> int:
     if reference:
         print_reference(records, reference)
 
+    latency_rows: list[dict[str, Any]] = []
     if args.baseline:
         baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
         print_baseline(compare_baseline(records, baseline))
+        latency_rows = compare_latency(
+            records,
+            baseline,
+            factor=args.latency_factor,
+            floor_ms=args.latency_floor_ms,
+        )
+        print_latency(latency_rows)
 
     result = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -475,6 +541,9 @@ async def main() -> int:
             f"\n通过率 {summary['pass_rate']:.1%} 低于阈值 {args.fail_under:.1%}",
             file=sys.stderr,
         )
+        return 1
+    if latency_rows:
+        print(f"\n{len(latency_rows)} 个站点耗时超出基线阈值", file=sys.stderr)
         return 1
     return 0
 

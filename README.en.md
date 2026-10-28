@@ -609,6 +609,7 @@ The corpus lives in [benchmarks/sites.json](benchmarks/sites.json) and is groupe
 
 The output covers pass rate, fetch rate, interception rate, completeness, tokens, p50/p95 latency and tier distribution, and can be saved as JSON / Markdown.
 `--baseline` compares per site with a previous run and flags a regression when content characters drop by more than 20%.
+The same baseline gates latency: a site is flagged (non-zero exit, and the nightly job opens an issue) when it takes longer than `max(baseline × 3, baseline + 3000 ms)`; tune with `--latency-factor` / `--latency-floor-ms`.
 
 The repo keeps a nightly-subset baseline in [benchmarks/baseline.json](benchmarks/baseline.json), re-recorded on 2026-10-28 along with the corpus expansion (14/14 passed, p50 504 ms / p95 1642 ms). It only covers the nightly subset and is meant for trend checking, not as the pass rate of the full corpus. Update it monthly: download a `bench-sites.json`, set `sites_file` to a relative path, add a `source` field, and replace the file.
 

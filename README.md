@@ -619,6 +619,7 @@ python scripts/bench_sites.py --reference trafilatura
 
 输出包含通过率、取正文率、拦截符合率、完整度、token、p50/p95 延迟与分层分布，可写 JSON / Markdown 留档。
 `--baseline` 会按站点对比上次结果，并把正文字符下降超过 20% 的站点标为退化。
+同一份基线还用于耗时门禁：某站耗时超过 `max(基线 × 3, 基线 + 3000ms)` 即判为退化、退出码非零，夜间工作流据此开 issue；两个阈值可用 `--latency-factor` / `--latency-floor-ms` 调整。
 
 仓库里保留一份夜间子集基线 [benchmarks/baseline.json](benchmarks/baseline.json)，2026-10-28 随扩容重录（14/14 通过，p50 504 ms / p95 1642 ms）。它只覆盖夜间子集，用于看趋势，不代表全量站点通过率；每月挑一次夜间结果更新：下载当次 `bench-sites.json`，把 `sites_file` 改为相对路径、补上 `source` 字段后替换该文件。
 
