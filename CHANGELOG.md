@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.13.0] - 2026-10-28
 
 ### Added
 - **耗时直方图**：`scrape_mcp_fetch_duration_seconds`（按 `tier` 分桶 `0.1`/`0.3`/`1`/`3`/`10`/`+Inf` 秒），可直接用 `histogram_quantile` 算分层 p95，不再需要读 `/stats` 的窗口分位数
