@@ -44,9 +44,11 @@ jobs:
         if: always()
         continue-on-error: true
         env:
-          SCOPE_FLAG: ${{ inputs.scope == 'all' && '' || '--nightly' }}
+          SCOPE: ${{ inputs.scope }}
         run: |
-          python scripts/bench_sites.py $SCOPE_FLAG \
+          FLAG=""
+          if [ "$SCOPE" != "all" ]; then FLAG="--nightly"; fi
+          python scripts/bench_sites.py $FLAG \
             --deadline-ms 45000 \
             --fail-under 0.6 \
             --json bench-sites.json \
