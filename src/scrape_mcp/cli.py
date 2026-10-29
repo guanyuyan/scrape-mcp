@@ -324,10 +324,144 @@ async def _list_tools() -> list[Any]:
     return await mcp.list_tools()
 
 
+def _recipe_entries(directory: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """读目录里的 *.json；坏文件不抛错，交给调用方登记为问题。"""
+    entries: list[tuple[Path, dict[str, Any]]] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            data = {}
+        entries.append((path, data if isinstance(data, dict) else {}))
+    return entries
+
+
+def _recipe_summary(data: dict[str, Any]) -> str:
+    """一行摘要：只列真正会改变抓取行为的开关。"""
+    parts: list[str] = []
+    for key, label in (("root_selector", "root"), ("wait_for", "wait"), ("click", "click")):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{label}={value.strip()}")
+    if data.get("scroll") is True:
+        parts.append("scroll")
+    extract = data.get("extract")
+    if isinstance(extract, dict):
+        fields = extract.get("fields") if isinstance(extract.get("fields"), dict) else extract
+        if isinstance(fields, dict) and fields:
+            parts.append(f"extract={len(fields)} 字段")
+    crawl = data.get("crawl") if isinstance(data.get("crawl"), dict) else {}
+    if crawl:
+        next_selector = crawl.get("next_selector")
+        pages = crawl.get("max_pages")
+        bits = []
+        if isinstance(next_selector, str) and next_selector.strip():
+            bits.append(next_selector.strip())
+        if isinstance(pages, int) and pages > 0:
+            bits.append(f"≤{pages} 页")
+        if bits:
+            parts.append("crawl=" + " ".join(bits))
+    return " · ".join(parts) or "（仅按主机匹配，不改行为）"
+
+
+def _cmd_recipe(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="scrape-mcp recipe",
+        description="查看与校验站点 recipe（JSON）：先本地验结构，再放进 recipe 目录。",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    lister = sub.add_parser("list", help="列出目录里的 recipe（生效主机、文件、启用项）")
+    lister.add_argument("--dir", help="recipe 目录；缺省为 <DATA_DIR>/recipes")
+    checker = sub.add_parser("validate", help="校验结构、选择器语法与抽取 schema")
+    checker.add_argument("paths", nargs="*", help="要校验的 .json 文件或目录；缺省校验默认目录")
+    checker.add_argument("--strict", action="store_true", help="把警告也视为失败")
+    args = parser.parse_args(argv)
+
+    from .core.recipes import (
+        RecipeIssue,
+        default_recipe_dir,
+        recipe_host,
+        validate_recipe_file,
+    )
+
+    if args.action == "list":
+        directory = Path(args.dir).expanduser() if args.dir else default_recipe_dir()
+        if not directory.is_dir():
+            print(f"[空] 目录不存在：{directory}（可用 RECIPES_DIR 或 --dir 指定）")
+            return 0
+        entries = _recipe_entries(directory)
+        if not entries:
+            print(f"[空] {directory} 下没有 .json recipe")
+            return 0
+        width = max((len(recipe_host(data, path.stem)) for path, data in entries), default=0)
+        for path, data in entries:
+            host = recipe_host(data, path.stem)
+            print(f"{host:<{width}}  {path.name:<28}  {_recipe_summary(data)}")
+        print(f"\n共 {len(entries)} 个 recipe（{directory}）")
+        return 0
+
+    targets = [Path(item).expanduser() for item in args.paths] or [default_recipe_dir()]
+    files: list[Path] = []
+    for target in targets:
+        if target.is_dir():
+            found = sorted(target.glob("*.json"))
+            if not found:
+                print(f"[空] {target} 下没有 .json recipe")
+            files.extend(found)
+        elif target.is_file():
+            files.append(target)
+        else:
+            print(f"[错误] 找不到 {target}", file=sys.stderr)
+            return 2
+    if not files:
+        return 0
+
+    errors = warnings = 0
+    seen: dict[str, Path] = {}
+    for path in files:
+        issues = validate_recipe_file(path)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            data = None
+        if isinstance(data, dict):
+            host = recipe_host(data, path.stem)
+            first = seen.get(host)
+            if first is not None:
+                issues.append(
+                    RecipeIssue(
+                        "warning",
+                        f"host {host} 与 {first.name} 重复；加载时按目录顺序以最后一个为准",
+                    )
+                )
+            else:
+                seen[host] = path
+        if not issues:
+            continue
+        print(f"[文件] {path}")
+        for issue in issues:
+            print(f"  {issue}")
+            if issue.level == "error":
+                errors += 1
+            else:
+                warnings += 1
+
+    summary = f"{len(files)} 个文件，{errors} 个错误、{warnings} 个警告"
+    if errors:
+        print(f"\n[失败] {summary}", file=sys.stderr)
+        return 1
+    if warnings and args.strict:
+        print(f"\n[失败] {summary}（--strict 把警告视为失败）", file=sys.stderr)
+        return 1
+    print(f"\n[完成] {summary}")
+    return 0
+
+
 def run(argv: list[str]) -> int:
     """执行子命令；未知子命令给出用法提示。"""
+    usage = "用法: scrape-mcp <init|schema|session|recipe> ..."
     if not argv:
-        print("用法: scrape-mcp <init|schema|session> ...", file=sys.stderr)
+        print(usage, file=sys.stderr)
         return 2
     command, rest = argv[0], argv[1:]
     if command == "init":
@@ -336,5 +470,7 @@ def run(argv: list[str]) -> int:
         return _cmd_schema(rest)
     if command == "session":
         return _cmd_session(rest)
-    print(f"未知子命令: {command}\n用法: scrape-mcp <init|schema|session> ...", file=sys.stderr)
+    if command == "recipe":
+        return _cmd_recipe(rest)
+    print(f"未知子命令: {command}\n{usage}", file=sys.stderr)
     return 2

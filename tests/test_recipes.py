@@ -231,3 +231,86 @@ def test_extract_without_schema_or_recipe_rejected(tmp_path, monkeypatch):
     assert out["ok"] is False
     assert out["error_code"] == "invalid_argument"
     assert out["retryable"] is False
+
+
+# ---- recipe 校验命令 ----
+
+
+def test_validate_clean_recipe_has_no_issues():
+    from scrape_mcp.core.recipes import validate_recipe_data
+
+    data = {"host": "example.com", "root_selector": "main article", "scroll": True}
+    assert validate_recipe_data(data, "example.com") == []
+
+
+def test_validate_flags_broken_selector_and_extract_schema():
+    from scrape_mcp.core.recipes import validate_recipe_data
+
+    issues = validate_recipe_data(
+        {
+            "host": "example.com",
+            "root_selector": "div[[",
+            "extract": {"fields": {"t": {"type": "attr", "selector": "h1"}}},
+        },
+        "example.com",
+    )
+    text = " ".join(str(issue) for issue in issues)
+    assert "root_selector" in text
+    assert "必须提供 attr" in text
+    assert all(issue.level == "error" for issue in issues)
+
+
+def test_validate_suggests_close_key_and_notes_host_mismatch():
+    from scrape_mcp.core.recipes import validate_recipe_data
+
+    issues = validate_recipe_data({"host": "other.com", "waitfor": "main"}, "example.com")
+    text = " ".join(str(issue) for issue in issues)
+    assert "是不是 wait_for" in text
+    assert "与文件名 example.com.json 不一致" in text
+    assert all(issue.level == "warning" for issue in issues)
+
+
+def test_validate_handles_bad_host_and_broken_json(tmp_path):
+    from scrape_mcp.core.recipes import validate_recipe_file
+
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"host": "https://x.com", "scroll": "yes"}), encoding="utf-8")
+    assert [issue.level for issue in validate_recipe_file(bad)] == ["error", "error"]
+
+    broken = tmp_path / "broken.json"
+    broken.write_text('{"host": ', encoding="utf-8")
+    assert validate_recipe_file(broken)[0].level == "error"
+
+
+def test_cli_recipe_validate_and_list(tmp_path, capsys):
+    from scrape_mcp import cli
+
+    _write(tmp_path, "example.com.json", {"host": "example.com", "root_selector": "main"})
+    assert cli.run(["recipe", "validate", str(tmp_path)]) == 0
+    assert "0 个错误" in capsys.readouterr().out
+
+    _write(tmp_path, "bad.com.json", {"host": "bad.com", "crawl": {"max_pages": 0}})
+    assert cli.run(["recipe", "validate", str(tmp_path)]) == 1
+
+    assert cli.run(["recipe", "list", "--dir", str(tmp_path)]) == 0
+    listing = capsys.readouterr().out
+    assert "example.com" in listing
+    assert "root=main" in listing
+
+
+def test_cli_recipe_validate_strict_and_duplicates(tmp_path, capsys):
+    from scrape_mcp import cli
+
+    _write(tmp_path, "a.json", {"host": "same.com"})
+    _write(tmp_path, "b.json", {"host": "same.com"})
+    assert cli.run(["recipe", "validate", str(tmp_path)]) == 0
+    assert "重复" in capsys.readouterr().out
+    assert cli.run(["recipe", "validate", str(tmp_path), "--strict"]) == 1
+
+
+def test_bom_recipe_is_loaded(tmp_path):
+    from scrape_mcp.core.recipes import RecipeStore
+
+    payload = json.dumps({"host": "bom.example", "root_selector": "main"})
+    (tmp_path / "bom.example.json").write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
+    assert [recipe.host for recipe in RecipeStore(tmp_path).all()] == ["bom.example"]

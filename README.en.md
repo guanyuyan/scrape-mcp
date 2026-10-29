@@ -516,6 +516,21 @@ web_crawl(url="https://docs.python.org/3/library/asyncio.html", max_pages=3)
 
 > Selectors were verified in 2026-10. If a site is redesigned, updating one selector restores it.
 
+#### Validate and share
+
+Check a recipe locally before shipping it — you do not want to discover a bad selector at runtime:
+
+```bash
+scrape-mcp recipe validate examples/recipes          # validate a directory (no path = RECIPES_DIR)
+scrape-mcp recipe validate ~/my-recipe.json          # or a single file
+scrape-mcp recipe validate examples/recipes --strict # warnings fail too, good for CI
+scrape-mcp recipe list                               # list effective recipes: host, file, knobs
+```
+
+It reports JSON/encoding problems (including the BOM older Windows editors write), unknown keys (with "did you mean `wait_for`?" hints), malformed hosts, selector syntax (checked with the same parser used at runtime), `extract` schema errors, and duplicate hosts in one directory. Exit codes 0 / 1 / 2 make it pipeline-friendly.
+
+`examples/recipes/` doubles as the community collection: adding a recipe means dropping in a `<host>.json` and getting it through `recipe validate`; CI validates all eight with `--strict`.
+
 Per-call overrides: explicit arguments beat the recipe, e.g. `web_fetch(url="...", wait_for=".comments")`.
 
 ## Python SDK

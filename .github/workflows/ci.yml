@@ -36,6 +36,9 @@ jobs:
           pip install -e ".[dev]"
       - name: Test
         run: pytest -q --cov --cov-report=term-missing
+      - name: Validate example recipes
+        # 社区配方集坏掉（选择器语法、schema、host 重复）就当场失败，别等用户复制回去才炸
+        run: python -m scrape_mcp.server recipe validate examples/recipes --strict
 
   audit:
     runs-on: ubuntu-latest

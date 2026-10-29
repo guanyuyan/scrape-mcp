@@ -1733,8 +1733,8 @@ def main(argv: list[str] | None = None) -> None:
     """
     if argv is None:
         argv = sys.argv[1:]
-    # 子命令（init / schema / session）走独立模块，不启动服务；其余参数保持原有零配置行为
-    if argv and argv[0] in ("init", "schema", "session"):
+    # 子命令（init / schema / session / recipe）走独立模块，不启动服务；其余参数保持原有零配置行为
+    if argv and argv[0] in ("init", "schema", "session", "recipe"):
         from .cli import run as run_subcommand
 
         raise SystemExit(run_subcommand(argv))
@@ -1746,10 +1746,12 @@ def main(argv: list[str] | None = None) -> None:
             "用法: scrape-mcp [--transport stdio|streamable-http] [--port N] [--version]\n"
             "      scrape-mcp init [--client claude|cursor|vscode|json] [--write]\n"
             "      scrape-mcp schema [--tool NAME] [--output FILE]\n"
-            "      scrape-mcp session <list|import> [...]\n\n"
+            "      scrape-mcp session <list|import> [...]\n"
+            "      scrape-mcp recipe <list|validate> [...]\n\n"
             "零配置默认作为 stdio MCP 服务运行，供 Claude/Cursor 等客户端接管。\n"
             "init 生成客户端配置（默认只预览 diff），schema 导出工具定义，\n"
-            "session 查看或导入登录态（容器内无法开浏览器时用 import 导入 cookies）。\n"
+            "session 查看或导入登录态（容器内无法开浏览器时用 import 导入 cookies），\n"
+            "recipe 列出或校验站点 recipe（放进 RECIPES_DIR 即自动生效）。\n"
             "如需 HTTP 直连（Postman/curl），加 --transport streamable-http [--port 8000]；\n"
             "绑定非回环地址时必须设置 SCRAPE_MCP_HTTP_TOKEN。\n"
             "配置详见 .env / SCRAPE_MCP_* 环境变量。"

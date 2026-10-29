@@ -2,6 +2,12 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- 新增 `scrape-mcp recipe list|validate` 子命令：`validate` 校验 recipe 的 JSON、未知字段（带近似提示）、主机名、选择器语法（用运行时同一个解析器）、`extract` schema 与目录内 host 重复，支持 `--strict`，退出码 0/1/2 可直接挂 CI；CI 已对 `examples/recipes` 全量做 `--strict` 校验
+- recipe 读取改用 `utf-8-sig`：Windows 记事本等编辑器写出带 BOM 的 JSON 不再被静默跳过
+
 ## [0.16.0] - 2026-10-29
 
 ### Added

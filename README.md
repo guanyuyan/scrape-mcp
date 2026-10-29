@@ -526,6 +526,21 @@ web_crawl(url="https://docs.python.org/3/library/asyncio.html", max_pages=3)
 
 > 示例选择器于 2026-10 实测通过；站点改版后失效属正常现象，改一行 selector 即可恢复。
 
+#### 校验与共享
+
+写完先本地验一遍，别等运行时才发现选择器写错：
+
+```bash
+scrape-mcp recipe validate examples/recipes          # 校验目录（不传路径则校验 RECIPES_DIR）
+scrape-mcp recipe validate ~/my-recipe.json          # 或单个文件
+scrape-mcp recipe validate examples/recipes --strict # 警告也算失败，适合挂 CI
+scrape-mcp recipe list                               # 列出已生效的 recipe：主机、文件、启用项
+```
+
+它会指出：JSON/编码问题（含 Windows 记事本写出的 BOM）、未知字段（带「是不是 `wait_for`？」式近似提示）、非法主机名、选择器语法（用运行时同一个解析器验）、`extract` 的 schema 错误，以及同一目录里 host 重复。退出码 0（通过）/ 1（有问题）/ 2（找不到文件），可直接用于流水线。
+
+`examples/recipes/` 就是社区配方集：加一份新配方 = 放一个 `<host>.json` 并用 `recipe validate` 验过；CI 会以 `--strict` 校验这八份，坏配方进不来。
+
 单次覆盖：显式参数优先于 recipe，例如 `web_fetch(url="...", wait_for=".comments")`。
 
 ## Python SDK
