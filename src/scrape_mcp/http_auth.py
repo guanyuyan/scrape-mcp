@@ -18,8 +18,9 @@ from . import metrics
 # 绑定与来源判断共用的回环地址集合（含 IPv4-mapped IPv6）
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"})
 
-# 容器探针与网关巡检需要无凭证访问；响应里只有版本与开关，不含抓取数据
-EXEMPT_PATHS = frozenset({"/healthz"})
+# 容器探针与网关巡检需要无凭证访问；响应里只有版本与开关，不含抓取数据。
+# `/` 是内置看板的 HTML 空壳，数据要靠页面自己带令牌去读 /stats 与 /metrics，故一并放行。
+EXEMPT_PATHS = frozenset({"/healthz", "/"})
 
 # 指标端点按固定间隔被抓取，若计入 QPS/日配额，监控自己就会吃掉调用额度；
 # 这里只跳过配额，鉴权照旧（配置令牌后仍需 Bearer）

@@ -11,9 +11,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from mcp.server.mcpserver import Context, MCPServer
-from starlette.responses import JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from . import __version__, metrics
+from . import __version__, dashboard, metrics
 from .config import get_settings
 from .core import deadline as dl
 from .core import errors
@@ -292,6 +292,16 @@ async def _lifespan(_app):
 
 
 mcp = MCPServer("scrape-mcp", lifespan=_lifespan)
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def dashboard_page(_request) -> Response:
+    """内置看板：只是 HTML 空壳，数据由页面自己去读 ``/stats`` 与 ``/metrics``。
+
+    页面本身不含任何抓取数据，所以放在鉴权豁免里；真正的数据仍走 Bearer 鉴权，
+    令牌由用户在页面上填一次并存到 localStorage。
+    """
+    return HTMLResponse(dashboard.render())
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

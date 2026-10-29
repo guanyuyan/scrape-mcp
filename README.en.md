@@ -105,6 +105,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Two cache layers**: HTTP responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; compacted content and extraction results get their own cache so repeat calls return immediately. `bypass_cache=true` skips both layers. `web_batch` fetches a list concurrently.
 - **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped.
 - **Change detection**: `web_watch` keeps a snapshot of the body after every successful fetch and reports `changed` plus an added/removed line summary on the next call; pass `selector` to watch just one block (leaderboard, price box). Failed fetches never overwrite the snapshot, so changes that happened during a block are still visible afterwards.
+- **Built-in dashboard**: in HTTP mode, open `/` to see request volume, L1/L2 split, latency percentiles and buckets, result codes, content kinds, L2 page slots and proxy-pool health; single-file HTML, no external assets, refreshed every 5 seconds.
 - **Total budget with degradation**: `web_fetch` / `web_extract` / `web_batch` / `web_crawl` accept `deadline_ms`. When time runs short it degrades step by step — cap each request → skip retries → skip L2 rendering → return `timeout` — while any content already fetched is still returned. Degraded results are never cached, so later calls with a larger budget cannot inherit truncated content. The budget also covers the compliance stage (rate-limit wait and robots.txt fetch): if it is too tight, the call returns `timeout` early instead of burning the budget on preparation.
 - **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent.
 - **Site recipes**: keep per-site rendering hints, root selector, extraction schema and pagination rules in a JSON file; later calls need no arguments, and per-call arguments still win.
@@ -183,7 +184,7 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `ALLOWED_HOSTS` | — | Comma-separated allowlist; when set, only these hosts are allowed |
 | `DENIED_HOSTS` | — | Comma-separated denylist, takes precedence over the allowlist |
 | `MAX_QPS` | `10` | Global request rate limit (requests/second); `0` disables |
-| `HTTP_TOKEN` | — | HTTP access token; when set, all endpoints except `/healthz` require Bearer auth, and it is mandatory for non-loopback binds (mutually exclusive with multi-token) |
+| `HTTP_TOKEN` | — | HTTP access token; when set, all endpoints except `/healthz` and the dashboard shell `/` require Bearer auth, and it is mandatory for non-loopback binds (mutually exclusive with multi-token) |
 | `HTTP_TOKENS` | — | Multi-token JSON: `[{"name","token","qps","daily_quota"}]`, each tenant gets its own quota; exclusive with `HTTP_TOKEN` |
 | `HTTP_TOKENS_FILE` | — | Path to the same JSON format, handy for keeping tokens on a volume (exclusive with `HTTP_TOKENS`) |
 | `HTTP_QPS` | `5` | Per-token request rate (token bucket, allows an equal burst); also the default for tenants that omit `qps`; `0` disables |
@@ -204,7 +205,7 @@ python -m scrape_mcp.server
 
 It starts with `json_response=1` (the default), so requests and responses are plain JSON rather than streams. **In stateless mode there is no `initialize` handshake — send `tools/call` directly.**
 
-**Access token**: when `SCRAPE_MCP_HTTP_TOKEN` is set, every request except `GET /healthz` must carry:
+**Access token**: when `SCRAPE_MCP_HTTP_TOKEN` is set, every request except `GET /healthz` and the dashboard shell `GET /` must carry:
 
 ```bash
 curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000/stats
@@ -227,6 +228,15 @@ Without a token the server only binds to `127.0.0.1` / `localhost` / `::1`; bind
 - Tenant names and tokens must be unique; invalid config (bad JSON, missing `name`/`token`, duplicates) aborts startup
 - Mutually exclusive with a single `HTTP_TOKEN`, and `HTTP_TOKENS` vs `HTTP_TOKENS_FILE` are exclusive too
 - Each tenant shows up in `/metrics` as `scrape_mcp_tenant_requests_total{tenant}` and `scrape_mcp_tenant_rejections_total{tenant,reason}`; 429 bodies reveal nothing about other callers
+
+Dashboard: `GET /` serves a built-in runtime dashboard (single-file HTML, no external assets or CDN) showing request volume, L1/L2 split, latency p50/p95/p99 plus buckets, result codes, content kinds, L2 page slots and proxy-pool health, refreshed every 5 seconds.
+
+```bash
+scrape-mcp --transport streamable-http --port 8000
+# open http://127.0.0.1:8000/ in a browser
+```
+
+The page itself is an empty shell (no fetch data), so it is served without auth; the data still goes through `/stats` and `/metrics` auth. With a token configured the page gets a 401 first, asks for the token once, keeps it in localStorage and sends it on every refresh.
 
 Health check: `GET /healthz` always stays unauthenticated so container probes and gateways can use it.
 

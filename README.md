@@ -109,6 +109,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。
 - **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
+- **内置运行看板**：HTTP 模式下打开 `/` 即见请求量、L1/L2 分布、耗时分位与分桶、结果码、正文类型、L2 页位与代理池健康度；单文件 HTML，无外部依赖，每 5 秒自动刷新。
 - **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
 - **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`。
 - **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
@@ -189,7 +190,7 @@ cp .env.example .env    # 生成配置模板
 | `ALLOWED_HOSTS` | — | 主机白名单（逗号分隔）；非空时仅允许名单内主机 |
 | `DENIED_HOSTS` | — | 主机黑名单（逗号分隔），优先于白名单 |
 | `MAX_QPS` | `10` | 全网抓取限流（每秒请求数）；`0` 不限速 |
-| `HTTP_TOKEN` | — | HTTP 模式访问令牌；设置后除 `/healthz` 外都需 Bearer，绑定非回环地址时必填（与多令牌互斥） |
+| `HTTP_TOKEN` | — | HTTP 模式访问令牌；设置后除 `/healthz` 与看板空壳 `/` 外都需 Bearer，绑定非回环地址时必填（与多令牌互斥） |
 | `HTTP_TOKENS` | — | 多令牌 JSON：`[{"name","token","qps","daily_quota"}]`，每个租户独立配额；与 `HTTP_TOKEN` 互斥 |
 | `HTTP_TOKENS_FILE` | — | 同格式 JSON 文件路径；适合把令牌放卷上保管（与 `HTTP_TOKENS` 互斥） |
 | `HTTP_QPS` | `5` | 每秒请求上限（令牌桶，允许同量突发）；多令牌时作为省略 `qps` 的租户默认值；`0` 不限 |
@@ -210,7 +211,7 @@ python -m scrape_mcp.server
 
 以 `json_response=1`（默认）启动，请求/响应都是普通 JSON（非事件流）。**stateless 模式无需先 `initialize`，直接发 `tools/call` 即可。**
 
-**访问令牌**：设置 `SCRAPE_MCP_HTTP_TOKEN` 后，除 `GET /healthz` 外所有请求都要带：
+**访问令牌**：设置 `SCRAPE_MCP_HTTP_TOKEN` 后，除 `GET /healthz` 与看板空壳 `GET /` 外所有请求都要带：
 
 ```bash
 curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000/stats
@@ -233,6 +234,15 @@ curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000
 - 租户名与令牌都必须唯一；配置非法（JSON 错误、缺 `name`/`token`、重复）会在启动时报错退出
 - 与单个 `HTTP_TOKEN`、以及 `HTTP_TOKENS` 与 `HTTP_TOKENS_FILE` 之间均互斥，同时设置会拒绝启动
 - 每个租户在 `/metrics` 有独立的 `scrape_mcp_tenant_requests_total{tenant}` 与 `scrape_mcp_tenant_rejections_total{tenant,reason}`；429 响应不区分租户，不泄露其它调用方信息
+
+看板：`GET /` 是内置运行看板（单文件 HTML，无外部依赖、无 CDN），打开即见请求量、L1/L2 分布、耗时 p50/p95/p99 与分桶、结果码、正文类型，以及 L2 页位与代理池占用，每 5 秒自动刷新。
+
+```bash
+scrape-mcp --transport streamable-http --port 8000
+# 浏览器打开 http://127.0.0.1:8000/
+```
+
+页面本身只是空壳（不含任何抓取数据），因此免鉴权；数据仍走 `/stats` 与 `/metrics` 的鉴权——配置了令牌时页面会先收到 401，填入令牌后存在浏览器 localStorage，之后由页面自动带上。
 
 健康检查：`GET /healthz` 返回版本与关键开关，始终免鉴权，可用于容器探针/网关巡检。
 
