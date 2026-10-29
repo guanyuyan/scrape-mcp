@@ -180,6 +180,7 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `BATCH_MAX_URLS` | `20` | `web_batch` batch size cap |
 | `HOST_MAX_CONCURRENCY` | `2` | Per-host concurrency cap (`web_batch` / `web_crawl`) |
 | `CRAWL_MAX_PAGES` | `20` | Hard cap on pages per `web_crawl` |
+| `DATASET` | — | Dataset export path (JSONL, one successful scrape per line); empty disables it |
 | `RESPECT_ROBOTS` | `true` | Follow robots.txt by default; `false` ignores it |
 | `ALLOWED_HOSTS` | — | Comma-separated allowlist; when set, only these hosts are allowed |
 | `DENIED_HOSTS` | — | Comma-separated denylist, takes precedence over the allowlist |
@@ -572,6 +573,34 @@ Rules and limits:
 - String and list results still go through `regex` / `abs_url` / `strip` / `convert` / `required`
 - A failing plugin only affects its own field: it lands in `errors` and falls back to `default`; empty return values do the same
 - Plugins are in-process code — install only what you trust
+
+## Dataset export
+
+Every successful scrape can be appended to a JSONL file that pandas / DuckDB / vector stores can consume directly. It is off by default — point it at a path to enable:
+
+```bash
+$env:SCRAPE_MCP_DATASET="D:\data\scrapes.jsonl"
+# or in .env: SCRAPE_MCP_DATASET=~/datasets/scrapes.jsonl
+```
+
+`web_fetch` / `web_batch` / `web_extract` / `web_crawl` then append one line per successful result; failures, blocks and timeouts are skipped so they don't pollute the dataset:
+
+```json
+{"v": 1, "ts": "2026-10-29T12:00:00+00:00", "tool": "fetch", "url": "https://example.com/a", "final_url": "https://example.com/a", "status": 200, "tier": "l1", "title": "Example", "tokens": 1234, "chars": 5678, "content": "Body text...", "error_code": null}
+```
+
+`web_extract` records also carry `data` (the extracted fields). Inspect and convert:
+
+```bash
+scrape-mcp dataset stats                        # count, per-tool split, time span, avg tokens/chars
+scrape-mcp dataset stats D:\data\scrapes.jsonl  # or pass the file explicitly
+scrape-mcp dataset to-parquet                   # writes a sibling .parquet (needs mcp-scrape[dataset])
+```
+
+Limits:
+- Only successful results are stored; refetching the same URL appends another line, so dedupe downstream (`url` + `ts`)
+- A failed write only logs a warning — export is a side path and never breaks the scrape
+- The file keeps growing; rotate it yourself (`scrapes-2026-10-29.jsonl`) for long-running deployments
 
 ## Python SDK
 

@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- 数据集导出：设置 `SCRAPE_MCP_DATASET=<path>.jsonl` 后，`web_fetch` / `web_batch` / `web_extract` / `web_crawl` 的每次成功结果追加一行 JSONL（失败、拦截、超时跳过），字段固定并带版本号 `v`，可直接被 pandas / DuckDB / 向量库消费；新增 `scrape-mcp dataset stats`（条数、工具分布、时间跨度、平均体量）与 `dataset to-parquet`（可选依赖 `mcp-scrape[dataset]`）；写盘失败只记 warning，不影响抓取本身
+
 ## [0.18.0] - 2026-10-29
 
 ### Added

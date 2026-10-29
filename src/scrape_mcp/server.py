@@ -18,6 +18,7 @@ from .config import get_settings
 from .core import deadline as dl
 from .core import errors
 from .core.cache import ResultCache
+from .core.dataset import record_result
 from .core.fetcher import Fetcher, FetchOutcome
 from .core.hostlimit import HostLimiter
 from .core.logging import configure, log_event
@@ -639,6 +640,7 @@ async def _fetch_dict(
     session: str = "default",
     deadline: float | None = None,
     proxy: str | None = None,
+    record_tool: str = "fetch",
 ) -> dict:
     """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
     settings = get_settings()
@@ -707,6 +709,7 @@ async def _fetch_dict(
             get_stats().record_tokens(payload.get("token_estimate", 0))
             if cache is not None and not _deadline_limited(outcome):
                 cache.put(key, payload)
+            record_result(payload, tool=record_tool)
         return payload
     result = compact_html(
         outcome.html,
@@ -770,6 +773,7 @@ async def _fetch_dict(
         cache.put(key, payload)
     if payload.get("ok"):
         get_stats().record_tokens(payload["token_estimate"])
+        record_result(payload, tool=record_tool)
     return payload
 
 
@@ -1030,6 +1034,8 @@ async def web_extract(
         payload["retryable"] = False
     if cache is not None and payload.get("ok") and not _deadline_limited(outcome):
         cache.put(key, payload)
+    if payload.get("ok"):
+        record_result(payload, tool="extract")
     return _payload(**payload)
 
 
@@ -1122,6 +1128,7 @@ async def web_batch(
                         session=session,
                         deadline=deadline,
                         proxy=proxy,
+                        record_tool="batch",
                     )
                 except Exception as exc:  # 单条意外异常不应拖垮整批
                     code = errors.classify_exception(exc)
@@ -1214,6 +1221,7 @@ async def _crawl_page(
     nxt = (
         next_link(outcome.html, base, next_selector, same_host=same_host) if next_selector else None
     )
+    record_result(payload, tool="crawl")
     return payload, links, nxt
 
 
@@ -1733,8 +1741,8 @@ def main(argv: list[str] | None = None) -> None:
     """
     if argv is None:
         argv = sys.argv[1:]
-    # 子命令（init / schema / session / recipe）走独立模块，不启动服务；其余参数保持原有零配置行为
-    if argv and argv[0] in ("init", "schema", "session", "recipe"):
+    # 子命令（init / schema / session / recipe / dataset）走独立模块，不启动服务；其余参数保持原有零配置行为
+    if argv and argv[0] in ("init", "schema", "session", "recipe", "dataset"):
         from .cli import run as run_subcommand
 
         raise SystemExit(run_subcommand(argv))
@@ -1747,11 +1755,13 @@ def main(argv: list[str] | None = None) -> None:
             "      scrape-mcp init [--client claude|cursor|vscode|json] [--write]\n"
             "      scrape-mcp schema [--tool NAME] [--output FILE]\n"
             "      scrape-mcp session <list|import> [...]\n"
-            "      scrape-mcp recipe <list|validate> [...]\n\n"
+            "      scrape-mcp recipe <list|validate> [...]\n"
+            "      scrape-mcp dataset <stats|to-parquet> [...]\n\n"
             "零配置默认作为 stdio MCP 服务运行，供 Claude/Cursor 等客户端接管。\n"
             "init 生成客户端配置（默认只预览 diff），schema 导出工具定义，\n"
             "session 查看或导入登录态（容器内无法开浏览器时用 import 导入 cookies），\n"
-            "recipe 列出或校验站点 recipe（放进 RECIPES_DIR 即自动生效）。\n"
+            "recipe 列出或校验站点 recipe（放进 RECIPES_DIR 即自动生效），\n"
+            "dataset 查看/导出抓取数据集（设置 SCRAPE_MCP_DATASET 后自动累积 JSONL）。\n"
             "如需 HTTP 直连（Postman/curl），加 --transport streamable-http [--port 8000]；\n"
             "绑定非回环地址时必须设置 SCRAPE_MCP_HTTP_TOKEN。\n"
             "配置详见 .env / SCRAPE_MCP_* 环境变量。"

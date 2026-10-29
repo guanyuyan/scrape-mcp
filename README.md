@@ -186,6 +186,7 @@ cp .env.example .env    # 生成配置模板
 | `BATCH_MAX_URLS` | `20` | `web_batch` 单批上限 |
 | `HOST_MAX_CONCURRENCY` | `2` | 同一主机的并发上限（`web_batch`/`web_crawl` 共用） |
 | `CRAWL_MAX_PAGES` | `20` | `web_crawl` 单次最多抓取页数硬上限 |
+| `DATASET` | — | 数据集导出路径（JSONL，一行一次成功抓取）；留空不导出 |
 | `RESPECT_ROBOTS` | `true` | 默认遵循目标站 robots.txt；`false` 忽略（仅建议自用合规场景关闭） |
 | `ALLOWED_HOSTS` | — | 主机白名单（逗号分隔）；非空时仅允许名单内主机 |
 | `DENIED_HOSTS` | — | 主机黑名单（逗号分隔），优先于白名单 |
@@ -582,6 +583,34 @@ def meta_content(ctx):
 - 返回字符串或列表时，`regex` / `abs_url` / `strip` / `convert` / `required` 照常生效
 - 插件抛异常只影响该字段：记进 `errors` 并回落到 `default`，同页其他字段不受牵连；返回空值同样回落 `default`
 - 插件是进程内代码，装了什么就跑什么；不想引入第三方代码就别装扩展
+
+## 数据集导出
+
+把每次成功抓取累积成 JSONL，可直接喂给 pandas / DuckDB / 向量库。默认关闭，配一个路径就生效：
+
+```bash
+$env:SCRAPE_MCP_DATASET="D:\data\scrapes.jsonl"
+# 或写进 .env：SCRAPE_MCP_DATASET=~/datasets/scrapes.jsonl
+```
+
+之后 `web_fetch` / `web_batch` / `web_extract` / `web_crawl` 每产生一条成功结果就追加一行；失败、拦截、超时都不记，免得噪声污染数据集：
+
+```json
+{"v": 1, "ts": "2026-10-29T12:00:00+00:00", "tool": "fetch", "url": "https://example.com/a", "final_url": "https://example.com/a", "status": 200, "tier": "l1", "title": "示例", "tokens": 1234, "chars": 5678, "content": "正文……", "error_code": null}
+```
+
+`web_extract` 的结果额外带 `data`（字段抽取结果）。查看与转换：
+
+```bash
+scrape-mcp dataset stats                        # 条数、按工具分布、时间跨度、平均 token/字符
+scrape-mcp dataset stats D:\data\scrapes.jsonl  # 也可显式指定文件
+scrape-mcp dataset to-parquet                   # 生成同目录 .parquet（需 mcp-scrape[dataset]）
+```
+
+边界：
+- 只记成功结果；同一 URL 重复抓取会重复记录，去重交给下游（`url` + `ts` 足够）
+- 写盘失败只记 warning，不影响抓取本身；导出是旁路能力
+- 文件是持续追加，长期运行请自行按天轮转（如 `scrapes-2026-10-29.jsonl`）
 
 ## Python SDK
 

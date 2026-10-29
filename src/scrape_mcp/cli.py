@@ -457,9 +457,54 @@ def _cmd_recipe(argv: list[str]) -> int:
     return 0
 
 
+def _cmd_dataset(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="scrape-mcp dataset",
+        description="查看或导出抓取数据集：设置 SCRAPE_MCP_DATASET=<path>.jsonl 后自动累积。",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    stats = sub.add_parser("stats", help="概况：条数、按工具分布、时间跨度、平均体量")
+    stats.add_argument("path", nargs="?", help="JSONL 路径；缺省取 SCRAPE_MCP_DATASET")
+    parquet = sub.add_parser(
+        "to-parquet", help='转成 Parquet（需 pip install "mcp-scrape[dataset]"）'
+    )
+    parquet.add_argument("path", nargs="?", help="JSONL 路径；缺省取 SCRAPE_MCP_DATASET")
+    parquet.add_argument("-o", "--out", help="输出 .parquet 路径；缺省与源文件同名")
+    args = parser.parse_args(argv)
+
+    from .core.dataset import DatasetError, dataset_path, load_records, summarize, to_parquet
+
+    source = Path(args.path).expanduser() if args.path else dataset_path()
+    if source is None:
+        print(
+            "[错误] 未指定数据集：传路径，或设置 SCRAPE_MCP_DATASET=<path>.jsonl", file=sys.stderr
+        )
+        return 2
+    try:
+        if args.action == "stats":
+            records, bad = load_records(source)
+            info = summarize(records)
+            tools = " / ".join(f"{name} {count}" for name, count in info["by_tool"].items())
+            print(f"[完成] {info['records']} 条记录（{tools or '空'}）")
+            if info["first_ts"]:
+                print(f"  时间：{info['first_ts']} → {info['last_ts']}")
+            print(f"  平均 token {info['avg_tokens']} / 字符 {info['avg_chars']}")
+            if bad:
+                print(f"  跳过 {bad} 行损坏记录")
+            return 0
+        target = Path(args.out).expanduser() if args.out else None
+        out = to_parquet(source, target)
+        records, _bad = load_records(source)
+        print(f"[完成] {len(records)} 条记录 → {out}")
+        return 0
+    except DatasetError as exc:
+        print(f"[错误] {exc}", file=sys.stderr)
+        return 1
+
+
 def run(argv: list[str]) -> int:
     """执行子命令；未知子命令给出用法提示。"""
-    usage = "用法: scrape-mcp <init|schema|session|recipe> ..."
+    usage = "用法: scrape-mcp <init|schema|session|recipe|dataset> ..."
     if not argv:
         print(usage, file=sys.stderr)
         return 2
@@ -472,5 +517,7 @@ def run(argv: list[str]) -> int:
         return _cmd_session(rest)
     if command == "recipe":
         return _cmd_recipe(rest)
+    if command == "dataset":
+        return _cmd_dataset(rest)
     print(f"未知子命令: {command}\n{usage}", file=sys.stderr)
     return 2

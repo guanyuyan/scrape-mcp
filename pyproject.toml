@@ -30,6 +30,8 @@ dependencies = [
 [project.optional-dependencies]
 # PDF 文本抽取是可选能力，不装也能用其余工具，装上后 web_fetch 直接吃 PDF
 pdf = ["pypdf>=6.21.2"]
+# 数据集导出成 Parquet（JSONL 累积本身不需要额外依赖）
+dataset = ["pyarrow>=14"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
