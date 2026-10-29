@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.15.0] - 2026-10-29
 
 ### Added
 - 新增 `web_watch` 工具与 SDK `watch()`：每次成功抓取留一份正文快照（`DATA_DIR/watch/`），下次调用对比并返回 `changed`、`added_lines` / `removed_lines` 与 diff 预览；`selector` 只盯页面某一块，`reset` 重建基线，抓取失败不覆盖旧快照
