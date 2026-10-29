@@ -107,7 +107,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Change detection**: `web_watch` keeps a snapshot of the body after every successful fetch and reports `changed` plus an added/removed line summary on the next call; pass `selector` to watch just one block (leaderboard, price box). Failed fetches never overwrite the snapshot, so changes that happened during a block are still visible afterwards.
 - **Built-in dashboard**: in HTTP mode, open `/` to see request volume, L1/L2 split, latency percentiles and buckets, result codes, content kinds, L2 page slots and proxy-pool health; single-file HTML, no external assets, refreshed every 5 seconds.
 - **Total budget with degradation**: `web_fetch` / `web_extract` / `web_batch` / `web_crawl` accept `deadline_ms`. When time runs short it degrades step by step — cap each request → skip retries → skip L2 rendering → return `timeout` — while any content already fetched is still returned. Degraded results are never cached, so later calls with a larger budget cannot inherit truncated content. The budget also covers the compliance stage (rate-limit wait and robots.txt fetch): if it is too tight, the call returns `timeout` early instead of burning the budget on preparation.
-- **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent.
+- **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent. Third-party packages can register their own field types through an entry point.
 - **Site recipes**: keep per-site rendering hints, root selector, extraction schema and pagination rules in a JSON file; later calls need no arguments, and per-call arguments still win.
 - **Selectable output format**: `format=markdown|text|json`; `json` yields a paragraph array ready for storage.
 - **Per-host concurrency gate**: at most 2 concurrent requests per host by default, while different hosts still run in parallel.
@@ -342,6 +342,7 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Conversion: `convert` accepts `int` / `float` / `date` (strips thousands separators and currency symbols; dates accept ISO and forms like `2026年10月20日`)
   - Required fields: `required: true` makes the call `ok=false` with `error_code=missing_required` and lists names in `required_missing`
   - `jsonld` reads `<script type="application/ld+json">` with dotted paths (multiple scripts / `@graph` merged, arrays expanded, numeric segments are indexes)
+  - Plugin types: third-party packages can register custom field types via an entry point (see "Custom field types" below) and use them exactly like built-ins
   - Fetch/render options match `web_fetch` (without `link_policy` / `format`); non-HTML returns `unsupported_content` — use `web_fetch` instead
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → concurrent fetch, one result per URL; a single failure does not sink the batch
   - Supports `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session` for the whole batch
@@ -532,6 +533,45 @@ It reports JSON/encoding problems (including the BOM older Windows editors write
 `examples/recipes/` doubles as the community collection: adding a recipe means dropping in a `<host>.json` and getting it through `recipe validate`; CI validates all eight with `--strict`.
 
 Per-call overrides: explicit arguments beat the recipe, e.g. `web_fetch(url="...", wait_for=".comments")`.
+
+### Custom field types (plugins)
+
+The seven built-in types cover most pages. When a site needs something else (`meta` tags, microdata, a value computed across nodes), ship a small plugin that adds its own type to `web_extract` — used exactly like a built-in.
+
+A minimal plugin package (local or published to PyPI):
+
+```toml
+# pyproject.toml
+[project]
+name = "scrape-mcp-meta"
+dependencies = ["mcp-scrape>=0.18"]
+
+[project.entry-points."scrape_mcp.extractors"]
+meta_content = "scrape_mcp_meta:meta_content"
+```
+
+```python
+# scrape_mcp_meta.py
+def meta_content(ctx):
+    # ctx.nodes     matched nodes (may be empty)
+    # ctx.rule      the raw field rule, so custom keys (e.g. "sep") are readable
+    # ctx.root      the whole document tree; ctx.base_url is the final page URL
+    if not ctx.nodes:
+        return None
+    return (ctx.nodes[0].attributes or {}).get("content")
+```
+
+Installed plugins are discovered automatically and become usable types:
+
+```json
+{"desc": {"selector": "meta[name=description]", "type": "meta_content"}}
+```
+
+Rules and limits:
+- Names must be lowercase identifiers and may not shadow built-in type names; nested `fields` remains exclusive to the built-in `object` / `list`
+- String and list results still go through `regex` / `abs_url` / `strip` / `convert` / `required`
+- A failing plugin only affects its own field: it lands in `errors` and falls back to `default`; empty return values do the same
+- Plugins are in-process code — install only what you trust
 
 ## Python SDK
 

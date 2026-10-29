@@ -111,7 +111,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
 - **内置运行看板**：HTTP 模式下打开 `/` 即见请求量、L1/L2 分布、耗时分位与分桶、结果码、正文类型、L2 页位与代理池健康度；单文件 HTML，无外部依赖，每 5 秒自动刷新。
 - **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
-- **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`。
+- **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`；第三方包可通过入口点注册自定义字段类型。
 - **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
 - **输出格式可选**：`format=markdown|text|json`，正文可按段落数组直接入库。
 - **同域并发闸门**：同一站点默认最多 2 个并发请求，跨站仍可并行，避免批量抓取时把单站打穿。
@@ -348,6 +348,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 类型转换：`convert` 可设 `int` / `float` / `date`（去千分位与货币符号；日期兼容 ISO 与 `2026年10月20日` 这类写法）
   - 必填校验：字段设 `required: true`，缺失时整次调用 `ok=false`、`error_code=missing_required`，并在 `required_missing` 列出字段名
   - `jsonld` 用点号路径从 `<script type="application/ld+json">` 取值（多个 script / `@graph` 自动聚合，数组自动展开、数字段视为下标）
+  - 插件类型：第三方包可通过入口点注册自己的字段类型（见下文「自定义字段类型」），用法与内置类型一致
   - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）；非 HTML（PDF/纯文本）返回 `unsupported_content`，请改用 `web_fetch`
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
   - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session`（对该批所有 URL 生效）
@@ -542,6 +543,45 @@ scrape-mcp recipe list                               # 列出已生效的 recipe
 `examples/recipes/` 就是社区配方集：加一份新配方 = 放一个 `<host>.json` 并用 `recipe validate` 验过；CI 会以 `--strict` 校验这八份，坏配方进不来。
 
 单次覆盖：显式参数优先于 recipe，例如 `web_fetch(url="...", wait_for=".comments")`。
+
+### 自定义字段类型（插件）
+
+内置七种类型覆盖大多数页面；遇到特殊结构（`meta` 标签、微数据、需要跨节点计算）时，可以写个插件把自己的类型加进 `web_extract`，用法与内置类型完全一致。
+
+最小插件包（本地包或发布到 PyPI 都行）：
+
+```toml
+# pyproject.toml
+[project]
+name = "scrape-mcp-meta"
+dependencies = ["mcp-scrape>=0.18"]
+
+[project.entry-points."scrape_mcp.extractors"]
+meta_content = "scrape_mcp_meta:meta_content"
+```
+
+```python
+# scrape_mcp_meta.py
+def meta_content(ctx):
+    # ctx.nodes     选择器命中的节点列表（可能为空）
+    # ctx.rule      原始字段规则，可读自定义键（如 "sep"）
+    # ctx.root      整页解析树；ctx.base_url 页面最终地址
+    if not ctx.nodes:
+        return None
+    return (ctx.nodes[0].attributes or {}).get("content")
+```
+
+装好后自动发现，直接当类型用：
+
+```json
+{"desc": {"selector": "meta[name=description]", "type": "meta_content"}}
+```
+
+约定与边界：
+- 名字必须是小写标识符，不能占用内置类型名；嵌套 `fields` 只有内置 `object` / `list` 支持
+- 返回字符串或列表时，`regex` / `abs_url` / `strip` / `convert` / `required` 照常生效
+- 插件抛异常只影响该字段：记进 `errors` 并回落到 `default`，同页其他字段不受牵连；返回空值同样回落 `default`
+- 插件是进程内代码，装了什么就跑什么；不想引入第三方代码就别装扩展
 
 ## Python SDK
 

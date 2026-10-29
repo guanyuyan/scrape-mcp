@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- 插件式抽取器：第三方包可用入口点组 `scrape_mcp.extractors` 注册自定义字段类型，`web_extract` / recipe 里与内置类型同用（`ExtractorContext` 提供命中节点、原始规则、整页树与 base_url）；插件异常只影响该字段并回落 `default`，未安装插件时行为不变
+
 ## [0.17.0] - 2026-10-29
 
 ### Added

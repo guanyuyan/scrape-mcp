@@ -31,6 +31,8 @@
     object —— 取第一个匹配节点的子树，按 fields 在其内部继续抽取
     jsonld —— 从页面 <script type="application/ld+json"> 里按 path 取值，
               路径用点号分隔（如 "author.name"），遇到数组自动展开，无需 selector
+    插件类型 —— 由第三方包通过入口点组 "scrape_mcp.extractors" 注册（见 plugins.py），
+              用法与内置类型一致
 
 后处理（对字符串结果生效，按 regex → abs_url → strip → convert 顺序）：
     regex / group —— 正则提取，未命中时回落到 default（无 default 则 None）
@@ -52,7 +54,9 @@ from urllib.parse import urljoin
 
 from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
-_TYPES = ("text", "html", "attr", "count", "list", "object", "jsonld")
+from .plugins import BUILTIN_TYPES, ExtractorContext, extractor_names, get_extractor
+
+_TYPES = BUILTIN_TYPES
 _LIST_KEYS = ("text", "text_trimmed", "attr", "html")
 _CONVERT_TYPES = ("int", "float", "date")
 _DATE_FORMATS = (
@@ -83,6 +87,8 @@ class SchemaField:
     path: str | None = None
     convert: str | None = None
     required: bool = False
+    # 原始字段规则：插件类型需要读到自定义键（如 "format"）
+    rule: dict[str, Any] | None = None
 
 
 @dataclass
@@ -128,8 +134,15 @@ def _parse_rule(key: str, rule: Any, *, path: str) -> SchemaField:
         raise SchemaValidationError(f"字段 {label} 的规则必须是 dict 或字符串选择器")
 
     ftype = rule.get("type", "text")
-    if ftype not in _TYPES:
-        raise SchemaValidationError(f"字段 {label} 的 type 必须是 {_TYPES} 之一")
+    plugin = None if ftype in _TYPES else get_extractor(str(ftype))
+    if ftype not in _TYPES and plugin is None:
+        names = extractor_names()
+        hint = f"，或已注册的插件类型 {names}" if names else ""
+        raise SchemaValidationError(f"字段 {label} 的 type 必须是 {_TYPES} 之一{hint}")
+    if plugin is not None and rule.get("fields"):
+        raise SchemaValidationError(
+            f"字段 {label} 的插件类型 {ftype} 不支持 fields；嵌套请改用 object / list"
+        )
 
     selector = rule.get("selector") or rule.get("select")
     path = rule.get("path")
@@ -197,6 +210,7 @@ def _parse_rule(key: str, rule: Any, *, path: str) -> SchemaField:
         path=path,
         convert=convert,
         required=required,
+        rule=dict(rule),
     )
 
 
@@ -240,6 +254,26 @@ def _apply(value: Any, f: SchemaField, base_url: str) -> Any:
     if f.abs_url and value:
         value = urljoin(base_url, value)
     return value.strip() if f.strip else value
+
+
+def _plugin_value(scope: Any, f: SchemaField, base_url: str, errors: list[str], label: str) -> Any:
+    """调用插件类型的抽取器；出错只影响本字段，不让整条抽取失败。"""
+    extractor = get_extractor(f.type)
+    if extractor is None:
+        errors.append(f"字段 {label}: 插件类型 {f.type} 未注册（插件是否已安装？）")
+        return f.default
+    try:
+        nodes = list(scope.css(f.selector))
+    except Exception as exc:  # selectolax 对非法 CSS 的兜底
+        errors.append(f"字段 {label}: 选择器非法: {exc}")
+        return f.default
+    ctx = ExtractorContext(nodes=nodes, rule=f.rule or {}, base_url=base_url, root=scope)
+    try:
+        value = extractor(ctx)
+    except Exception as exc:  # 插件自身 bug 不该拖垮整页
+        errors.append(f"字段 {label}: 插件 {f.type} 执行失败: {exc}")
+        return f.default
+    return f.default if _is_missing(value) else value
 
 
 # ---------- JSON-LD ----------
@@ -386,6 +420,15 @@ def _run(scope: Any, schema: list[SchemaField], base_url: str, path: str = "") -
 
         if f.type == "jsonld":
             value = _finalize(_jsonld_value(scope, f), f, base_url, errors, label)
+            fields[f.key] = value
+            if f.required and _is_missing(value):
+                required_missing.append(label)
+            continue
+
+        if f.type not in _TYPES:
+            value = _finalize(
+                _plugin_value(scope, f, base_url, errors, label), f, base_url, errors, label
+            )
             fields[f.key] = value
             if f.required and _is_missing(value):
                 required_missing.append(label)
