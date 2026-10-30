@@ -43,8 +43,14 @@ def parse_results(provider: str, body: str, max_results: int) -> list[SearchHit]
 
 
 def _parse_searxng(body: str, max_results: int) -> list[SearchHit]:
+    text = (body or "").strip()
+    if not text.startswith("{"):
+        # 有的出口会按 Accept 把 JSON 包进 <pre> 里返回（text/html），先把 JSON 抠出来
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start : end + 1]
     try:
-        data = json.loads(body)
+        data = json.loads(text)
     except (TypeError, json.JSONDecodeError) as exc:
         raise SearchError(f"SearXNG 返回的不是 JSON: {exc}") from exc
     raw = data.get("results") if isinstance(data, dict) else None

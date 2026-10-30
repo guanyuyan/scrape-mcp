@@ -617,7 +617,7 @@ def test_web_extract_without_schema_or_recipe(monkeypatch):
 
 def test_web_search_success_keys(monkeypatch):
     _patch_fetch(monkeypatch, _outcome(html=SEARCH_HTML))
-    out = _run(server.web_search("示例"))
+    out = _run(server.web_search("示例", provider="duckduckgo"))
     assert set(out) == SEARCH_OK_PAYLOAD
     assert set(out["results"][0]) == {"rank", "title", "url", "snippet"}
     assert out["results"][0]["url"] == "https://a.test/one"

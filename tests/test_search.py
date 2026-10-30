@@ -121,6 +121,12 @@ def test_parser_rejects_non_json_for_searxng():
         parse_results("searxng", "<html>not json</html>", 10)
 
 
+def test_searxng_parser_unwraps_html_pre_wrapper():
+    wrapped = f"<html><body><pre>{SEARXNG_JSON}</pre></body></html>"
+    hits = parse_results("searxng", wrapped, 10)
+    assert [hit.url for hit in hits] == ["https://a.test/1", "https://a.test/2"]
+
+
 def test_search_url_by_provider():
     assert search_url("a b", "duckduckgo").startswith("https://html.duckduckgo.com/html/?q=a+b")
     assert search_url("a b", "searxng", endpoint="http://searx.test/") == (
@@ -133,7 +139,7 @@ def test_search_url_by_provider():
 
 def test_web_search_success_payload(monkeypatch):
     _patch(monkeypatch, _outcome(DDG_HTML))
-    out = _run(server.web_search("测试"))
+    out = _run(server.web_search("测试", provider="duckduckgo"))
     assert set(out) == {
         "ok",
         "query",
@@ -169,7 +175,8 @@ def test_web_search_unknown_provider_is_invalid():
     assert out["error_code"] == errors.INVALID_ARGUMENT
 
 
-def test_web_search_searxng_without_endpoint_is_invalid():
+def test_web_search_searxng_without_endpoint_is_invalid(monkeypatch):
+    monkeypatch.setattr(server.get_settings(), "search_searxng_url", "")
     out = _run(server.web_search("x", provider="searxng"))
     assert out["error_code"] == errors.INVALID_ARGUMENT
     assert "SEARXNG_URL" in out["error"]
@@ -200,5 +207,5 @@ def test_web_search_unparsable_body_reports_unsupported(monkeypatch):
 
 def test_web_search_returns_empty_list_for_no_results(monkeypatch):
     _patch(monkeypatch, _outcome("<html><body><div class='no-results'>无结果</div></body></html>"))
-    out = _run(server.web_search("x"))
+    out = _run(server.web_search("x", provider="duckduckgo"))
     assert out["ok"] is True and out["count"] == 0 and out["results"] == []

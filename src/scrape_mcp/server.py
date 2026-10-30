@@ -1018,6 +1018,8 @@ async def web_search(
             )
         outcome = await _get_fetcher().fetch(
             url,
+            # SearXNG 会按 Accept 决定返回形态：要 JSON 就别再带浏览器的 text/html
+            headers={"Accept": "application/json"} if name == "searxng" else None,
             bypass_cache=bypass_cache,
             deadline=deadline,
             timeout=dl.remaining(deadline),
@@ -1025,7 +1027,9 @@ async def web_search(
         )
 
     code = errors.classify_outcome(outcome)
-    if outcome.error or outcome.blocked != "none" or outcome.status >= 400:
+    # SearXNG 可能把 JSON 包在 HTML 外壳里返回，拦截判定交给解析阶段（非 JSON 会报错）
+    blocked_now = outcome.blocked != "none" and name != "searxng"
+    if outcome.error or blocked_now or outcome.status >= 400:
         if outcome.error:
             message = outcome.error
         elif outcome.blocked != "none":
