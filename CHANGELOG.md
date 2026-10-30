@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-30
+
 ### Added
 - 新增 `web_search` 工具：关键词 → 结构化结果（标题 / URL / 摘要），默认走 DuckDuckGo HTML 端点（无需 key），也可配置自托管 SearXNG 的 JSON API；支持结果缓存、`max_results` 截断与 `proxy` / `deadline_ms`，搜索服务按接口使用（保留主机白/黑名单与全局限流，不套目标站 robots）
 - 新增 `web_screenshot` 工具：真实浏览器渲染后导出 PNG（整页/视口、自定义尺寸、等待选择器、额外延时），复用浏览器池与 `login` 登录态；默认存 `DATA_DIR/screenshots/`，也可指定 `path`
