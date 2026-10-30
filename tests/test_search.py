@@ -100,6 +100,15 @@ def test_duckduckgo_parser_respects_max_results():
     assert len(parse_results("duckduckgo", DDG_HTML, 1)) == 1
 
 
+def test_duckduckgo_parser_rejects_challenge_page():
+    challenge = (
+        '<html><body><form id="challenge-form" '
+        'action="//duckduckgo.com/anomaly.js?sv=html"></form></body></html>'
+    )
+    with pytest.raises(SearchError):
+        parse_results("duckduckgo", challenge, 10)
+
+
 def test_searxng_parser_reads_json_and_limits():
     hits = parse_results("searxng", SEARXNG_JSON, 1)
     assert len(hits) == 1

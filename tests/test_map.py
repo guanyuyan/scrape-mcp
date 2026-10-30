@@ -146,6 +146,23 @@ def test_optional_search_results_are_merged(monkeypatch):
     assert out["sources"]["search"] == 1
 
 
+def test_search_merge_ignores_www_prefix(monkeypatch):
+    queries: list[str] = []
+
+    async def fake_sitemap(url, *, deadline, proxy):
+        return [], [], 0
+
+    async def fake_search(query, **_kwargs):
+        queries.append(query)
+        return json.dumps({"ok": True, "results": [{"url": "https://site.test/from-search"}]})
+
+    monkeypatch.setattr(server, "_sitemap_entries", fake_sitemap)
+    monkeypatch.setattr(server, "web_search", fake_search)
+    out = _run(url="https://www.site.test/", homepage=False, use_search=True)
+    assert queries == ["site:site.test"]
+    assert [item["url"] for item in out["urls"]] == ["https://site.test/from-search"]
+
+
 def test_bad_regex_is_invalid_argument():
     out = _run(url=HOME, include="[")
     assert out["ok"] is False

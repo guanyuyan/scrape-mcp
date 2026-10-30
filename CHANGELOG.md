@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- `web_map` 的 `use_search` 合并按主机名归一：入口是 `www.` 而搜索结果不带（或反之）时不再漏掉同站条目，`site:` 查询也使用归一后的主机名
+- DuckDuckGo HTML 端点返回人机验证页（HTTP 202 + `anomaly.js`）时，`web_search` 如实报错而不是当成「搜到 0 条」，`web_map` 也不会再以 `ok=true` 返回空清单
+
 ## [0.21.0] - 2026-10-30
 
 ### Added

@@ -68,6 +68,10 @@ def _parse_searxng(body: str, max_results: int) -> list[SearchHit]:
 
 
 def _parse_duckduckgo(body: str, max_results: int) -> list[SearchHit]:
+    # 反爬挑战页（HTTP 202 + anomaly.js / anomaly-modal）没有任何结果卡片，
+    # 不能当成"搜到了 0 条"，否则上层会把拦截误报成空结果
+    if "anomaly.js" in body or "anomaly-modal" in body:
+        raise SearchError("DuckDuckGo 返回人机验证页，请更换出口或改用 SearXNG")
     tree = HTMLParser(body)
     hits: list[SearchHit] = []
     seen: set[str] = set()

@@ -109,6 +109,12 @@ def _host_of(url: str) -> str:
     return (urlparse(url).netloc or "").lower().split(":")[0]
 
 
+def _bare_host(host: str) -> str:
+    """同站判断用的主机名：小写、去端口、去开头的 ``www.``。"""
+    bare = (host or "").lower().split(":")[0]
+    return bare[4:] if bare.startswith("www.") else bare
+
+
 def _recipe_for(url: str) -> Recipe | None:
     """按 host 取站点 recipe；没配就是 None（所有行为保持默认）。"""
     return get_recipe_store().for_url(url)
@@ -1601,7 +1607,8 @@ async def web_map(
 
     # 3) 可选搜索合并：查询限定在站点内，结果同样只留同域 URL
     if use_search and not dl.expired(deadline):
-        query = f"site:{host}"
+        site = _bare_host(host)
+        query = f"site:{site}"
         if search:
             query = f"{query} {search}"
         remaining = dl.remaining(deadline)
@@ -1615,7 +1622,7 @@ async def web_map(
         if data.get("ok"):
             succeeded = True
             for hit in data.get("results") or []:
-                if _host_of(hit.get("url", "")) == host:
+                if _bare_host(_host_of(hit.get("url", ""))) == site:
                     add(hit.get("url", ""), "search")
         else:
             failure = failure or {
