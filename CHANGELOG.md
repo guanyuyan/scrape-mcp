@@ -2,6 +2,14 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- 新增 `web_search` 工具：关键词 → 结构化结果（标题 / URL / 摘要），默认走 DuckDuckGo HTML 端点（无需 key），也可配置自托管 SearXNG 的 JSON API；支持结果缓存、`max_results` 截断与 `proxy` / `deadline_ms`，搜索服务按接口使用（保留主机白/黑名单与全局限流，不套目标站 robots）
+- 新增 `web_screenshot` 工具：真实浏览器渲染后导出 PNG（整页/视口、自定义尺寸、等待选择器、额外延时），复用浏览器池与 `login` 登录态；默认存 `DATA_DIR/screenshots/`，也可指定 `path`
+- 新增 `web_index` 工具：从 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`）读取站点地图，递归展开 sitemap index 并解压 `.gz`；清单落盘 `DATA_DIR/index/`，下次返回新增/变更/未变/移除，支持 `include`/`exclude` 正则、`limit`、`dry_run`、`reset` 与 `check_content`（回抓正文比哈希，过滤只改 lastmod 的假变更）
+- 新增配置 `SEARCH_PROVIDER` / `SEARCH_SEARXNG_URL` / `SEARCH_MAX_RESULTS`；README 与 `.env.example` 同步更新
+
 ## [0.19.0] - 2026-10-29
 
 ### Added

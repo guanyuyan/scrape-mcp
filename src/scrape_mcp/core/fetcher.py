@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from ..config import Settings
 from . import deadline as budget
-from .browser import BrowserRenderer
+from .browser import BrowserRenderer, ScreenshotOutcome
 from .detector import detect_block, looks_like_login_wall, looks_like_shell
 from .http_client import HttpClient
 from .proxy import ProxyPool, split_pool
@@ -331,8 +331,11 @@ class Fetcher:
         """需要升级 L2 时返回原因标签；不需要返回 None。"""
         if not self._settings.l2_enabled or outcome.error:
             return None
-        # PDF/纯文本没有 DOM，浏览器渲染不会带来更多信息，只会白付一次启动成本
+        # PDF/纯文本没有 DOM，浏览器渲染不会带来更多信息，只会白付一次启动成本；
+        # XML（sitemap/接口响应）同理，浏览器渲染不会多出正文
         if outcome.kind != "html":
+            return None
+        if "xml" in (outcome.content_type or "").lower():
             return None
         if outcome.blocked == "none":
             # 没被判成拦截页，但大 HTML 榨不出可见文本时仍是骨架页/登录墙：
@@ -405,6 +408,8 @@ class Fetcher:
             elapsed_ms=resp.elapsed_ms,
             cached=resp.cached,
             retry_after=resp.retry_after,
+            # XML/sitemap 可能是 gzip 压缩包，需要原始字节才能解压；普通 HTML 不额外留一份
+            content=resp.content if _needs_raw_bytes(resp.content_type, resp.url or url) else b"",
         )
 
     async def _fetch_l2_sticky(
@@ -518,6 +523,10 @@ class Fetcher:
         timeout = timeout or self._settings.login_timeout
         return await self._get_browser().login(url, timeout, session)
 
+    async def screenshot(self, url: str, **kwargs) -> ScreenshotOutcome:
+        """渲染并截图；与 fetch 共用浏览器池、登录态与并发页配额。"""
+        return await self._get_browser().screenshot(url, **kwargs)
+
     def has_session(self, url: str, session: str = "default") -> bool:
         host = urlparse(url).netloc.lower()
         return self._get_browser().has_session(host, session)
@@ -533,6 +542,13 @@ def _host_of(url: str) -> str:
 
 def _looks_like_asset(url: str) -> bool:
     return urlparse(url).path.lower().endswith(_ASSET_SUFFIXES)
+
+
+def _needs_raw_bytes(content_type: str, url: str) -> bool:
+    """是否要把原始响应体一并带出（sitemap 可能是 .xml.gz，文本解码后无法还原）。"""
+    ctype = (content_type or "").lower()
+    path = url.lower().split("?")[0]
+    return "xml" in ctype or path.endswith((".xml", ".xml.gz", ".gz"))
 
 
 def _content_kind(content_type: str, url: str) -> str:

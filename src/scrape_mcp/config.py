@@ -116,6 +116,14 @@ class Settings(BaseSettings):
     # login 工具默认打开带界面的窗口供手动登录；确认后可按需切回无头
     login_timeout: float = 180.0
 
+    # ---- 搜索 ----
+    # web_search 后端：duckduckgo（HTML 端点，无需 API key）/ searxng（自托管 JSON API）
+    search_provider: str = "duckduckgo"
+    # SearXNG 实例根地址，如 http://127.0.0.1:8080；provider=searxng 时必填
+    search_searxng_url: str = ""
+    # 单次返回的结果条数硬上限（max_results 超出时按此截断）
+    search_max_results: int = 20
+
     # ---- 传输模式 ----
     # stdio（默认，MCP 进程管道）/ streamable-http（HTTP，Postman/curl 直连）
     transport: str = "stdio"

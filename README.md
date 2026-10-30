@@ -89,7 +89,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 | 腾讯新闻首页 | 列表/门户 | L2 | 338KB | ~1.4k token（约 1.6%） | 动态页升级浏览器渲染 |
 | 极客邦首页 | SPA/动态 | L2 | 12KB | ~1.4k token | JS 骨架页，需渲染才有正文 |
 
-**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、变更检测 `web_watch`、登录持久化 `login`，缓存默认开启。
+**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、变更检测 `web_watch`、搜索 `web_search`、截图 `web_screenshot`、sitemap 增量索引 `web_index`、登录持久化 `login`，缓存默认开启。
 
 ---
 
@@ -109,6 +109,9 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。
 - **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
+- **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API；结果可缓存，适合"先搜再抓"的两步流程。
+- **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG，支持整页/视口、自定义尺寸、等待元素与额外延时；复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
+- **站点索引**：`web_index` 读 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`），递归展开 sitemap index 并解压 `.gz`；清单落盘后，下次返回新增 / 变更 / 未变 / 移除，可选回抓正文比哈希过滤"只改了时间戳"的假变更。
 - **内置运行看板**：HTTP 模式下打开 `/` 即见请求量、L1/L2 分布、耗时分位与分桶、结果码、正文类型、L2 页位与代理池健康度；单文件 HTML，无外部依赖，每 5 秒自动刷新。
 - **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
 - **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`；第三方包可通过入口点注册自定义字段类型。
@@ -186,6 +189,9 @@ cp .env.example .env    # 生成配置模板
 | `BATCH_MAX_URLS` | `20` | `web_batch` 单批上限 |
 | `HOST_MAX_CONCURRENCY` | `2` | 同一主机的并发上限（`web_batch`/`web_crawl` 共用） |
 | `CRAWL_MAX_PAGES` | `20` | `web_crawl` 单次最多抓取页数硬上限 |
+| `SEARCH_PROVIDER` | `duckduckgo` | `web_search` 后端：`duckduckgo`（HTML 端点，无需 key）/ `searxng`（自托管 JSON API） |
+| `SEARCH_SEARXNG_URL` | — | SearXNG 实例根地址，如 `http://127.0.0.1:8080`；`provider=searxng` 时必填 |
+| `SEARCH_MAX_RESULTS` | `20` | `web_search` 单次返回条数硬上限 |
 | `DATASET` | — | 数据集导出路径（JSONL，一行一次成功抓取）；留空不导出 |
 | `RESPECT_ROBOTS` | `true` | 默认遵循目标站 robots.txt；`false` 忽略（仅建议自用合规场景关闭） |
 | `ALLOWED_HOSTS` | — | 主机白名单（逗号分隔）；非空时仅允许名单内主机 |
@@ -369,6 +375,20 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `selector` 只看页面内某一块（按命中的全部节点拼接），适合盯榜单/价格/公告位；不同 `selector` 各存一份快照，互不覆盖
   - `reset=true` 丢弃旧快照重建基线；比较口径忽略行尾空白与空行，避免渲染噪声误报
   - 抓取失败（拦截/超时/登录墙）不会覆盖快照，恢复后仍能对比出期间变化；`bypass_cache` 默认 `true`，保证拿到的是最新内容
+- **`web_search(query, max_results=10, provider=None, ...)`** → 搜索关键词，返回结构化结果列表
+  - `provider`: `duckduckgo`（默认，取 `SEARCH_PROVIDER`）/ `searxng`（需先设 `SEARCH_SEARXNG_URL`）
+  - 每条结果含 `rank` / `title` / `url` / `snippet`；`count` 与 `cached` 标明条数与是否命中结果缓存
+  - 搜索服务按接口使用：仍遵守主机白/黑名单与全局限流，但不套目标站的 robots 抓取规则
+  - `bypass_cache` 强制现查；`proxy` 与 `deadline_ms` 语义同 `web_fetch`
+- **`web_screenshot(url, path=None, full_page=False, width=1280, height=800, wait_ms=0, selector=None, ...)`** → 浏览器渲染并截图，返回本地 PNG 路径
+  - 不传 `path` 时存到 `DATA_DIR/screenshots/`；`full_page=true` 截整页，否则只截视口
+  - `selector` 是截图前等待出现的 CSS 选择器（不命中不致命，`notes` 会记录）；`wait_ms` 额外等动画/懒加载
+  - 复用 `session` 登录态与浏览器池；`proxy` / `deadline_ms` 语义同 `web_fetch`
+- **`web_index(url, include=None, exclude=None, limit=1000, check_content=False, dry_run=False, reset=False, ...)`** → sitemap 增量索引
+  - 传站点根/任意页面 URL 按 host 找 sitemap，也可直接传 sitemap 地址；`include`/`exclude` 用正则过滤 URL
+  - 返回 `new` / `changed` / `unchanged` / `removed` 计数与对应 URL 列表（每类最多 50 条），`first_seen` 标明是否首次建立基线
+  - `check_content=true` 对新增/变更条目回抓正文比哈希（单次最多 20 个），内容没真变的不算 `changed`
+  - `dry_run=true` 只对比不落盘；`reset=true` 丢弃旧基线；`limit` 限制本次处理条数（硬上限 5000）
 - **`login(url, timeout=180, session="default")`** → 打开带界面浏览器手动登录并持久化登录态
   - 多账号场景用不同 `session` 名分别登录，`web_fetch` 时传同一个名字即可，互不覆盖
 - **`session_list()`** → 列出本地已保存的登录态（`session` + `host` + `updated_at`），不含 cookie 内容
@@ -619,7 +639,7 @@ scrape-mcp dataset to-parquet                   # 生成同目录 .parquet（需
 ```python
 import asyncio
 
-from scrape_mcp.sdk import aclose, batch, crawl, extract, fetch
+from scrape_mcp.sdk import aclose, batch, crawl, extract, fetch, index, screenshot, search
 
 
 async def main() -> None:
@@ -647,6 +667,15 @@ async def main() -> None:
 
     many = await batch(["https://example.com", "https://example.org"])
     print(many["ok_count"], "/", many["total"])
+
+    hits = await search("python asyncio 文档", max_results=5)
+    print(hits["count"], hits["results"][0]["url"])
+
+    shot = await screenshot("https://example.com", full_page=True)
+    print(shot["file"], shot["bytes"])
+
+    changes = await index("https://docs.python.org", dry_run=True)
+    print(changes["new"], changes["changed"], changes["removed"])
 
     await aclose()  # 触发过 L2 时释放浏览器子进程；不调用也能跑，只是退出时可能有清理告警
 

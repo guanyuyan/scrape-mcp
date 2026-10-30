@@ -307,6 +307,16 @@ def test_sdk_aclose_releases_fetcher(monkeypatch):
 
 def test_sdk_module_is_the_programmatic_entry():
     assert sdk.fetch is sdk.__dict__["fetch"]
-    assert set(sdk.__all__) == {"aclose", "batch", "crawl", "extract", "fetch", "watch"}
+    assert set(sdk.__all__) == {
+        "aclose",
+        "batch",
+        "crawl",
+        "extract",
+        "fetch",
+        "index",
+        "screenshot",
+        "search",
+        "watch",
+    }
     # 顶层保持只有版本号，避免与 scrape_mcp.extract 子包重名
     assert scrape_mcp.__dict__.get("fetch") is None

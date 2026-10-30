@@ -123,6 +123,18 @@ class BrowserOutcome:
     scroll_rounds: int = 0
 
 
+@dataclass
+class ScreenshotOutcome:
+    ok: bool
+    url: str
+    final_url: str
+    status: int
+    png: bytes
+    elapsed_ms: int
+    error: str | None = None
+    notes: list[str] = field(default_factory=list)
+
+
 class BrowserRenderer:
     def __init__(self, settings: Settings) -> None:
         self._s = settings
@@ -536,6 +548,120 @@ class BrowserRenderer:
                 scroll_rounds += 1
                 await page.wait_for_timeout(self._s.l2_scroll_delay_ms)
         return wait_for_hit, clicked, scroll_rounds
+
+    # ---------- 截图 ----------
+
+    async def screenshot(
+        self,
+        url: str,
+        host: str | None = None,
+        *,
+        full_page: bool = False,
+        width: int = 1280,
+        height: int = 800,
+        wait_ms: int = 0,
+        selector: str | None = None,
+        session: str = "default",
+        timeout: float | None = None,
+        proxy: str | None = None,
+    ) -> ScreenshotOutcome:
+        """渲染并截图；复用同站同会话的 context，带登录态与 stealth 初始化脚本。"""
+        t0 = time.perf_counter()
+        host = host or urlparse(url).netloc.lower()
+        slots = self._page_slots()
+        self._queued += 1
+        try:
+            await slots.acquire()
+        finally:
+            self._queued -= 1
+        self._active += 1
+        self._touch()
+        try:
+            return await self._screenshot_once(
+                url,
+                host,
+                t0,
+                full_page=full_page,
+                width=width,
+                height=height,
+                wait_ms=wait_ms,
+                selector=selector,
+                session=session,
+                timeout=timeout,
+                proxy=proxy,
+            )
+        finally:
+            self._active -= 1
+            slots.release()
+
+    async def _screenshot_once(
+        self,
+        url: str,
+        host: str,
+        t0: float,
+        *,
+        full_page: bool,
+        width: int,
+        height: int,
+        wait_ms: int,
+        selector: str | None,
+        session: str,
+        timeout: float | None,
+        proxy: str | None,
+    ) -> ScreenshotOutcome:
+        nav_ms = int((timeout or self._s.l2_navigate_timeout) * 1000)
+        try:
+            context = await self._context_for(host, session, proxy=proxy)
+        except Exception as exc:
+            return ScreenshotOutcome(
+                ok=False,
+                url=url,
+                final_url=url,
+                status=0,
+                png=b"",
+                elapsed_ms=_ms(t0),
+                error=f"浏览器启动失败: {type(exc).__name__}: {exc}",
+            )
+
+        page = await context.new_page()
+        notes: list[str] = []
+        status = 0
+        try:
+            await page.set_viewport_size({"width": width, "height": height})
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=nav_ms)
+            status = resp.status if resp is not None else 0
+            if selector:
+                # 选择器只是"等它出现再拍"的稳定点；没命中不致命，照常截图
+                try:
+                    await page.wait_for_selector(selector, timeout=min(nav_ms, 5000))
+                except Exception:
+                    notes.append(f"selector 未命中: {selector}")
+            if wait_ms > 0:
+                await page.wait_for_timeout(wait_ms)
+            png = await page.screenshot(full_page=full_page)
+            return ScreenshotOutcome(
+                ok=True,
+                url=url,
+                final_url=page.url,
+                status=status,
+                png=png,
+                elapsed_ms=_ms(t0),
+                notes=notes,
+            )
+        except Exception as exc:
+            return ScreenshotOutcome(
+                ok=False,
+                url=url,
+                final_url=url,
+                status=status,
+                png=b"",
+                elapsed_ms=_ms(t0),
+                error=f"{type(exc).__name__}: {exc}",
+                notes=notes,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await page.close()
 
     # ---------- 登录（M3） ----------
 

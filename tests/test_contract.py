@@ -11,6 +11,7 @@ import json
 
 from scrape_mcp import server
 from scrape_mcp.core import errors
+from scrape_mcp.core.browser import ScreenshotOutcome
 from scrape_mcp.core.fetcher import FetchOutcome
 from scrape_mcp.core.session import SessionStore
 from scrape_mcp.extract.pdf import PdfUnavailableError
@@ -131,6 +132,63 @@ CRAWL_OK_PAYLOAD = {
 }
 
 BATCH_OK_PAYLOAD = {"ok", "total", "ok_count", "results"}
+
+SEARCH_OK_PAYLOAD = {"ok", "query", "provider", "count", "results", "elapsed_ms", "cached"}
+
+SEARCH_ERROR_PAYLOAD = {"ok", "query", "provider", "error_code", "error", "retryable"}
+
+SCREENSHOT_OK_PAYLOAD = {
+    "ok",
+    "url",
+    "final_url",
+    "status",
+    "file",
+    "bytes",
+    "width",
+    "height",
+    "full_page",
+    "selector",
+    "wait_ms",
+    "elapsed_ms",
+    "notes",
+}
+
+SCREENSHOT_ERROR_PAYLOAD = {"ok", "url", "error_code", "error", "retryable"}
+
+INDEX_OK_PAYLOAD = {
+    "ok",
+    "url",
+    "host",
+    "sitemaps",
+    "total",
+    "entries",
+    "new",
+    "changed",
+    "unchanged",
+    "removed",
+    "new_urls",
+    "changed_urls",
+    "removed_urls",
+    "content_checked",
+    "first_seen",
+    "truncated",
+    "dry_run",
+    "elapsed_ms",
+    "errors",
+}
+
+SITEMAP_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    "<url><loc>https://a.test/one</loc></url></urlset>"
+)
+
+SEARCH_HTML = (
+    '<div class="result results_links">'
+    '<h2 class="result__title"><a class="result__a" '
+    'href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.test%2Fone">结果</a></h2>'
+    '<a class="result__snippet">摘要</a></div>'
+)
 
 
 def _outcome(**overrides) -> FetchOutcome:
@@ -508,3 +566,84 @@ def test_web_extract_without_schema_or_recipe(monkeypatch):
     out = _run(server.web_extract(URL))
     assert set(out) == INVALID_PAYLOAD | {"url"}
     assert out["error_code"] == errors.INVALID_ARGUMENT
+
+
+# ---- web_search ----
+
+
+def test_web_search_success_keys(monkeypatch):
+    _patch_fetch(monkeypatch, _outcome(html=SEARCH_HTML))
+    out = _run(server.web_search("示例"))
+    assert set(out) == SEARCH_OK_PAYLOAD
+    assert set(out["results"][0]) == {"rank", "title", "url", "snippet"}
+    assert out["results"][0]["url"] == "https://a.test/one"
+
+
+def test_web_search_failure_keys(monkeypatch):
+    _patch_fetch(monkeypatch, _outcome(html="", error="ReadTimeout: timed out"))
+    out = _run(server.web_search("示例"))
+    assert set(out) == SEARCH_ERROR_PAYLOAD
+    assert out["error_code"] == errors.TIMEOUT
+
+
+# ---- web_screenshot ----
+
+
+def test_web_screenshot_success_keys(monkeypatch):
+    class _Fake:
+        async def screenshot(self, url: str, **_kwargs) -> ScreenshotOutcome:
+            return ScreenshotOutcome(
+                ok=True,
+                url=url,
+                final_url=url,
+                status=200,
+                png=b"PNG",
+                elapsed_ms=3,
+            )
+
+    async def allowed(_url: str, *_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(server, "_compliance_check", allowed)
+    monkeypatch.setattr(server, "_get_fetcher", lambda: _Fake())
+    out = _run(server.web_screenshot(URL))
+    assert set(out) == SCREENSHOT_OK_PAYLOAD
+    assert out["ok"] is True and out["bytes"] == 3
+
+
+def test_web_screenshot_failure_keys(monkeypatch):
+    class _Fake:
+        async def screenshot(self, url: str, **_kwargs) -> ScreenshotOutcome:
+            return ScreenshotOutcome(
+                ok=False,
+                url=url,
+                final_url=url,
+                status=0,
+                png=b"",
+                elapsed_ms=3,
+                error="Timeout: navigation",
+            )
+
+    async def allowed(_url: str, *_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(server, "_compliance_check", allowed)
+    monkeypatch.setattr(server, "_get_fetcher", lambda: _Fake())
+    out = _run(server.web_screenshot(URL))
+    assert set(out) == SCREENSHOT_ERROR_PAYLOAD
+    assert out["error_code"] == errors.TIMEOUT
+
+
+# ---- web_index ----
+
+
+def test_web_index_success_keys(monkeypatch):
+    async def fake_html(url: str, **_kwargs):
+        if url.endswith("/robots.txt"):
+            return _outcome(html="Sitemap: https://a.test/sitemap.xml"), None
+        return _outcome(html=SITEMAP_XML), None
+
+    monkeypatch.setattr(server, "_fetch_html", fake_html)
+    out = _run(server.web_index(URL, dry_run=True))
+    assert set(out) == INDEX_OK_PAYLOAD
+    assert out["ok"] is True and out["new"] == 1

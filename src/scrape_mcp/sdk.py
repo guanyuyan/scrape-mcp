@@ -20,7 +20,17 @@ from . import server
 from .config import get_settings
 from .core.logging import configure
 
-__all__ = ["aclose", "batch", "crawl", "extract", "fetch", "watch"]
+__all__ = [
+    "aclose",
+    "batch",
+    "crawl",
+    "extract",
+    "fetch",
+    "index",
+    "screenshot",
+    "search",
+    "watch",
+]
 
 _logging_ready = False
 
@@ -65,6 +75,24 @@ async def watch(url: str, **options: Any) -> dict[str, Any]:
     """对比页面自上次抓取以来的变化；参数同 ``web_watch``。"""
     _ensure_logging()
     return _parse(await server.web_watch(url, **options))
+
+
+async def search(query: str, **options: Any) -> dict[str, Any]:
+    """搜索关键词并返回结构化结果；参数同 ``web_search``。"""
+    _ensure_logging()
+    return _parse(await server.web_search(query, **options))
+
+
+async def screenshot(url: str, **options: Any) -> dict[str, Any]:
+    """浏览器渲染并截图，返回本地 PNG 路径；参数同 ``web_screenshot``。"""
+    _ensure_logging()
+    return _parse(await server.web_screenshot(url, **options))
+
+
+async def index(url: str, **options: Any) -> dict[str, Any]:
+    """读取 sitemap 并与上次清单对比；参数同 ``web_index``。"""
+    _ensure_logging()
+    return _parse(await server.web_index(url, **options))
 
 
 async def aclose() -> None:

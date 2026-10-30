@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -26,7 +28,20 @@ from .core.proxy import split_pool, valid_proxy
 from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
+from .core.search import PROVIDERS, SearchError, parse_results, search_url
 from .core.session import CookieFileError, SessionStore, load_cookie_file, normalize_session
+from .core.siteindex import (
+    MAX_CONTENT_CHECKS,
+    MAX_DEPTH,
+    MAX_LISTED,
+    MAX_SITEMAPS,
+    SiteIndexStore,
+    SitemapError,
+    decode_sitemap,
+    diff_index,
+    parse_sitemap,
+    sitemap_candidates,
+)
 from .core.stats import get_stats
 from .core.watch import MAX_SNAPSHOT_CHARS, WatchStore, content_hash, diff_summary, watch_key
 from .extract.compact import LINK_POLICIES, compact_html
@@ -242,7 +257,9 @@ def _diagnostics(outcome: FetchOutcome, *, detail: bool = False) -> dict:
 _COMPLIANCE_MIN_S = 0.5
 
 
-async def _compliance_check(url: str, deadline: float | None = None) -> dict | None:
+async def _compliance_check(
+    url: str, deadline: float | None = None, *, check_robots: bool = True
+) -> dict | None:
     """阶段 0 合规：白/黑名单 → 全局限流 → robots.txt。
 
     通过返回 None；被拦返回结构化错误 payload（拒绝抓取，不发起任何请求）。
@@ -269,7 +286,7 @@ async def _compliance_check(url: str, deadline: float | None = None) -> dict | N
         except asyncio.TimeoutError:
             return _deadline_payload(url, "等待全局限流配额时预算耗尽")
 
-    if settings.respect_robots:
+    if settings.respect_robots and check_robots:
         if _budget_below(deadline, _COMPLIANCE_MIN_S):
             return _deadline_payload(url, "预算不足以完成 robots.txt 检查")
         robots = _get_robots()
@@ -775,6 +792,548 @@ async def _fetch_dict(
         get_stats().record_tokens(payload["token_estimate"])
         record_result(payload, tool=record_tool)
     return payload
+
+
+@mcp.tool()
+async def web_search(
+    query: str,
+    max_results: int = 10,
+    provider: str | None = None,
+    bypass_cache: bool = False,
+    deadline_ms: int | None = None,
+    proxy: str | None = None,
+) -> str:
+    """搜索关键词，返回结构化的结果列表（标题 / URL / 摘要），不抓结果页正文。
+
+    适合"先找入口再抓正文"的两步流程：本工具负责发现候选 URL，正文仍交给 web_fetch。
+
+    Args:
+        query: 搜索关键词，不能为空。
+        max_results: 期望返回条数，超出配置上限 search_max_results 时按上限截断。
+        provider: 搜索后端。duckduckgo=HTML 端点，无需 key（默认，取配置 search_provider）；
+            searxng=自托管实例的 JSON API，需设置 SCRAPE_MCP_SEARCH_SEARXNG_URL。
+        bypass_cache: 跳过并绕过搜索结果缓存，强制现查。
+        deadline_ms: 整次调用的总预算（毫秒），不传表示不限。
+        proxy: 本次请求使用的代理；不传则按代理池分配，未配池时沿用全局配置。
+    """
+    if not isinstance(query, str) or not query.strip():
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="query 不能为空",
+        )
+    if isinstance(max_results, bool) or not isinstance(max_results, int) or max_results < 1:
+        return _payload(
+            ok=False,
+            query=query,
+            error_code=errors.INVALID_ARGUMENT,
+            error="max_results 必须是正整数",
+        )
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
+
+    settings = get_settings()
+    name = (provider or settings.search_provider or "duckduckgo").strip().lower()
+    if name not in PROVIDERS:
+        return _payload(
+            ok=False,
+            query=query,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"provider 必须是 {PROVIDERS} 之一",
+        )
+    if name == "searxng" and not (settings.search_searxng_url or "").strip():
+        return _payload(
+            ok=False,
+            query=query,
+            provider=name,
+            error_code=errors.INVALID_ARGUMENT,
+            error="使用 searxng 需先设置 SCRAPE_MCP_SEARCH_SEARXNG_URL",
+        )
+    limit = min(max_results, max(1, int(settings.search_max_results)))
+
+    cache: ResultCache | None = None
+    key = ""
+    if _cacheable(headers=None, cookies=None, bypass_cache=bypass_cache, debug=False, proxy=proxy):
+        cache = _result_cache("search")
+        key = _result_key(
+            kind="search",
+            version=__version__,
+            provider=name,
+            endpoint=(settings.search_searxng_url or "").strip(),
+            query=query.strip(),
+            limit=limit,
+        )
+        if (hit := _cache_hit(cache, key)) is not None:
+            return _payload(**hit)
+
+    url = search_url(query.strip(), name, endpoint=(settings.search_searxng_url or "").strip())
+    # 搜索服务按"接口"使用：仍遵守主机白/黑名单与全局限流，但不套目标站的 robots 抓取规则
+    denied = await _compliance_check(url, deadline, check_robots=False)
+    if denied is not None:
+        return _payload(
+            ok=False,
+            query=query,
+            provider=name,
+            error_code=denied["error_code"],
+            error=denied["error"],
+            retryable=denied["retryable"],
+        )
+
+    async with _get_hostlimiter().slot(_host_of(url)):
+        if dl.expired(deadline):
+            return _payload(
+                ok=False,
+                query=query,
+                provider=name,
+                error_code=errors.TIMEOUT,
+                error="超出总预算 deadline_ms，未完成搜索",
+                retryable=True,
+            )
+        outcome = await _get_fetcher().fetch(
+            url,
+            bypass_cache=bypass_cache,
+            deadline=deadline,
+            timeout=dl.remaining(deadline),
+            proxy=proxy,
+        )
+
+    code = errors.classify_outcome(outcome)
+    if outcome.error or outcome.blocked != "none" or outcome.status >= 400:
+        if outcome.error:
+            message = outcome.error
+        elif outcome.blocked != "none":
+            message = f"搜索服务返回拦截页（{outcome.blocked}）；{outcome.block_reason}"
+        else:
+            message = f"搜索服务返回 HTTP {outcome.status}"
+        return _payload(
+            ok=False,
+            query=query,
+            provider=name,
+            error_code=code,
+            error=message,
+            retryable=errors.is_retryable(code),
+        )
+
+    try:
+        hits = parse_results(name, outcome.html, limit)
+    except SearchError as exc:
+        return _payload(
+            ok=False,
+            query=query,
+            provider=name,
+            error_code=errors.UNSUPPORTED_CONTENT,
+            error=str(exc),
+            retryable=False,
+        )
+
+    payload = {
+        "ok": True,
+        "query": query,
+        "provider": name,
+        "count": len(hits),
+        "results": [
+            {"rank": i, "title": hit.title, "url": hit.url, "snippet": hit.snippet}
+            for i, hit in enumerate(hits, start=1)
+        ],
+        "elapsed_ms": outcome.elapsed_ms,
+        "cached": outcome.cached,
+    }
+    if cache is not None:
+        cache.put(key, payload)
+    return _payload(**payload)
+
+
+@mcp.tool()
+async def web_screenshot(
+    url: str,
+    path: str | None = None,
+    full_page: bool = False,
+    width: int = 1280,
+    height: int = 800,
+    wait_ms: int = 0,
+    selector: str | None = None,
+    session: str = "default",
+    deadline_ms: int | None = None,
+    proxy: str | None = None,
+) -> str:
+    """用真实浏览器渲染页面并截图，保存为 PNG 并返回本地文件路径。
+
+    与 web_fetch 共用浏览器池与登录态：需要登录/JS 渲染的页面会先带上已保存的
+    session，再按需等待某个元素出现后截图，适合"给模型看一眼页面长什么样"。
+
+    Args:
+        url: 目标网页完整 URL。
+        path: 保存路径（可为相对或绝对路径，父目录自动创建）；不传则存到
+            ``DATA_DIR/screenshots/`` 下，文件名按 URL 与参数派生。
+        full_page: True 时截整页（含滚动区域），默认只截当前视口。
+        width: 视口宽度（像素），默认 1280。
+        height: 视口高度（像素），默认 800。
+        wait_ms: 页面加载后额外等待的毫秒数，给动画/懒加载留时间。
+        selector: 截图前等待该 CSS 选择器出现（不命中不致命，照常截图）。
+        session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致。
+        deadline_ms: 整次调用的总预算（毫秒），不传表示不限。
+        proxy: 本次渲染使用的代理；不传则按代理池分配，未配池时沿用全局配置。
+    """
+    if not url.startswith(("http://", "https://")):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
+    for label, value in (("width", width), ("height", height)):
+        if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 5000:
+            return _payload(
+                ok=False,
+                url=url,
+                error_code=errors.INVALID_ARGUMENT,
+                error=f"{label} 需在 100~5000 之间",
+            )
+    if isinstance(wait_ms, bool) or not isinstance(wait_ms, int) or not 0 <= wait_ms <= 30000:
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="wait_ms 需在 0~30000 之间",
+        )
+    if selector is not None and (not isinstance(selector, str) or not selector.strip()):
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="selector 必须是非空字符串",
+        )
+
+    denied = await _compliance_check(url, deadline)
+    if denied is not None:
+        return _payload(**denied)
+
+    async with _get_hostlimiter().slot(_host_of(url)):
+        if dl.expired(deadline):
+            return _payload(**_deadline_payload(url))
+        result = await _get_fetcher().screenshot(
+            url,
+            full_page=full_page,
+            width=width,
+            height=height,
+            wait_ms=wait_ms,
+            selector=selector,
+            session=session,
+            timeout=dl.remaining(deadline),
+            proxy=proxy,
+        )
+
+    if not result.ok:
+        code = errors.classify_message(result.error)
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=code,
+            error=result.error or "截图失败",
+            retryable=errors.is_retryable(code),
+        )
+
+    settings = get_settings()
+    if path:
+        target = Path(path).expanduser()
+    else:
+        digest = hashlib.sha256(
+            f"{result.final_url}|{full_page}|{width}x{height}|{selector or ''}".encode()
+        ).hexdigest()[:16]
+        target = (
+            Path(settings.data_dir).expanduser()
+            / "screenshots"
+            / f"{digest}_{int(time.time() * 1000)}.png"
+        )
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(result.png)
+    except OSError as exc:
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"写入 {target} 失败: {exc}",
+        )
+
+    return _payload(
+        ok=True,
+        url=url,
+        final_url=result.final_url,
+        status=result.status,
+        file=str(target),
+        bytes=len(result.png),
+        width=width,
+        height=height,
+        full_page=full_page,
+        selector=selector,
+        wait_ms=wait_ms,
+        elapsed_ms=result.elapsed_ms,
+        notes=result.notes,
+    )
+
+
+def _regex_arg(pattern: str | None, field: str) -> tuple[re.Pattern | None, dict | None]:
+    """编译 include/exclude 正则；空值表示不过滤，非法正则给出统一错误载荷。"""
+    if not pattern:
+        return None, None
+    try:
+        return re.compile(pattern), None
+    except re.error as exc:
+        return None, {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": f"{field} 不是合法正则: {exc}",
+            "retryable": False,
+        }
+
+
+@mcp.tool()
+async def web_index(
+    url: str,
+    include: str | None = None,
+    exclude: str | None = None,
+    limit: int = 1000,
+    check_content: bool = False,
+    dry_run: bool = False,
+    reset: bool = False,
+    session: str = "default",
+    deadline_ms: int | None = None,
+    proxy: str | None = None,
+) -> str:
+    """读取站点的 sitemap，清点页面 URL 并与上次的清单对比。
+
+    入口优先取 robots.txt 里的 ``Sitemap:``，没有就回退 ``/sitemap.xml``；
+    sitemap index 会递归展开（最多 20 个文件、2 层），支持 ``.gz`` 压缩包。
+    清单存到 ``DATA_DIR/index/<host>.json``，下次返回新增 / 变更 / 未变 / 移除的计数与 URL。
+
+    Args:
+        url: 站点根或任意页面 URL（按 host 找 sitemap）；也可直接给 sitemap 地址。
+        include: 只保留 URL 匹配该正则的条目；不传不过滤。
+        exclude: 排除 URL 匹配该正则的条目；不传不排除。
+        limit: 本次最多处理多少条 URL（默认 1000，硬上限 5000）。
+        check_content: True 时对 lastmod 变过的条目回抓正文并比哈希，内容真没变的不算 changed
+            （单次最多回抓 20 个，避免把站点打穿）。
+        dry_run: True 时只对比、不写入本次清单（便于先预览）。
+        reset: 丢弃旧清单并重建基线（本次返回 first_seen=true）。
+        session: 回抓正文时使用的登录态会话名（默认 default）。
+        deadline_ms: 整次调用的总预算（毫秒），不传表示不限；预算耗尽后不再展开新 sitemap。
+        proxy: 本次所有请求共用的代理；不传则按代理池分配，未配池时沿用全局配置。
+    """
+    if not url.startswith(("http://", "https://")):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="limit 必须是正整数",
+        )
+    limit = min(limit, 5000)
+    include_re, include_err = _regex_arg(include, "include")
+    if include_err is not None:
+        return _payload(**include_err)
+    exclude_re, exclude_err = _regex_arg(exclude, "exclude")
+    if exclude_err is not None:
+        return _payload(**exclude_err)
+
+    started = time.perf_counter()
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    host = parsed.netloc.lower()
+
+    seeds = [url] if parsed.path.lower().endswith((".xml", ".xml.gz")) else []
+    if not seeds:
+        robot_outcome, _robot_err = await _fetch_html(
+            f"{origin}/robots.txt", deadline=deadline, proxy=proxy
+        )
+        robot_text = robot_outcome.html if robot_outcome is not None else ""
+        seeds = sitemap_candidates(robot_text, origin) or [f"{origin}/sitemap.xml"]
+
+    entries: list[dict[str, str]] = []
+    errors_list: list[dict[str, str]] = []
+    pending: list[tuple[str, int]] = [(seed, 0) for seed in seeds]
+    seen: set[str] = set()
+    sitemaps = 0
+    while pending and sitemaps < MAX_SITEMAPS and not dl.expired(deadline):
+        sitemap_url, depth = pending.pop(0)
+        if sitemap_url in seen:
+            continue
+        seen.add(sitemap_url)
+        outcome, err = await _fetch_html(sitemap_url, deadline=deadline, proxy=proxy)
+        if err is not None:
+            errors_list.append(
+                {
+                    "url": sitemap_url,
+                    "error_code": err["error_code"],
+                    "error": err["error"],
+                }
+            )
+            continue
+        try:
+            body = decode_sitemap(outcome.content, outcome.html)
+            page_entries, children = parse_sitemap(body, base_url=sitemap_url)
+        except SitemapError as exc:
+            errors_list.append(
+                {
+                    "url": sitemap_url,
+                    "error_code": errors.UNSUPPORTED_CONTENT,
+                    "error": str(exc),
+                }
+            )
+            continue
+        sitemaps += 1
+        entries.extend(page_entries)
+        if depth < MAX_DEPTH:
+            pending.extend((child, depth + 1) for child in children if child not in seen)
+
+    if sitemaps == 0:
+        first = errors_list[0] if errors_list else None
+        return _payload(
+            ok=False,
+            url=url,
+            host=host,
+            error_code=first["error_code"] if first else errors.EMPTY,
+            error=(
+                f"未能获取任何 sitemap：{first['error']}"
+                if first
+                else "该站没有可用的 sitemap，也没有可回退的 /sitemap.xml"
+            ),
+            retryable=errors.is_retryable(first["error_code"]) if first else False,
+        )
+
+    # 同一 URL 只留一条；有 lastmod 的优先，避免多个 sitemap 重复收录时丢掉时间信息
+    unique: dict[str, dict[str, str]] = {}
+    for entry in entries:
+        old = unique.get(entry["url"])
+        if old is None or (not old.get("lastmod") and entry.get("lastmod")):
+            unique[entry["url"]] = entry
+
+    filtered = [
+        entry
+        for entry in unique.values()
+        if (include_re is None or include_re.search(entry["url"]))
+        and (exclude_re is None or not exclude_re.search(entry["url"]))
+    ]
+    filtered.sort(key=lambda entry: entry["url"])
+    total = len(filtered)
+    current = filtered[:limit]
+    current_urls = {entry["url"] for entry in current}
+
+    store = SiteIndexStore(get_settings().data_dir)
+    previous = None if reset else store.load(host)
+    prev_entries = (previous or {}).get("entries")
+    prev_map = prev_entries if isinstance(prev_entries, dict) else {}
+    diff_all = diff_index(previous, filtered)
+    new = [u for u in diff_all["new"] if u in current_urls]
+    changed_candidates = [u for u in diff_all["changed"] if u in current_urls]
+    # 过滤条件变了以后，被 exclude 的旧条目不该被误报成 removed
+    removed = [
+        u
+        for u in diff_all["removed"]
+        if (include_re is None or include_re.search(u))
+        and (exclude_re is None or not exclude_re.search(u))
+    ]
+
+    hashes: dict[str, str] = {}
+    checked = 0
+    content_unchanged: set[str] = set()
+    if check_content:
+        # 新建条目也顺手记哈希，下次才有基线可比；总量仍受 MAX_CONTENT_CHECKS 约束
+        check_targets = (new + changed_candidates)[:MAX_CONTENT_CHECKS]
+        for target_url in check_targets:
+            if dl.expired(deadline):
+                break
+            page, page_err = await _fetch_html(
+                target_url,
+                deadline=deadline,
+                proxy=proxy,
+                session=session,
+                bypass_cache=True,
+            )
+            checked += 1
+            if page_err is not None:
+                continue
+            text = compact_html(page.html, page.final_url or target_url).content
+            digest = content_hash(text[:MAX_SNAPSHOT_CHARS])
+            hashes[target_url] = digest
+            old = prev_map.get(target_url) or {}
+            if isinstance(old, dict) and old.get("hash") == digest:
+                content_unchanged.add(target_url)
+
+    changed = [u for u in changed_candidates if u not in content_unchanged]
+    unchanged_count = len(current) - len(new) - len(changed)
+
+    if not dry_run:
+        state_entries: dict[str, dict[str, str]] = {}
+        for entry in filtered:
+            record = {"lastmod": entry.get("lastmod") or ""}
+            if entry["url"] in hashes:
+                record["hash"] = hashes[entry["url"]]
+            else:
+                old = prev_map.get(entry["url"])
+                # 上次的 lastmod 没变时沿用旧哈希，减少无谓回抓
+                if (
+                    isinstance(old, dict)
+                    and old.get("lastmod") == record["lastmod"]
+                    and old.get("hash")
+                ):
+                    record["hash"] = old["hash"]
+            state_entries[entry["url"]] = record
+        store.save(
+            host,
+            {
+                "saved_at": time.time(),
+                "host": host,
+                "sitemaps": sitemaps,
+                "entries": state_entries,
+            },
+        )
+
+    return _payload(
+        ok=True,
+        url=url,
+        host=host,
+        sitemaps=sitemaps,
+        total=total,
+        entries=len(current),
+        new=len(new),
+        changed=len(changed),
+        unchanged=unchanged_count,
+        removed=len(removed),
+        new_urls=new[:MAX_LISTED],
+        changed_urls=changed[:MAX_LISTED],
+        removed_urls=removed[:MAX_LISTED],
+        content_checked=checked,
+        first_seen=previous is None,
+        truncated=total > len(current),
+        dry_run=dry_run,
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
+        errors=errors_list[:5],
+    )
 
 
 @mcp.tool()
