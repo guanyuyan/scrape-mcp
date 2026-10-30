@@ -130,7 +130,7 @@ def test_searxng_parser_unwraps_html_pre_wrapper():
 def test_search_url_by_provider():
     assert search_url("a b", "duckduckgo").startswith("https://html.duckduckgo.com/html/?q=a+b")
     assert search_url("a b", "searxng", endpoint="http://searx.test/") == (
-        "http://searx.test/search?q=a+b&format=json&language=all"
+        "http://searx.test/search?q=a+b&format=json"
     )
 
 

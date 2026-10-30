@@ -31,7 +31,8 @@ def search_url(query: str, provider: str, *, endpoint: str = "") -> str:
     """按后端拼出请求 URL；SearXNG 的 endpoint 来自配置。"""
     q = quote_plus(query)
     if provider == "searxng":
-        return f"{(endpoint or '').rstrip('/')}/search?q={q}&format=json&language=all"
+        # 不传 language：部分引擎在 language=all 下会直接返回 0 条
+        return f"{(endpoint or '').rstrip('/')}/search?q={q}&format=json"
     return f"{DUCKDUCKGO_ENDPOINT}?q={q}"
 
 
