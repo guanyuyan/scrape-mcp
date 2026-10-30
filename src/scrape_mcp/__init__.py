@@ -13,4 +13,4 @@ payload = asyncio.run(fetch("https://example.com"))
 
 from __future__ import annotations
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"

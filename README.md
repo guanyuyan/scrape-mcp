@@ -89,7 +89,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 | 腾讯新闻首页 | 列表/门户 | L2 | 338KB | ~1.4k token（约 1.6%） | 动态页升级浏览器渲染 |
 | 极客邦首页 | SPA/动态 | L2 | 12KB | ~1.4k token | JS 骨架页，需渲染才有正文 |
 
-**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、变更检测 `web_watch`、搜索 `web_search`、截图 `web_screenshot`、sitemap 增量索引 `web_index`、登录持久化 `login`，缓存默认开启。
+**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、变更检测 `web_watch`、搜索 `web_search`、截图 `web_screenshot`、站点 URL 发现 `web_map`、sitemap 增量索引 `web_index`、异步爬取任务 `web_crawl_start/status/cancel/list`、登录持久化 `login`，缓存默认开启。
 
 ---
 
@@ -107,13 +107,15 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **非 HTML 内容**：`web_fetch` 直接读纯文本；装 `[pdf]` extra 后按页抽取 PDF 文本，扫描件（无文字层）如实返回 `empty`，不伪造正文。
 - **同 URL 单飞（singleflight）**：同一页面被并发请求时（多租户同时抓、批量/爬取里重复链接）只真抓一次，其余等待并复用同一份响应，省出口流量也少踩目标站风控；L1 与 L2 渲染都会合并。带自定义头/凭证或 `bypass_cache=true` 的请求可能因人而异，不参与合并。
 - **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
-- **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。
+- **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。页数多时改用 `web_crawl_start` 起后台任务，用 `status` 轮询、`cancel` 停止，进程重启后自动续跑。
 - **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
 - **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API；结果可缓存，适合"先搜再抓"的两步流程。
-- **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG，支持整页/视口、自定义尺寸、等待元素与额外延时；复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
+- **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG，支持整页/视口、自定义尺寸、等待元素与额外延时；`actions` 可在截图前先点击/输入/翻页。复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
 - **站点索引**：`web_index` 读 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`），递归展开 sitemap index 并解压 `.gz`；清单落盘后，下次返回新增 / 变更 / 未变 / 移除，可选回抓正文比哈希过滤"只改了时间戳"的假变更。
+- **站点 URL 发现**：`web_map` 同时读 sitemap 与入口页站内链接（可选合并 `web_search` 结果），同一 URL 只出现一次并标出来源；支持 `include`/`exclude` 正则、`search` 子串过滤与 `limit` 截断，适合无 sitemap 的站点。
+- **异步爬取任务**：`web_crawl_start` 立即返回 `job_id`，任务在后台推进并把状态逐页原子落盘到 `DATA_DIR/jobs/`；`web_crawl_status` 可读进度与部分结果、并在进程重启后自动续跑，`web_crawl_cancel` 停止任务，`web_crawl_list` 列出最近任务。同参数重复 start 幂等。
 - **内置运行看板**：HTTP 模式下打开 `/` 即见请求量、L1/L2 分布、耗时分位与分桶、结果码、正文类型、L2 页位与代理池健康度；单文件 HTML，无外部依赖，每 5 秒自动刷新。
-- **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
+- **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
 - **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`；第三方包可通过入口点注册自定义字段类型。
 - **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
 - **输出格式可选**：`format=markdown|text|json`，正文可按段落数组直接入库。
@@ -331,7 +333,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
 ```
 
 - 若复用系统浏览器（免下载）：设环境变量 `SCRAPE_MCP_L2_CHANNEL` 为 `chrome` 或 `msedge`。
-- 配对成功后重启客户端，即可在会话里直接调用 `web_fetch` / `web_extract` / `web_batch` / `web_crawl`。
+- 配对成功后重启客户端，即可在会话里直接调用 `web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start`。
 - 想先看工具定义（名称、说明、入参 schema）：`scrape-mcp schema --tool web_fetch`，或 `--output tools.json` 导出全量。
 - 没有图形界面（容器/服务器）时不必开浏览器：`scrape-mcp session import --url https://<站> --file cookies.txt` 直接导入浏览器扩展导出的 cookies；`scrape-mcp session list` 查看已保存的登录态。
 
@@ -344,7 +346,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 代理：`proxy`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）只对本次调用生效，L1 与升级后的 L2 走同一个出口；不传则按 `SCRAPE_MCP_PROXY_POOL` 代理池分配，未配池时沿用 `SCRAPE_MCP_PROXY`。显式传入代理的请求不读也不写共享缓存，避免不同出口的结果混在一起
   - 总预算：`deadline_ms`（毫秒，可选）限制整次调用；不够时逐级降级，见"错误码与诊断"中的 `deadline:*` 说明
   - 登录态：`session`（默认 `default`），与 `login` 时的会话名一致即可自动带上对应登录态
-  - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）
+  - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）；`actions`（动作链，按顺序执行 click/type/press/select/wait/scroll，单个动作失败只写入 `notes`）
   - 非 HTML：PDF 返回结构化文本（装 `[pdf]` extra；`kind="pdf"` 且带 `pages`/`pages_parsed`），纯文本原样返回（`kind="text"`）
   - 诊断参数：`debug=true` 时返回 `diagnostics`（决策轨迹、选择器命中数、L2 交互结果），不含页面内容
 - **`web_extract(url, schema=None, ...)`** → 按字段 schema 抽取结构化 JSON（可入库）
@@ -369,6 +371,12 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `proxy` 对该次所有页面生效；缺省按代理池分配，未配池时沿用全局配置
   - `deadline_ms` 为整次爬取的预算：耗尽后不再抓新页，已抓到的页面照常返回
   - 客户端请求进度时逐页上报（分页模式为 `已翻到第 n/N 页`，链接模式为 `已抓取 n/N 页`）
+- **`web_crawl_start(url, depth=1, limit=10, ..., next_selector=None, max_pages=None, deadline_ms=None, session="default")`** → 启动异步爬取任务，立即返回 `job_id`
+  - 抓取语义与 `web_crawl` 相同；任务在后台推进，页数多时不会阻塞 MCP 请求
+  - 状态逐页原子落盘到 `DATA_DIR/jobs/<job_id>.json`；同参数重复 start 幂等（`existing=true`）
+  - **`web_crawl_status(job_id, include_results=True)`** → 读取状态、进度与已抓页面；进程重启后会从断点续跑
+  - **`web_crawl_cancel(job_id)`** → 停止任务，已完成页面的部分结果仍可读取；终态任务幂等返回
+  - **`web_crawl_list(limit=20)`** → 列出最近任务（不含正文）
 - **`web_watch(url, selector=None, reset=False, bypass_cache=True, ...)`** → 对比页面自上次抓取以来的变化
   - 每次成功抓取都把正文存一份快照到 `DATA_DIR/watch/`，下次调用与它对比：返回 `changed`、`added_lines` / `removed_lines` 与 `diff` 预览（最多 40 行，`diff_truncated` 标明是否截断）
   - `first_seen=true` 表示这是该 URL 的第一份快照（没有可比对象，故不给 diff）；`previous_hash` / `previous_chars` 便于人工核对
@@ -382,8 +390,12 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `bypass_cache` 强制现查；`proxy` 与 `deadline_ms` 语义同 `web_fetch`
 - **`web_screenshot(url, path=None, full_page=False, width=1280, height=800, wait_ms=0, selector=None, ...)`** → 浏览器渲染并截图，返回本地 PNG 路径
   - 不传 `path` 时存到 `DATA_DIR/screenshots/`；`full_page=true` 截整页，否则只截视口
-  - `selector` 是截图前等待出现的 CSS 选择器（不命中不致命，`notes` 会记录）；`wait_ms` 额外等动画/懒加载
+  - `selector` 是截图前等待出现的 CSS 选择器（不命中不致命，`notes` 会记录）；`wait_ms` 额外等动画/懒加载；`actions` 可在截图前执行点击/输入/滚动等动作
   - 复用 `session` 登录态与浏览器池；`proxy` / `deadline_ms` 语义同 `web_fetch`
+- **`web_map(url, include=None, exclude=None, search=None, limit=500, homepage=True, use_search=False, ...)`** → 发现站点 URL（sitemap + 入口页链接）
+  - 同一 URL 只出现一次，`urls` 每项带 `source`（`sitemap` / `homepage` / `search`），`sources` 给出各类计数
+  - `include`/`exclude` 为正则，`search` 为 URL 子串过滤；`limit` 默认 500、硬上限 5000，超出时 `truncated=true`
+  - 无 sitemap 的站点也能从入口页链接得到候选；`use_search=true` 时额外合并 `site:<host>` 搜索结果
 - **`web_index(url, include=None, exclude=None, limit=1000, check_content=False, dry_run=False, reset=False, ...)`** → sitemap 增量索引
   - 传站点根/任意页面 URL 按 host 找 sitemap，也可直接传 sitemap 地址；`include`/`exclude` 用正则过滤 URL
   - 返回 `new` / `changed` / `unchanged` / `removed` 计数与对应 URL 列表（每类最多 50 条），`first_seen` 标明是否首次建立基线
@@ -639,7 +651,20 @@ scrape-mcp dataset to-parquet                   # 生成同目录 .parquet（需
 ```python
 import asyncio
 
-from scrape_mcp.sdk import aclose, batch, crawl, extract, fetch, index, screenshot, search
+from scrape_mcp.sdk import (
+    aclose,
+    batch,
+    crawl,
+    crawl_cancel,
+    crawl_start,
+    crawl_status,
+    extract,
+    fetch,
+    index,
+    screenshot,
+    search,
+    site_map,
+)
 
 
 async def main() -> None:
@@ -673,6 +698,13 @@ async def main() -> None:
 
     shot = await screenshot("https://example.com", full_page=True)
     print(shot["file"], shot["bytes"])
+
+    urls = await site_map("https://docs.python.org", limit=100)
+    print(urls["count"], urls["sources"])
+
+    job = await crawl_start("https://docs.python.org", depth=1, limit=20)
+    status = await crawl_status(job["job_id"])
+    print(status["state"], status["progress"])
 
     changes = await index("https://docs.python.org", dry_run=True)
     print(changes["new"], changes["changed"], changes["removed"])
@@ -832,10 +864,10 @@ benchmarks/
 ├── sites.json         # 真实站点质量基准站点集（分层、期望结果、完整性检查项）
 └── baseline.json      # 夜间子集基线（趋势参照，每月更新）
 src/scrape_mcp
-├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/web_watch/login/session_*）
+├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/web_map/web_crawl_*/login/session_*）
 ├── http_auth.py       # HTTP Bearer 鉴权中间件 + 非回环绑定校验
 ├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）
-├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/batch/watch/aclose）
+├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/crawl_*/site_map/batch/watch/aclose）
 ├── config.py          # 环境变量配置
 ├── metrics.py         # Prometheus 文本格式指标（/metrics 端点）
 ├── tokenizer.py       # tiktoken 计数 + 预算截断
@@ -848,6 +880,7 @@ src/scrape_mcp
 │   ├── recipes.py     # 站点 recipe（按 host 最长后缀匹配、mtime 重载）
 │   ├── cache.py       # HTTP 响应缓存 + 正文/抽取结果缓存
 │   ├── stats.py       # 进程内计数（/stats 端点数据源）
+│   ├── jobs.py        # 异步爬取任务（状态落盘、进度、恢复与取消）
 │   ├── watch.py       # 变更检测（正文快照 + diff 摘要）
 │   ├── errors.py      # 统一错误码
 │   └── hostlimit.py   # 同域并发闸门

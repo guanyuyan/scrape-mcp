@@ -311,11 +311,16 @@ def test_sdk_module_is_the_programmatic_entry():
         "aclose",
         "batch",
         "crawl",
+        "crawl_cancel",
+        "crawl_list",
+        "crawl_start",
+        "crawl_status",
         "extract",
         "fetch",
         "index",
         "screenshot",
         "search",
+        "site_map",
         "watch",
     }
     # 顶层保持只有版本号，避免与 scrape_mcp.extract 子包重名

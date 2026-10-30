@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-30
+
+### Added
+- 新增 `web_map` 工具：同时读取 sitemap 与入口页站内链接（可选合并 `web_search` 的 `site:<host>` 结果），同一 URL 只出现一次并标出来源（`sitemap` / `homepage` / `search`）；支持 `include`/`exclude` 正则、`search` 子串过滤、`limit`（默认 500，硬上限 5000）与 `deadline_ms`
+- 新增异步爬取任务 `web_crawl_start` / `web_crawl_status` / `web_crawl_cancel` / `web_crawl_list`：任务在后台推进，状态逐页原子落盘到 `DATA_DIR/jobs/`；支持进度与部分结果、取消、同参数幂等启动，以及进程重启后自动续跑
+- `web_fetch` / `web_screenshot` 新增 `actions` 动作链（click/type/press/select/wait/scroll）：按顺序执行交互后再抽取或截图；单个动作失败只写入 `notes`，不影响后续动作；不提供任意 JS 执行入口
+- 传 `actions` 时自动跳过 L1、直接走浏览器渲染；浏览器不可用或预算不足时如实返回"动作未执行"并退回 L1 正文
+- SDK 新增 `site_map()` / `crawl_start()` / `crawl_status()` / `crawl_cancel()` / `crawl_list()`；README 中英文与目录树同步更新
+
 ## [0.20.0] - 2026-10-30
 
 ### Added

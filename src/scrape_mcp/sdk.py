@@ -24,11 +24,16 @@ __all__ = [
     "aclose",
     "batch",
     "crawl",
+    "crawl_cancel",
+    "crawl_list",
+    "crawl_start",
+    "crawl_status",
     "extract",
     "fetch",
     "index",
     "screenshot",
     "search",
+    "site_map",
     "watch",
 ]
 
@@ -65,6 +70,30 @@ async def crawl(url: str, **options: Any) -> dict[str, Any]:
     return _parse(await server.web_crawl(url, **options))
 
 
+async def crawl_start(url: str, **options: Any) -> dict[str, Any]:
+    """启动异步爬取任务并返回 job_id；参数同 ``web_crawl_start``。"""
+    _ensure_logging()
+    return _parse(await server.web_crawl_start(url, **options))
+
+
+async def crawl_status(job_id: str, **options: Any) -> dict[str, Any]:
+    """读取异步任务状态与部分结果；参数同 ``web_crawl_status``。"""
+    _ensure_logging()
+    return _parse(await server.web_crawl_status(job_id, **options))
+
+
+async def crawl_cancel(job_id: str) -> dict[str, Any]:
+    """取消异步爬取任务；参数同 ``web_crawl_cancel``。"""
+    _ensure_logging()
+    return _parse(await server.web_crawl_cancel(job_id))
+
+
+async def crawl_list(**options: Any) -> dict[str, Any]:
+    """列出最近的异步爬取任务；参数同 ``web_crawl_list``。"""
+    _ensure_logging()
+    return _parse(await server.web_crawl_list(**options))
+
+
 async def batch(urls: list[str], **options: Any) -> dict[str, Any]:
     """并发抓取一组 URL；参数同 ``web_batch``。"""
     _ensure_logging()
@@ -93,6 +122,12 @@ async def index(url: str, **options: Any) -> dict[str, Any]:
     """读取 sitemap 并与上次清单对比；参数同 ``web_index``。"""
     _ensure_logging()
     return _parse(await server.web_index(url, **options))
+
+
+async def site_map(url: str, **options: Any) -> dict[str, Any]:
+    """发现站点 URL（sitemap + 入口页链接）；参数同 ``web_map``。"""
+    _ensure_logging()
+    return _parse(await server.web_map(url, **options))
 
 
 async def aclose() -> None:

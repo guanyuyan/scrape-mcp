@@ -23,6 +23,7 @@ from .core.cache import ResultCache
 from .core.dataset import record_result
 from .core.fetcher import Fetcher, FetchOutcome
 from .core.hostlimit import HostLimiter
+from .core.jobs import CrawlJobManager, JobStore
 from .core.logging import configure, log_event
 from .core.proxy import split_pool, valid_proxy
 from .core.ratelimit import RateLimiter
@@ -62,6 +63,7 @@ _fetcher: Fetcher | None = None
 _ratelimiter: RateLimiter | None = None
 _robots: RobotsChecker | None = None
 _hostlimiter: HostLimiter | None = None
+_jobs: CrawlJobManager | None = None
 
 
 def _get_fetcher() -> Fetcher:
@@ -90,6 +92,17 @@ def _get_hostlimiter() -> HostLimiter:
     if _hostlimiter is None:
         _hostlimiter = HostLimiter(get_settings().host_max_concurrency)
     return _hostlimiter
+
+
+def _get_jobs() -> CrawlJobManager:
+    """异步爬取任务管理器；状态目录随每次调用的 DATA_DIR 解析（便于测试隔离）。"""
+    global _jobs
+    if _jobs is None:
+        _jobs = CrawlJobManager(
+            lambda: JobStore(Path(get_settings().data_dir) / "jobs"),
+            _crawl_job_page,
+        )
+    return _jobs
 
 
 def _host_of(url: str) -> str:
@@ -229,6 +242,103 @@ def _budget_below(deadline: float | None, need: float) -> bool:
     return left is not None and left < need
 
 
+_ACTION_NAMES = frozenset({"click", "type", "press", "select", "wait", "scroll"})
+_MAX_ACTIONS = 20
+_MAP_LIMIT_MAX = 5000
+
+_INVALID_ACTIONS = {
+    "ok": False,
+    "error_code": errors.INVALID_ARGUMENT,
+    "retryable": False,
+}
+
+
+def _actions_arg(actions: list[dict] | None) -> tuple[list[dict] | None, dict | None]:
+    """校验并规范化浏览器动作链；任一动作不合法就整链拒绝，避免半套执行。"""
+    if actions is None:
+        return None, None
+    if not isinstance(actions, list):
+        return None, {**_INVALID_ACTIONS, "error": "actions 必须是对象数组"}
+    if len(actions) > _MAX_ACTIONS:
+        return None, {
+            **_INVALID_ACTIONS,
+            "error": f"actions 最多 {_MAX_ACTIONS} 个动作，当前 {len(actions)} 个",
+        }
+
+    normalized: list[dict] = []
+    for index, item in enumerate(actions, start=1):
+        label = f"actions[{index}]"
+        if not isinstance(item, dict):
+            return None, {**_INVALID_ACTIONS, "error": f"{label} 必须是对象"}
+        name = item.get("action")
+        if not isinstance(name, str) or name not in _ACTION_NAMES:
+            return None, {
+                **_INVALID_ACTIONS,
+                "error": f"{label} 的 action 需为 {'/'.join(sorted(_ACTION_NAMES))}",
+            }
+        selector = item.get("selector")
+        if selector is not None and (not isinstance(selector, str) or not selector.strip()):
+            return None, {**_INVALID_ACTIONS, "error": f"{label} 的 selector 必须是非空字符串"}
+        if name in ("click", "type", "select") and selector is None:
+            return None, {**_INVALID_ACTIONS, "error": f"{label}（{name}）必须提供 selector"}
+
+        step: dict = {"action": name}
+        if selector:
+            step["selector"] = selector.strip()
+
+        if name == "type":
+            text = item.get("text")
+            if not isinstance(text, str):
+                return None, {**_INVALID_ACTIONS, "error": f"{label}（type）的 text 必须是字符串"}
+            step["text"] = text
+        elif name == "press":
+            key = item.get("key")
+            if not isinstance(key, str) or not key.strip():
+                return None, {**_INVALID_ACTIONS, "error": f"{label}（press）必须提供 key"}
+            step["key"] = key.strip()
+        elif name == "select":
+            value = item.get("value")
+            if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                return None, {
+                    **_INVALID_ACTIONS,
+                    "error": f"{label}（select）的 value 必须是字符串或数字",
+                }
+            step["value"] = str(value)
+        elif name == "wait":
+            ms = item.get("ms")
+            if selector:
+                if ms is not None and (
+                    isinstance(ms, bool) or not isinstance(ms, int) or not 0 < ms <= 30000
+                ):
+                    return None, {
+                        **_INVALID_ACTIONS,
+                        "error": f"{label}（wait）的 ms 需为 1~30000 的整数",
+                    }
+                if ms is not None:
+                    step["ms"] = ms
+            elif isinstance(ms, int) and not isinstance(ms, bool) and 0 < ms <= 30000:
+                step["ms"] = ms
+            else:
+                return None, {
+                    **_INVALID_ACTIONS,
+                    "error": f"{label}（wait）需要 selector 或 1~30000 的 ms",
+                }
+        elif name == "scroll":
+            times = item.get("times")
+            if times is not None and (
+                isinstance(times, bool) or not isinstance(times, int) or not 1 <= times <= 20
+            ):
+                return None, {
+                    **_INVALID_ACTIONS,
+                    "error": f"{label}（scroll）的 times 需为 1~20 的整数",
+                }
+            if times is not None:
+                step["times"] = times
+        normalized.append(step)
+
+    return normalized, None
+
+
 async def _notify_progress(ctx: Context | None, done: int, total: int, message: str) -> None:
     """向客户端汇报进度。
 
@@ -304,6 +414,8 @@ async def _lifespan(_app):
         yield {}
     finally:
         global _fetcher
+        if _jobs is not None:
+            await _jobs.aclose()
         if _fetcher is not None:
             await _fetcher.aclose()
             _fetcher = None
@@ -428,6 +540,7 @@ async def _fetch_html(
     wait_for: str | None = None,
     scroll: bool | None = None,
     click: str | None = None,
+    actions: list[dict] | None = None,
     bypass_cache: bool = False,
     session: str = "default",
     deadline: float | None = None,
@@ -466,6 +579,7 @@ async def _fetch_html(
             wait_for=wait_for,
             scroll=bool(scroll),
             click=click,
+            actions=actions,
             bypass_cache=bypass_cache,
             session=session,
             deadline=deadline,
@@ -652,6 +766,7 @@ async def _fetch_dict(
     wait_for: str | None = None,
     scroll: bool | None = None,
     click: str | None = None,
+    actions: list[dict] | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
     session: str = "default",
@@ -698,6 +813,7 @@ async def _fetch_dict(
             wait_for=wait_for if wait_for is not None else (recipe.wait_for if recipe else None),
             click=click if click is not None else (recipe.click if recipe else None),
             scroll=scroll if scroll is not None else (recipe.scroll if recipe else None),
+            actions=actions,
             pdf_max_pages=settings.pdf_max_pages,
         )
         if (hit := _cache_hit(cache, key)) is not None:
@@ -711,6 +827,7 @@ async def _fetch_dict(
         wait_for=wait_for,
         scroll=scroll,
         click=click,
+        actions=actions,
         bypass_cache=bypass_cache,
         session=session,
         deadline=deadline,
@@ -956,6 +1073,7 @@ async def web_screenshot(
     height: int = 800,
     wait_ms: int = 0,
     selector: str | None = None,
+    actions: list[dict] | None = None,
     session: str = "default",
     deadline_ms: int | None = None,
     proxy: str | None = None,
@@ -974,6 +1092,8 @@ async def web_screenshot(
         height: 视口高度（像素），默认 800。
         wait_ms: 页面加载后额外等待的毫秒数，给动画/懒加载留时间。
         selector: 截图前等待该 CSS 选择器出现（不命中不致命，照常截图）。
+        actions: 截图前按顺序执行的浏览器动作链（click/type/press/select/wait/scroll），
+            适合先展开菜单/搜索再截图；单个动作失败只写入 notes，不影响截图。
         session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致。
         deadline_ms: 整次调用的总预算（毫秒），不传表示不限。
         proxy: 本次渲染使用的代理；不传则按代理池分配，未配池时沿用全局配置。
@@ -1014,6 +1134,9 @@ async def web_screenshot(
             error_code=errors.INVALID_ARGUMENT,
             error="selector 必须是非空字符串",
         )
+    actions, actions_err = _actions_arg(actions)
+    if actions_err is not None:
+        return _payload(**actions_err)
 
     denied = await _compliance_check(url, deadline)
     if denied is not None:
@@ -1029,6 +1152,7 @@ async def web_screenshot(
             height=height,
             wait_ms=wait_ms,
             selector=selector,
+            actions=actions,
             session=session,
             timeout=dl.remaining(deadline),
             proxy=proxy,
@@ -1099,6 +1223,64 @@ def _regex_arg(pattern: str | None, field: str) -> tuple[re.Pattern | None, dict
         }
 
 
+async def _sitemap_entries(
+    url: str, *, deadline: float | None, proxy: str | None
+) -> tuple[list[dict[str, str]], list[dict[str, str]], int]:
+    """收集 sitemap 页面条目：返回 (条目, 错误列表, 成功展开的 sitemap 数)。
+
+    web_index 与 web_map 共用同一套发现逻辑：入口优先取 robots.txt 的 ``Sitemap:``，
+    没有就回退 ``/sitemap.xml``；index 会递归展开（最多 MAX_SITEMAPS 个、MAX_DEPTH 层）。
+    """
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    seeds = [url] if parsed.path.lower().endswith((".xml", ".xml.gz")) else []
+    if not seeds:
+        robot_outcome, _robot_err = await _fetch_html(
+            f"{origin}/robots.txt", deadline=deadline, proxy=proxy
+        )
+        robot_text = robot_outcome.html if robot_outcome is not None else ""
+        seeds = sitemap_candidates(robot_text, origin) or [f"{origin}/sitemap.xml"]
+
+    entries: list[dict[str, str]] = []
+    errors_list: list[dict[str, str]] = []
+    pending: list[tuple[str, int]] = [(seed, 0) for seed in seeds]
+    seen: set[str] = set()
+    sitemaps = 0
+    while pending and sitemaps < MAX_SITEMAPS and not dl.expired(deadline):
+        sitemap_url, depth = pending.pop(0)
+        if sitemap_url in seen:
+            continue
+        seen.add(sitemap_url)
+        outcome, err = await _fetch_html(sitemap_url, deadline=deadline, proxy=proxy)
+        if err is not None:
+            errors_list.append(
+                {
+                    "url": sitemap_url,
+                    "error_code": err["error_code"],
+                    "error": err["error"],
+                }
+            )
+            continue
+        try:
+            body = decode_sitemap(outcome.content, outcome.html)
+            page_entries, children = parse_sitemap(body, base_url=sitemap_url)
+        except SitemapError as exc:
+            errors_list.append(
+                {
+                    "url": sitemap_url,
+                    "error_code": errors.UNSUPPORTED_CONTENT,
+                    "error": str(exc),
+                }
+            )
+            continue
+        sitemaps += 1
+        entries.extend(page_entries)
+        if depth < MAX_DEPTH:
+            pending.extend((child, depth + 1) for child in children if child not in seen)
+
+    return entries, errors_list, sitemaps
+
+
 @mcp.tool()
 async def web_index(
     url: str,
@@ -1162,53 +1344,9 @@ async def web_index(
 
     started = time.perf_counter()
     parsed = urlparse(url)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
     host = parsed.netloc.lower()
 
-    seeds = [url] if parsed.path.lower().endswith((".xml", ".xml.gz")) else []
-    if not seeds:
-        robot_outcome, _robot_err = await _fetch_html(
-            f"{origin}/robots.txt", deadline=deadline, proxy=proxy
-        )
-        robot_text = robot_outcome.html if robot_outcome is not None else ""
-        seeds = sitemap_candidates(robot_text, origin) or [f"{origin}/sitemap.xml"]
-
-    entries: list[dict[str, str]] = []
-    errors_list: list[dict[str, str]] = []
-    pending: list[tuple[str, int]] = [(seed, 0) for seed in seeds]
-    seen: set[str] = set()
-    sitemaps = 0
-    while pending and sitemaps < MAX_SITEMAPS and not dl.expired(deadline):
-        sitemap_url, depth = pending.pop(0)
-        if sitemap_url in seen:
-            continue
-        seen.add(sitemap_url)
-        outcome, err = await _fetch_html(sitemap_url, deadline=deadline, proxy=proxy)
-        if err is not None:
-            errors_list.append(
-                {
-                    "url": sitemap_url,
-                    "error_code": err["error_code"],
-                    "error": err["error"],
-                }
-            )
-            continue
-        try:
-            body = decode_sitemap(outcome.content, outcome.html)
-            page_entries, children = parse_sitemap(body, base_url=sitemap_url)
-        except SitemapError as exc:
-            errors_list.append(
-                {
-                    "url": sitemap_url,
-                    "error_code": errors.UNSUPPORTED_CONTENT,
-                    "error": str(exc),
-                }
-            )
-            continue
-        sitemaps += 1
-        entries.extend(page_entries)
-        if depth < MAX_DEPTH:
-            pending.extend((child, depth + 1) for child in children if child not in seen)
+    entries, errors_list, sitemaps = await _sitemap_entries(url, deadline=deadline, proxy=proxy)
 
     if sitemaps == 0:
         first = errors_list[0] if errors_list else None
@@ -1337,6 +1475,191 @@ async def web_index(
 
 
 @mcp.tool()
+async def web_map(
+    url: str,
+    include: str | None = None,
+    exclude: str | None = None,
+    search: str | None = None,
+    limit: int = 500,
+    homepage: bool = True,
+    use_search: bool = False,
+    session: str = "default",
+    deadline_ms: int | None = None,
+    proxy: str | None = None,
+) -> str:
+    """发现站点 URL：sitemap + 入口页站内链接，可选合并搜索结果。
+
+    与 web_index 的区别：web_index 做增量清单对比，web_map 只负责"尽快列出这个站有哪些
+    可抓的 URL"。无 sitemap 的站点也能从入口页链接得到候选；同一 URL 只出现一次，
+    并标出来源（sitemap / homepage / search）。
+
+    Args:
+        url: 站点根或任意页面 URL；也可直接给 sitemap 地址（此时不再抓入口页链接）。
+        include: 只保留 URL 匹配该正则的条目；不传不过滤。
+        exclude: 排除 URL 匹配该正则的条目；不传不排除。
+        search: 只保留 URL 中匹配该子串的条目（大小写不敏感）；不传不过滤。
+        limit: 最多返回多少条 URL（默认 500，硬上限 5000）。
+        homepage: True 时抓入口页并提取站内链接（默认 True）。
+        use_search: True 时额外用 web_search 查 ``site:<host>`` 合并结果（默认 False）。
+        session: 抓入口页时使用的登录态会话名（默认 default）。
+        deadline_ms: 整次调用的总预算（毫秒），不传表示不限。
+        proxy: 本次所有请求共用的代理；不传则按代理池分配，未配池时沿用全局配置。
+    """
+    if not url.startswith(("http://", "https://")):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="limit 必须是正整数",
+        )
+    limit = min(limit, _MAP_LIMIT_MAX)
+    if not isinstance(homepage, bool) or not isinstance(use_search, bool):
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="homepage / use_search 必须是布尔值",
+        )
+    if search is not None and not isinstance(search, str):
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="search 必须是字符串",
+        )
+    search = (search or "").strip()
+    include_re, include_err = _regex_arg(include, "include")
+    if include_err is not None:
+        return _payload(**include_err)
+    exclude_re, exclude_err = _regex_arg(exclude, "exclude")
+    if exclude_err is not None:
+        return _payload(**exclude_err)
+
+    started = time.perf_counter()
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+
+    def keep(candidate: str) -> bool:
+        if include_re is not None and not include_re.search(candidate):
+            return False
+        if exclude_re is not None and exclude_re.search(candidate):
+            return False
+        return not search or search.lower() in candidate.lower()
+
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    failure: dict[str, str] | None = None
+    succeeded = False
+
+    def add(candidate: str, source: str) -> None:
+        if not candidate or candidate in seen or not keep(candidate):
+            return
+        if len(found) >= _MAP_LIMIT_MAX:
+            return
+        seen.add(candidate)
+        found.append({"url": candidate, "source": source})
+
+    # 1) sitemap：无 sitemap 时这里是"失败"，但不阻断后面的入口页发现
+    entries, errors_list, sitemaps = await _sitemap_entries(url, deadline=deadline, proxy=proxy)
+    if sitemaps > 0:
+        succeeded = True
+    elif errors_list:
+        failure = errors_list[0]
+    for entry in entries:
+        add(entry.get("url", ""), "sitemap")
+
+    # 2) 入口页站内链接：无 sitemap 的站点主要靠这一步
+    is_sitemap_url = parsed.path.lower().endswith((".xml", ".xml.gz"))
+    if homepage and not is_sitemap_url and not dl.expired(deadline):
+        outcome, err = await _fetch_html(url, session=session, deadline=deadline, proxy=proxy)
+        if err is not None:
+            failure = failure or err
+        else:
+            succeeded = True
+            links = extract_links(
+                outcome.html,
+                outcome.final_url or url,
+                same_host=True,
+                limit=_MAP_LIMIT_MAX,
+            )
+            for link in links:
+                add(link, "homepage")
+
+    # 3) 可选搜索合并：查询限定在站点内，结果同样只留同域 URL
+    if use_search and not dl.expired(deadline):
+        query = f"site:{host}"
+        if search:
+            query = f"{query} {search}"
+        remaining = dl.remaining(deadline)
+        search_raw = await web_search(
+            query,
+            max_results=min(20, limit),
+            deadline_ms=None if remaining is None else max(50, int(remaining * 1000)),
+            proxy=proxy,
+        )
+        data = json.loads(search_raw)
+        if data.get("ok"):
+            succeeded = True
+            for hit in data.get("results") or []:
+                if _host_of(hit.get("url", "")) == host:
+                    add(hit.get("url", ""), "search")
+        else:
+            failure = failure or {
+                "url": query,
+                "error_code": data.get("error_code", errors.UNKNOWN),
+                "error": data.get("error", "搜索失败"),
+            }
+
+    if not succeeded:
+        first = failure
+        timed_out = dl.expired(deadline)
+        return _payload(
+            ok=False,
+            url=url,
+            host=host,
+            error_code=(
+                errors.TIMEOUT if timed_out else (first["error_code"] if first else errors.EMPTY)
+            ),
+            error=(
+                "超出总预算 deadline_ms，未能发现 URL"
+                if timed_out
+                else (first["error"] if first else "未发现任何站点 URL")
+            ),
+            retryable=timed_out or (errors.is_retryable(first["error_code"]) if first else False),
+        )
+
+    selected = found[:limit]
+    counts = {"sitemap": 0, "homepage": 0, "search": 0}
+    for item in selected:
+        counts[item["source"]] = counts.get(item["source"], 0) + 1
+
+    return _payload(
+        ok=True,
+        url=url,
+        host=host,
+        count=len(selected),
+        sources=counts,
+        urls=selected,
+        truncated=len(found) > limit,
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
+    )
+
+
+@mcp.tool()
 async def web_fetch(
     url: str,
     max_tokens: int = 4000,
@@ -1349,6 +1672,7 @@ async def web_fetch(
     wait_for: str | None = None,
     scroll: bool | None = None,
     click: str | None = None,
+    actions: list[dict] | None = None,
     bypass_cache: bool = False,
     debug: bool = False,
     session: str = "default",
@@ -1376,6 +1700,9 @@ async def web_fetch(
         wait_for: 仅 L2 生效，等待该 CSS 选择器出现后再取内容（适合 SPA）；不传则套用站点 recipe。
         scroll: 仅 L2 生效，滚动页面触发懒加载/无限滚动；不传则套用站点 recipe。
         click: 仅 L2 生效，渲染后点击一次该 CSS 选择器（如"加载更多"）；不传则套用站点 recipe。
+        actions: 仅 L2 生效，按顺序执行动作链（click/type/press/select/wait/scroll），
+            适合"输入关键词 → 点击搜索 → 等待结果"这类交互；单个动作失败只写入 notes，
+            后续动作继续。传 actions 时会跳过 L1 直接渲染，浏览器不可用时如实提示动作未执行。
         bypass_cache: 跳过并绕过响应缓存，强制走网络。
         debug: 返回 diagnostics（分层决策、L2 交互命中情况、正文根与候选命中数），
             只含计数与决策、不含页面内容；失败时默认也会带精简版决策轨迹。
@@ -1399,6 +1726,9 @@ async def web_fetch(
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
+    actions, actions_err = _actions_arg(actions)
+    if actions_err is not None:
+        return _payload(**actions_err)
     return _payload(
         **await _fetch_dict(
             url,
@@ -1411,6 +1741,7 @@ async def web_fetch(
             wait_for=wait_for,
             scroll=scroll,
             click=click,
+            actions=actions,
             bypass_cache=bypass_cache,
             debug=debug,
             session=session,
@@ -1784,6 +2115,39 @@ async def _crawl_page(
     return payload, links, nxt
 
 
+async def _crawl_job_page(url: str, request: dict) -> tuple[dict, list[str], str | None]:
+    """异步任务里的单页抓取：不传 headers/cookies，避免把凭证落到任务状态文件里。"""
+    try:
+        return await _crawl_page(
+            url,
+            max_tokens=int(request.get("max_tokens") or 2000),
+            link_policy=str(request.get("link_policy") or "internal"),
+            same_host=bool(request.get("same_host", True)),
+            link_limit=max(int(request.get("limit") or 10) * 5, 50),
+            headers=None,
+            cookies=None,
+            timeout=None,
+            bypass_cache=False,
+            next_selector=request.get("next_selector"),
+            session=str(request.get("session") or "default"),
+            deadline=None,
+            proxy=request.get("proxy"),
+        )
+    except Exception as exc:
+        code = errors.classify_exception(exc)
+        return (
+            {
+                "ok": False,
+                "url": url,
+                "error_code": code,
+                "error": f"{type(exc).__name__}: {exc}",
+                "retryable": errors.is_retryable(code),
+            },
+            [],
+            None,
+        )
+
+
 @mcp.tool()
 async def web_crawl(
     url: str,
@@ -2006,6 +2370,237 @@ async def web_crawl(
         links_discovered=len(visited) - 1,
         results=results,
     )
+
+
+@mcp.tool()
+async def web_crawl_start(
+    url: str,
+    depth: int = 1,
+    limit: int = 10,
+    same_host: bool = True,
+    max_tokens: int = 2000,
+    link_policy: str = "internal",
+    next_selector: str | None = None,
+    max_pages: int | None = None,
+    deadline_ms: int | None = None,
+    session: str = "default",
+    proxy: str | None = None,
+) -> str:
+    """启动一个异步爬取任务，立即返回 job_id；页数多时不再阻塞 MCP 请求。
+
+    与 web_crawl 的抓取语义一致，但任务在后台推进、状态落盘到 ``DATA_DIR/jobs/``：
+    - 同一组参数重复 start 是幂等的，会返回已有 job_id（existing=true）；
+    - 进程重启后调用 web_crawl_status 会自动续跑未完成任务；
+    - 用 web_crawl_cancel 可随时停止，已完成页面的部分结果仍可读取；
+    - 任务状态逐页原子写入，不会因为中途退出而留下半个 JSON。
+
+    Args:
+        url: 起始页 URL。
+        depth: 链接模式的跳转层数（0~3，默认 1）。
+        limit: 链接模式最多抓取的页面总数（含起始页），受 crawl_max_pages 上限约束。
+        same_host: 只跟进同主机链接（默认 True）。
+        max_tokens: 每页正文 token 预算上限。
+        link_policy: 同 web_fetch。
+        next_selector: 分页模式：指向"下一页"的 CSS 选择器；有值时忽略 depth。
+        max_pages: 分页模式最多翻多少页（默认 5），受 crawl_max_pages 上限约束。
+        deadline_ms: 任务的总预算（毫秒），不传表示不限；超时后不再抓新页。
+        session: 登录态会话名（默认 default）。
+        proxy: 本次任务所有页面共用的代理；不传则按代理池分配，未配池时沿用全局配置。
+    """
+    if not url.startswith(("http://", "https://")):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
+    if isinstance(deadline_ms, bool) or (
+        deadline_ms is not None and (not isinstance(deadline_ms, int) or deadline_ms <= 0)
+    ):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="deadline_ms 必须是正整数（毫秒）；不传表示不限",
+        )
+    settings = get_settings()
+    if isinstance(depth, bool) or not isinstance(depth, int) or not 0 <= depth <= 3:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="depth 需在 0~3 之间",
+        )
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="limit 必须是正整数",
+        )
+    if link_policy not in LINK_POLICIES:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"link_policy 必须是 {LINK_POLICIES} 之一",
+        )
+    if next_selector is not None and (
+        not isinstance(next_selector, str) or not next_selector.strip()
+    ):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="next_selector 必须是非空字符串",
+        )
+    if max_pages is not None and (
+        isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1
+    ):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="max_pages 必须是正整数",
+        )
+
+    recipe = _recipe_for(url)
+    if next_selector is None and recipe is not None:
+        next_selector = recipe.next_selector
+    if max_pages is None and recipe is not None:
+        max_pages = recipe.max_pages
+
+    if next_selector:
+        cap = min(max_pages or 5, settings.crawl_max_pages)
+        depth = 0
+    else:
+        cap = min(limit, settings.crawl_max_pages)
+
+    request = {
+        "url": url,
+        "depth": depth,
+        "limit": limit,
+        "same_host": same_host,
+        "max_tokens": max_tokens,
+        "link_policy": link_policy,
+        "next_selector": next_selector,
+        "max_pages": max_pages,
+        "session": session,
+        "proxy": proxy,
+        "deadline_ms": deadline_ms,
+    }
+    job, existing = _get_jobs().start(request, cap=cap)
+    return _payload(
+        ok=True,
+        job_id=job.get("job_id"),
+        state=job.get("state"),
+        url=url,
+        existing=existing,
+    )
+
+
+@mcp.tool()
+async def web_crawl_status(job_id: str, include_results: bool = True) -> str:
+    """读取异步爬取任务的状态与部分结果；未完成的任务会自动续跑。
+
+    Args:
+        job_id: web_crawl_start 返回的任务 ID。
+        include_results: False 时只返回进度与计数，不返回已抓页面正文（适合轮询）。
+    """
+    if not isinstance(job_id, str) or not job_id.strip():
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="job_id 不能为空",
+        )
+    if not isinstance(include_results, bool):
+        return _payload(
+            ok=False,
+            job_id=job_id,
+            error_code=errors.INVALID_ARGUMENT,
+            error="include_results 必须是布尔值",
+        )
+    job = _get_jobs().status(job_id.strip())
+    if job is None:
+        return _payload(
+            ok=False,
+            job_id=job_id,
+            error_code=errors.INVALID_ARGUMENT,
+            error="任务不存在（job_id 非法或状态文件已被清理）",
+        )
+    results = job.get("results") or []
+    progress = job.get("progress") or {}
+    request = job.get("request") or {}
+    return _payload(
+        ok=True,
+        job_id=job.get("job_id"),
+        state=job.get("state"),
+        url=request.get("url"),
+        progress={
+            "pages_fetched": int(progress.get("pages_fetched") or 0),
+            "ok_count": int(progress.get("ok_count") or 0),
+            "limit": int(progress.get("limit") or 0),
+        },
+        results=list(results) if include_results else [],
+        result_count=len(results),
+        created_at=job.get("created_at"),
+        updated_at=job.get("updated_at"),
+    )
+
+
+@mcp.tool()
+async def web_crawl_cancel(job_id: str) -> str:
+    """取消一个未完成的异步爬取任务；终态任务原样返回（幂等）。
+
+    Args:
+        job_id: web_crawl_start 返回的任务 ID。
+    """
+    if not isinstance(job_id, str) or not job_id.strip():
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="job_id 不能为空",
+        )
+    job = _get_jobs().cancel(job_id.strip())
+    if job is None:
+        return _payload(
+            ok=False,
+            job_id=job_id,
+            error_code=errors.INVALID_ARGUMENT,
+            error="任务不存在（job_id 非法或状态文件已被清理）",
+        )
+    return _payload(ok=True, job_id=job.get("job_id"), state=job.get("state"))
+
+
+@mcp.tool()
+async def web_crawl_list(limit: int = 20) -> str:
+    """列出最近的异步爬取任务（按更新时间倒序），不返回页面正文。
+
+    Args:
+        limit: 最多返回多少个任务（默认 20，上限 100）。
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="limit 必须是正整数",
+        )
+    jobs = _get_jobs().list(min(limit, 100))
+    summaries = []
+    for job in jobs:
+        progress = job.get("progress") or {}
+        request = job.get("request") or {}
+        summaries.append(
+            {
+                "job_id": job.get("job_id"),
+                "state": job.get("state"),
+                "url": request.get("url"),
+                "pages_fetched": int(progress.get("pages_fetched") or 0),
+                "ok_count": int(progress.get("ok_count") or 0),
+                "limit": int(progress.get("limit") or 0),
+                "created_at": job.get("created_at"),
+                "updated_at": job.get("updated_at"),
+            }
+        )
+    return _payload(ok=True, total=len(summaries), jobs=summaries)
 
 
 def _watch_text(html: str, url: str, selector: str | None) -> str:

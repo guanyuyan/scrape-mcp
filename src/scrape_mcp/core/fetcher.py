@@ -145,6 +145,7 @@ class Fetcher:
         wait_for: str | None = None,
         scroll: bool = False,
         click: str | None = None,
+        actions: list[dict[str, Any]] | None = None,
         bypass_cache: bool = False,
         session: str = "default",
         deadline: float | None = None,
@@ -166,6 +167,7 @@ class Fetcher:
             wait_for=wait_for,
             scroll=scroll,
             click=click,
+            actions=actions,
             # 显式指定的出口可能让同一 URL 拿到不同内容，这类结果不进共享缓存
             bypass_cache=bypass_cache,
             allow_cache=not explicit,
@@ -187,6 +189,7 @@ class Fetcher:
         wait_for: str | None = None,
         scroll: bool = False,
         click: str | None = None,
+        actions: list[dict[str, Any]] | None = None,
         bypass_cache: bool = False,
         allow_cache: bool = True,
         session: str = "default",
@@ -195,6 +198,51 @@ class Fetcher:
     ) -> FetchOutcome:
         host = _host_of(url)
         sticky_failed = False
+        # 动作链只能在浏览器里执行：跳过 L1 直接渲染，避免"点完再抓"拿到未交互的页面
+        if actions:
+            left = budget.remaining(deadline)
+            if left is None or left >= _L2_MIN_BUDGET_S:
+                placeholder = FetchOutcome(
+                    url=url,
+                    final_url=url,
+                    status=0,
+                    tier="l1",
+                    blocked="none",
+                    block_reason="",
+                    content_type="",
+                    html="",
+                    elapsed_ms=0,
+                    decisions=["skip_l1:actions"],
+                )
+                l2 = await self._fetch_l2(
+                    url,
+                    placeholder,
+                    wait_for=wait_for,
+                    scroll=scroll,
+                    click=click,
+                    actions=actions,
+                    session=session,
+                    deadline=deadline,
+                    proxy=proxy,
+                )
+                if l2.tier == "l2":
+                    if l2.blocked == "none":
+                        self._remember_sticky(host)
+                    return l2
+            outcome = await self._fetch_l1_with_retry(
+                url,
+                headers=headers,
+                cookies=cookies,
+                timeout=timeout,
+                bypass_cache=bypass_cache,
+                allow_cache=allow_cache,
+                deadline=deadline,
+                proxy=proxy,
+            )
+            outcome.notes = [*outcome.notes, "actions 未执行：浏览器渲染不可用或预算不足"]
+            outcome.decisions.insert(0, "actions_skipped:l2_unavailable")
+            return outcome
+
         if self._sticky_active(host, url):
             left = budget.remaining(deadline)
             if left is None or left >= _L2_MIN_BUDGET_S:
@@ -456,6 +504,7 @@ class Fetcher:
         wait_for: str | None = None,
         scroll: bool = False,
         click: str | None = None,
+        actions: list[dict[str, Any]] | None = None,
         session: str = "default",
         deadline: float | None = None,
         proxy: str | None = None,
@@ -468,6 +517,7 @@ class Fetcher:
             wait_for=wait_for,
             scroll=scroll,
             click=click,
+            actions=actions,
             session=session,
             # 导航超时按剩余预算压缩，避免一页把整次调用的预算吃光
             timeout=budget.cap(deadline, self._settings.l2_navigate_timeout),
@@ -480,6 +530,8 @@ class Fetcher:
             "scroll_rounds": result.scroll_rounds,
             "error": result.error,
         }
+        if result.actions:
+            l2_diag["actions"] = list(result.actions)
 
         if not result.ok:
             # 浏览器没跑起来/渲染失败：正文仍是 L1 的，只把原因如实挂上去，tier 保持 l1

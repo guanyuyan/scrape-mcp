@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -121,6 +122,8 @@ class BrowserOutcome:
     wait_for_hit: bool | None = None
     clicked: bool | None = None
     scroll_rounds: int = 0
+    # 动作链逐步结果：[{"action": "click", "ok": True}, ...]
+    actions: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -359,6 +362,7 @@ class BrowserRenderer:
         wait_for: str | None = None,
         scroll: bool = False,
         click: str | None = None,
+        actions: list[dict[str, Any]] | None = None,
         session: str = "default",
         timeout: float | None = None,
         proxy: str | None = None,
@@ -376,6 +380,7 @@ class BrowserRenderer:
             session,
             proxy or "",
             timeout or 0.0,
+            json.dumps(actions or [], sort_keys=True, ensure_ascii=False),
         )
         return await self._inflight.run(
             identify,
@@ -386,6 +391,7 @@ class BrowserRenderer:
                 wait_for=wait_for,
                 scroll=scroll,
                 click=click,
+                actions=actions,
                 session=session,
                 timeout=timeout,
                 proxy=proxy,
@@ -401,6 +407,7 @@ class BrowserRenderer:
         wait_for: str | None,
         scroll: bool,
         click: str | None,
+        actions: list[dict[str, Any]] | None,
         session: str,
         timeout: float | None,
         proxy: str | None = None,
@@ -422,6 +429,7 @@ class BrowserRenderer:
                 wait_for=wait_for,
                 scroll=scroll,
                 click=click,
+                actions=actions,
                 session=session,
                 timeout=timeout,
                 proxy=proxy,
@@ -439,6 +447,7 @@ class BrowserRenderer:
         wait_for: str | None,
         scroll: bool,
         click: str | None,
+        actions: list[dict[str, Any]] | None,
         session: str,
         timeout: float | None,
         proxy: str | None = None,
@@ -463,6 +472,7 @@ class BrowserRenderer:
         wait_for_hit: bool | None = None
         clicked: bool | None = None
         scroll_rounds = 0
+        action_trail: list[dict[str, Any]] = []
         try:
             resp = await page.goto(
                 url,
@@ -473,6 +483,8 @@ class BrowserRenderer:
             wait_for_hit, clicked, scroll_rounds = await self._interact(
                 page, wait_for=wait_for, scroll=scroll, click=click, notes=notes, timeout=timeout
             )
+            if actions:
+                action_trail = await self._apply_actions(page, actions, notes, timeout)
             html = await self._settle(page, status=status)
             return BrowserOutcome(
                 ok=True,
@@ -485,6 +497,7 @@ class BrowserRenderer:
                 wait_for_hit=wait_for_hit,
                 clicked=clicked,
                 scroll_rounds=scroll_rounds,
+                actions=action_trail,
             )
         except Exception as exc:
             return BrowserOutcome(
@@ -499,6 +512,7 @@ class BrowserRenderer:
                 wait_for_hit=wait_for_hit,
                 clicked=clicked,
                 scroll_rounds=scroll_rounds,
+                actions=action_trail,
             )
         finally:
             with contextlib.suppress(Exception):
@@ -549,6 +563,56 @@ class BrowserRenderer:
                 await page.wait_for_timeout(self._s.l2_scroll_delay_ms)
         return wait_for_hit, clicked, scroll_rounds
 
+    async def _apply_actions(
+        self,
+        page: Any,
+        actions: list[dict[str, Any]],
+        notes: list[str],
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """按顺序执行动作链；单步失败只记 notes，后续动作继续（已拿到的正文不受影响）。
+
+        动作由 server 层校验并规范化，这里只认 click/type/press/select/wait/scroll，
+        不提供任意 JS 执行入口。
+        """
+        nav_ms = int((timeout or self._s.l2_navigate_timeout) * 1000)
+        step_ms = max(1000, min(nav_ms, 10000))
+        trail: list[dict[str, Any]] = []
+
+        for index, item in enumerate(actions, start=1):
+            name = str(item.get("action") or "")
+            selector = item.get("selector")
+            try:
+                if name == "click":
+                    await page.click(selector, timeout=step_ms)
+                elif name == "type":
+                    await page.fill(selector, item.get("text") or "", timeout=step_ms)
+                elif name == "press":
+                    if selector:
+                        await page.press(selector, item["key"], timeout=step_ms)
+                    else:
+                        await page.keyboard.press(item["key"])
+                elif name == "select":
+                    await page.select_option(selector, item["value"], timeout=step_ms)
+                elif name == "wait":
+                    if selector:
+                        wait_ms = min(step_ms, int(item.get("ms") or step_ms))
+                        await page.wait_for_selector(selector, timeout=wait_ms)
+                    else:
+                        await page.wait_for_timeout(min(int(item.get("ms") or 1000), nav_ms))
+                elif name == "scroll":
+                    if selector:
+                        await page.locator(selector).scroll_into_view_if_needed(timeout=step_ms)
+                    else:
+                        for _ in range(max(1, min(int(item.get("times") or 1), 20))):
+                            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                            await page.wait_for_timeout(200)
+                trail.append({"action": name, "ok": True})
+            except Exception as exc:
+                notes.append(f"action[{index}] {name} 失败: {type(exc).__name__}")
+                trail.append({"action": name, "ok": False, "detail": type(exc).__name__})
+        return trail
+
     # ---------- 截图 ----------
 
     async def screenshot(
@@ -561,6 +625,7 @@ class BrowserRenderer:
         height: int = 800,
         wait_ms: int = 0,
         selector: str | None = None,
+        actions: list[dict[str, Any]] | None = None,
         session: str = "default",
         timeout: float | None = None,
         proxy: str | None = None,
@@ -586,6 +651,7 @@ class BrowserRenderer:
                 height=height,
                 wait_ms=wait_ms,
                 selector=selector,
+                actions=actions,
                 session=session,
                 timeout=timeout,
                 proxy=proxy,
@@ -605,6 +671,7 @@ class BrowserRenderer:
         height: int,
         wait_ms: int,
         selector: str | None,
+        actions: list[dict[str, Any]] | None,
         session: str,
         timeout: float | None,
         proxy: str | None,
@@ -630,6 +697,8 @@ class BrowserRenderer:
             await page.set_viewport_size({"width": width, "height": height})
             resp = await page.goto(url, wait_until="domcontentloaded", timeout=nav_ms)
             status = resp.status if resp is not None else 0
+            if actions:
+                await self._apply_actions(page, actions, notes, timeout)
             if selector:
                 # 选择器只是"等它出现再拍"的稳定点；没命中不致命，照常截图
                 try:

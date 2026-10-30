@@ -86,7 +86,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 | A news portal home | portal/listing | L2 | 338 KB | ~1.4k tokens (~1.6%) | dynamic page, browser render |
 | A tech blog home | SPA | L2 | 12 KB | ~1.4k tokens | JS shell, needs rendering |
 
-**Shape**: a local MCP server (stdio or HTTP) with privacy under your control. Tools: `web_fetch`, `web_batch`, `web_extract`, `web_crawl`, `web_watch`, `web_search`, `web_screenshot`, `web_index`, `login`, `session_*`. Caching is on by default.
+**Shape**: a local MCP server (stdio or HTTP) with privacy under your control. Tools: `web_fetch`, `web_batch`, `web_extract`, `web_crawl`, `web_map`, async crawl jobs (`web_crawl_start/status/cancel/list`), `web_watch`, `web_search`, `web_screenshot`, `web_index`, `login`, `session_*`. Caching is on by default.
 
 ---
 
@@ -103,13 +103,15 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Non-HTML content**: `web_fetch` reads plain text directly; with the `[pdf]` extra it extracts PDF text per page, returning `empty` for scanned files without a text layer instead of inventing content.
 - **Single-flight per URL**: concurrent requests for the same page (multiple tenants, or duplicate links inside a batch/crawl) fetch it once and share the response — less egress and fewer anti-bot triggers. Both L1 and L2 renders are coalesced. Requests with custom headers/credentials or `bypass_cache=true` may be caller-specific, so they are never merged.
 - **Two cache layers**: HTTP responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; compacted content and extraction results get their own cache so repeat calls return immediately. `bypass_cache=true` skips both layers. `web_batch` fetches a list concurrently.
-- **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped.
+- **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped. For large jobs use `web_crawl_start` to run in the background, poll with `status`, stop with `cancel`, and it resumes after a restart.
 - **Change detection**: `web_watch` keeps a snapshot of the body after every successful fetch and reports `changed` plus an added/removed line summary on the next call; pass `selector` to watch just one block (leaderboard, price box). Failed fetches never overwrite the snapshot, so changes that happened during a block are still visible afterwards.
 - **Search discovery**: `web_search` turns keywords into structured results (title / URL / snippet). It uses DuckDuckGo's HTML endpoint by default (no API key) or a self-hosted SearXNG JSON API; results are cacheable, ideal for a search-then-fetch flow.
-- **Page screenshots**: `web_screenshot` renders in a real browser and exports a PNG, supporting full-page or viewport capture, custom dimensions, selector waiting and extra delay; it reuses the login session, so pages behind auth or JS rendering still work.
+- **Page screenshots**: `web_screenshot` renders in a real browser and exports a PNG, supporting full-page or viewport capture, custom dimensions, selector waiting and extra delay; `actions` can click/type/scroll before the shot. It reuses the login session, so pages behind auth or JS rendering still work.
 - **Site index**: `web_index` reads `Sitemap:` lines from robots.txt (falling back to `/sitemap.xml`), recursively expands sitemap indexes and unpacks `.gz` files. It persists a baseline and later reports new / changed / unchanged / removed entries, optionally re-fetching changed pages to filter out timestamp-only changes.
+- **Site URL discovery**: `web_map` combines sitemap entries with the entry page's same-site links (optionally merged with `web_search` hits), dedupes URLs and tags each with its source; supports `include`/`exclude` regexes, a `search` substring filter and `limit` truncation, so sites without a sitemap still work.
+- **Async crawl jobs**: `web_crawl_start` returns a `job_id` immediately and the job runs in the background, atomically persisting state per page under `DATA_DIR/jobs/`; `web_crawl_status` reads progress and partial results and resumes after a process restart, `web_crawl_cancel` stops it, and `web_crawl_list` lists recent jobs. Repeating the same start is idempotent.
 - **Built-in dashboard**: in HTTP mode, open `/` to see request volume, L1/L2 split, latency percentiles and buckets, result codes, content kinds, L2 page slots and proxy-pool health; single-file HTML, no external assets, refreshed every 5 seconds.
-- **Total budget with degradation**: `web_fetch` / `web_extract` / `web_batch` / `web_crawl` accept `deadline_ms`. When time runs short it degrades step by step — cap each request → skip retries → skip L2 rendering → return `timeout` — while any content already fetched is still returned. Degraded results are never cached, so later calls with a larger budget cannot inherit truncated content. The budget also covers the compliance stage (rate-limit wait and robots.txt fetch): if it is too tight, the call returns `timeout` early instead of burning the budget on preparation.
+- **Total budget with degradation**: `web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start` accept `deadline_ms`. When time runs short it degrades step by step — cap each request → skip retries → skip L2 rendering → return `timeout` — while any content already fetched is still returned. Degraded results are never cached, so later calls with a larger budget cannot inherit truncated content. The budget also covers the compliance stage (rate-limit wait and robots.txt fetch): if it is too tight, the call returns `timeout` early instead of burning the budget on preparation.
 - **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent. Third-party packages can register their own field types through an entry point.
 - **Site recipes**: keep per-site rendering hints, root selector, extraction schema and pagination rules in a JSON file; later calls need no arguments, and per-call arguments still win.
 - **Selectable output format**: `format=markdown|text|json`; `json` yields a paragraph array ready for storage.
@@ -325,7 +327,7 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
 ```
 
 - To reuse a system browser: set `SCRAPE_MCP_L2_CHANNEL` to `chrome` or `msedge`.
-- Restart the client, then call `web_fetch` / `web_extract` / `web_batch` / `web_crawl` from a conversation.
+- Restart the client, then call `web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start` from a conversation.
 - Inspect tool definitions first: `scrape-mcp schema --tool web_fetch`, or `--output tools.json` for all.
 - No display (container/server)? Skip the browser: `scrape-mcp session import --url https://<site> --file cookies.txt` imports cookies exported by a browser extension, and `scrape-mcp session list` shows what is stored.
 
@@ -338,7 +340,7 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Proxy: `proxy` (e.g. `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`) applies to this call only, and both L1 and any L2 escalation use the same exit; omit it to let `SCRAPE_MCP_PROXY_POOL` assign one per site, falling back to `SCRAPE_MCP_PROXY`. An explicit proxy bypasses the shared cache so results from different exits never mix
   - Total budget: optional `deadline_ms` caps the whole call; degradation markers are listed under "Error codes and diagnostics"
   - Session: `session` (default `default`); use the same name as `login` to attach the stored session
-  - Render options (L2 only): `wait_for` (CSS selector), `scroll` (trigger lazy loading), `click` ("load more")
+  - Render options (L2 only): `wait_for` (CSS selector), `scroll` (trigger lazy loading), `click` ("load more"); `actions` runs an ordered chain (click/type/press/select/wait/scroll) with per-step failures recorded in `notes`
   - Non-HTML: PDFs return structured text (with the `[pdf]` extra; `kind="pdf"` plus `pages` / `pages_parsed`); plain text is returned as-is (`kind="text"`)
   - Diagnostics: `debug=true` adds `diagnostics` (tier decisions, selector hits, L2 interactions), without page content
 - **`web_extract(url, schema=None, ...)`** → structured JSON from a field schema
@@ -363,6 +365,12 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `proxy` applies to every page of the crawl; omit it to use the proxy pool, then `SCRAPE_MCP_PROXY`
   - `deadline_ms` budgets the whole crawl: no new pages are started once it runs out, and pages already fetched are returned
   - Reports progress per page when requested (`已翻到第 n/N 页` in paginate mode, `已抓取 n/N 页` in link mode)
+- **`web_crawl_start(url, depth=1, limit=10, ..., next_selector=None, max_pages=None, deadline_ms=None, session="default")`** → start an async crawl job and return a `job_id` immediately
+  - Same crawl semantics as `web_crawl`; the job runs in the background, so large jobs do not block MCP requests
+  - State is written atomically per page under `DATA_DIR/jobs/<job_id>.json`; repeating the same start is idempotent (`existing=true`)
+  - **`web_crawl_status(job_id, include_results=True)`** → read state, progress and fetched pages; resumes from where it stopped after a process restart
+  - **`web_crawl_cancel(job_id)`** → stop the job; partial results already fetched remain readable, and terminal jobs are returned idempotently
+  - **`web_crawl_list(limit=20)`** → list recent jobs (without page bodies)
 - **`web_watch(url, selector=None, reset=False, bypass_cache=True, ...)`** → compare a page against the last time it was fetched
   - Each successful fetch stores a body snapshot under `DATA_DIR/watch/`; the next call returns `changed`, `added_lines` / `removed_lines` and a `diff` preview (at most 40 lines, `diff_truncated` marks truncation)
   - `first_seen=true` means this is the first snapshot for that URL (nothing to compare against, so no diff); `previous_hash` / `previous_chars` help manual verification
@@ -376,8 +384,12 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `bypass_cache` forces a fresh query; `proxy` and `deadline_ms` behave like `web_fetch`
 - **`web_screenshot(url, path=None, full_page=False, width=1280, height=800, wait_ms=0, selector=None, ...)`** → render in a browser and save a PNG, returning its local path
   - Without `path`, files go to `DATA_DIR/screenshots/`; `full_page=true` captures the whole page, otherwise only the viewport
-  - `selector` waits for a CSS selector before capture (a miss is non-fatal and recorded in `notes`); `wait_ms` adds extra delay for animations or lazy loading
+  - `selector` waits for a CSS selector before capture (a miss is non-fatal and recorded in `notes`); `wait_ms` adds extra delay for animations or lazy loading; `actions` can click/type/scroll before the shot
   - Reuses the `session` login state and browser pool; `proxy` / `deadline_ms` behave like `web_fetch`
+- **`web_map(url, include=None, exclude=None, search=None, limit=500, homepage=True, use_search=False, ...)`** → discover site URLs (sitemap + entry page links)
+  - Each URL appears once and carries a `source` (`sitemap` / `homepage` / `search`); `sources` holds per-source counts
+  - `include` / `exclude` are regexes, `search` filters by URL substring; `limit` defaults to 500 with a hard cap of 5000, and `truncated=true` when cut
+  - Sites without a sitemap still yield candidates from entry-page links; `use_search=true` also merges `site:<host>` search results
 - **`web_index(url, include=None, exclude=None, limit=1000, check_content=False, dry_run=False, reset=False, ...)`** → incremental sitemap index
   - Pass a site root or any page URL (sitemap is found per host), or a direct sitemap URL; `include` / `exclude` filter URLs by regex
   - Returns `new` / `changed` / `unchanged` / `removed` counts and URL lists (up to 50 each); `first_seen` marks the first baseline
@@ -629,7 +641,20 @@ Use the same implementation without an MCP client (identical arguments, payloads
 ```python
 import asyncio
 
-from scrape_mcp.sdk import aclose, batch, crawl, extract, fetch
+from scrape_mcp.sdk import (
+    aclose,
+    batch,
+    crawl,
+    crawl_cancel,
+    crawl_start,
+    crawl_status,
+    extract,
+    fetch,
+    index,
+    screenshot,
+    search,
+    site_map,
+)
 
 
 async def main() -> None:
@@ -657,6 +682,13 @@ async def main() -> None:
 
     many = await batch(["https://example.com", "https://example.org"])
     print(many["ok_count"], "/", many["total"])
+
+    urls = await site_map("https://docs.python.org", limit=100)
+    print(urls["count"], urls["sources"])
+
+    job = await crawl_start("https://docs.python.org", depth=1, limit=20)
+    status = await crawl_status(job["job_id"])
+    print(status["state"], status["progress"])
 
     await aclose()  # release the browser if L2 ran; optional, avoids shutdown warnings
 
@@ -773,10 +805,10 @@ benchmarks/
 ├── sites.json         # Real-site quality corpus (tiers, expected outcome, completeness checks)
 └── baseline.json      # Nightly-subset baseline for trend checks (updated monthly)
 src/scrape_mcp
-├── server.py          # MCP entry + tools (web_fetch/web_extract/web_batch/web_crawl/web_watch/login/session_*)
+├── server.py          # MCP entry + tools (web_fetch/web_extract/web_batch/web_crawl/web_map/web_crawl_*/login/session_*)
 ├── http_auth.py       # HTTP Bearer middleware + non-loopback bind guard
 ├── cli.py             # Subcommands: init (client config) / schema (export tool definitions)
-├── sdk.py             # Python SDK wrappers (fetch/extract/crawl/batch/watch/aclose)
+├── sdk.py             # Python SDK wrappers (fetch/extract/crawl/crawl_*/site_map/batch/watch/aclose)
 ├── config.py          # Environment configuration
 ├── metrics.py         # Prometheus text metrics (source for /metrics)
 ├── tokenizer.py       # tiktoken counting + budget truncation
@@ -789,6 +821,7 @@ src/scrape_mcp
 │   ├── recipes.py     # Site recipes (longest-suffix match, mtime reload)
 │   ├── cache.py       # HTTP response cache + content/extraction result cache
 │   ├── stats.py       # In-process counters (source for /stats)
+│   ├── jobs.py        # Async crawl jobs (state persistence, progress, resume, cancel)
 │   ├── watch.py       # Change detection (body snapshot + diff summary)
 │   ├── errors.py      # Stable error codes
 │   └── hostlimit.py   # Per-host concurrency gate

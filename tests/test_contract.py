@@ -177,6 +177,50 @@ INDEX_OK_PAYLOAD = {
     "errors",
 }
 
+MAP_OK_PAYLOAD = {
+    "ok",
+    "url",
+    "host",
+    "count",
+    "sources",
+    "urls",
+    "truncated",
+    "elapsed_ms",
+}
+
+MAP_ERROR_PAYLOAD = {"ok", "url", "host", "error_code", "error", "retryable"}
+
+JOB_START_PAYLOAD = {"ok", "job_id", "state", "url", "existing"}
+
+JOB_STATUS_PAYLOAD = {
+    "ok",
+    "job_id",
+    "state",
+    "url",
+    "progress",
+    "results",
+    "result_count",
+    "created_at",
+    "updated_at",
+}
+
+JOB_CANCEL_PAYLOAD = {"ok", "job_id", "state"}
+
+JOB_LIST_PAYLOAD = {"ok", "total", "jobs"}
+
+JOB_SUMMARY_PAYLOAD = {
+    "job_id",
+    "state",
+    "url",
+    "pages_fetched",
+    "ok_count",
+    "limit",
+    "created_at",
+    "updated_at",
+}
+
+JOB_ERROR_PAYLOAD = {"ok", "job_id", "error_code", "error", "retryable"}
+
 SITEMAP_XML = (
     '<?xml version="1.0" encoding="UTF-8"?>'
     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
@@ -647,3 +691,72 @@ def test_web_index_success_keys(monkeypatch):
     out = _run(server.web_index(URL, dry_run=True))
     assert set(out) == INDEX_OK_PAYLOAD
     assert out["ok"] is True and out["new"] == 1
+
+
+# ---- web_map ----
+
+
+def test_web_map_success_keys(monkeypatch):
+    async def fake_sitemap(url: str, *, deadline, proxy):
+        return [{"url": "https://a.test/one"}], [], 1
+
+    async def fake_html(url: str, **_kwargs):
+        return _outcome(
+            html='<html><body><a href="/two">二</a></body></html>',
+        ), None
+
+    monkeypatch.setattr(server, "_sitemap_entries", fake_sitemap)
+    monkeypatch.setattr(server, "_fetch_html", fake_html)
+
+    out = _run(server.web_map(URL))
+    assert set(out) == MAP_OK_PAYLOAD
+    assert [item["url"] for item in out["urls"]] == [
+        "https://a.test/one",
+        "https://a.test/two",
+    ]
+    assert out["sources"] == {"sitemap": 1, "homepage": 1, "search": 0}
+
+
+def test_web_map_failure_keys(monkeypatch):
+    async def fake_sitemap(url: str, *, deadline, proxy):
+        return [], [{"url": url, "error_code": "http_4xx", "error": "404"}], 0
+
+    async def fake_html(url: str, **_kwargs):
+        return None, {"ok": False, "url": url, "error_code": "timeout", "error": "timed out"}
+
+    monkeypatch.setattr(server, "_sitemap_entries", fake_sitemap)
+    monkeypatch.setattr(server, "_fetch_html", fake_html)
+
+    out = _run(server.web_map(URL))
+    assert set(out) == MAP_ERROR_PAYLOAD
+    assert out["ok"] is False
+
+
+# ---- web_crawl 异步任务 ----
+
+
+def test_web_crawl_job_payloads(monkeypatch):
+    _patch_fetch(monkeypatch, _outcome())
+
+    async def scenario():
+        started = json.loads(await server.web_crawl_start(url=URL, depth=0, limit=1))
+        job_id = started["job_id"]
+        await server._get_jobs().wait(job_id, timeout=5)
+        status = json.loads(await server.web_crawl_status(job_id))
+        cancel = json.loads(await server.web_crawl_cancel(job_id))
+        listed = json.loads(await server.web_crawl_list())
+        return started, status, cancel, listed
+
+    started, status, cancel, listed = asyncio.run(scenario())
+    assert set(started) == JOB_START_PAYLOAD
+    assert set(status) == JOB_STATUS_PAYLOAD
+    assert set(status["progress"]) == {"pages_fetched", "ok_count", "limit"}
+    assert set(cancel) == JOB_CANCEL_PAYLOAD
+    assert set(listed) == JOB_LIST_PAYLOAD
+    assert set(listed["jobs"][0]) == JOB_SUMMARY_PAYLOAD
+
+
+def test_web_crawl_status_unknown_job_keys():
+    out = _run(server.web_crawl_status("crawl-missing"))
+    assert set(out) == JOB_ERROR_PAYLOAD
+    assert out["error_code"] == errors.INVALID_ARGUMENT
