@@ -1612,28 +1612,33 @@ async def web_map(
     # 3) 可选搜索合并：查询限定在站点内，结果同样只留同域 URL
     if use_search and not dl.expired(deadline):
         site = _bare_host(host)
-        query = f"site:{site}"
+        # 有些 SearXNG 引擎不认 site: 运算符，第一轮没拿到同域结果时用主机名回退一次
+        queries = [f"site:{site}", site]
         if search:
-            query = f"{query} {search}"
-        remaining = dl.remaining(deadline)
-        search_raw = await web_search(
-            query,
-            max_results=min(20, limit),
-            deadline_ms=None if remaining is None else max(50, int(remaining * 1000)),
-            proxy=proxy,
-        )
-        data = json.loads(search_raw)
-        if data.get("ok"):
+            queries = [f"{query} {search}" for query in queries]
+        before = len(found)
+        for query in queries:
+            remaining = dl.remaining(deadline)
+            search_raw = await web_search(
+                query,
+                max_results=min(20, limit),
+                deadline_ms=None if remaining is None else max(50, int(remaining * 1000)),
+                proxy=proxy,
+            )
+            data = json.loads(search_raw)
+            if not data.get("ok"):
+                failure = failure or {
+                    "url": query,
+                    "error_code": data.get("error_code", errors.UNKNOWN),
+                    "error": data.get("error", "搜索失败"),
+                }
+                break
             succeeded = True
             for hit in data.get("results") or []:
                 if _bare_host(_host_of(hit.get("url", ""))) == site:
                     add(hit.get("url", ""), "search")
-        else:
-            failure = failure or {
-                "url": query,
-                "error_code": data.get("error_code", errors.UNKNOWN),
-                "error": data.get("error", "搜索失败"),
-            }
+            if len(found) > before or dl.expired(deadline):
+                break
 
     if not succeeded:
         first = failure

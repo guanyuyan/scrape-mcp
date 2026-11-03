@@ -9,6 +9,7 @@
 - DuckDuckGo HTML 端点返回人机验证页（HTTP 202 + `anomaly.js`）时，`web_search` 如实报错而不是当成「搜到 0 条」，`web_map` 也不会再以 `ok=true` 返回空清单
 - 请求 SearXNG 时显式带 `Accept: application/json`，并兼容被 HTML `<pre>` 包裹的 JSON 响应：此前会被当成空页直接判为拦截，自托管 SearXNG 实际用不起来
 - 请求 SearXNG 不再附加 `language=all`：实测部分引擎在该参数下对 `site:` 查询直接返回 0 条
+- `web_map` 的 `use_search` 合并在 `site:` 查询拿不到同域结果时，自动用主机名回退一次，兼容不支持 `site:` 运算符的 SearXNG 引擎
 
 ## [0.21.0] - 2026-10-30
 
