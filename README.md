@@ -118,7 +118,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
 - **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`；第三方包可通过入口点注册自定义字段类型。
 - **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
-- **输出格式可选**：`format=markdown|text|json`，正文可按段落数组直接入库。
+- **输出格式可选**：`format=markdown|text|json|chunks`；`json` 给段落数组，`chunks` 直接给 RAG 分块（固定窗口 + overlap + 标题路径），可原样入库。
 - **同域并发闸门**：同一站点默认最多 2 个并发请求，跨站仍可并行，避免批量抓取时把单站打穿。
 - **Stealth 加固**：Wipe `webdriver`、UA 数据、Canvas/WebGL 确定性指纹噪声、时区对齐。
 
@@ -344,7 +344,9 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
 
 - **`web_fetch(url, max_tokens=4000, link_policy="internal", format="markdown", ...)`** → 状态 + 极省正文
   - `link_policy`: `internal`（站内相对链接+站外降级）/ `all` / `none`
-  - `format`: `markdown`（默认，保留标题/列表/链接）/ `text`（剥掉标记的纯文本）/ `json`（`content` 为段落数组）
+  - `format`: `markdown`（默认，保留标题/列表/链接）/ `text`（剥掉标记的纯文本）/ `json`（`content` 为段落数组）/ `chunks`（RAG 分块，见下）
+  - `format=chunks`: `content` 为分块数组，每块含 `index` / `text` / `heading_path`（标题层级路径）/ `start` / `end`（在正文中的字符偏移）/ `tokens`；顶层另有 `chunk_count`，可直接写入向量库
+  - `chunk_size` / `chunk_overlap`: `chunks` 模式的窗口与重叠字符数（默认 `1200` / `200`；窗口 100~8000，重叠不超过窗口一半）
   - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
   - 代理：`proxy`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）只对本次调用生效，L1 与升级后的 L2 走同一个出口；不传则按 `SCRAPE_MCP_PROXY_POOL` 代理池分配，未配池时沿用 `SCRAPE_MCP_PROXY`。显式传入代理的请求不读也不写共享缓存，避免不同出口的结果混在一起
   - 总预算：`deadline_ms`（毫秒，可选）限制整次调用；不够时逐级降级，见"错误码与诊断"中的 `deadline:*` 说明
@@ -363,7 +365,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 插件类型：第三方包可通过入口点注册自己的字段类型（见下文「自定义字段类型」），用法与内置类型一致
   - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）；非 HTML（PDF/纯文本）返回 `unsupported_content`，请改用 `web_fetch`
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
-  - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session`（对该批所有 URL 生效）
+  - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session`（对该批所有 URL 生效）；`format=chunks` 与 `chunk_size` / `chunk_overlap` 同样逐条生效
   - `proxy` 同样对该批所有 URL 生效；缺省按代理池分配，未配池时沿用全局配置
   - `deadline_ms` 为整批共用的预算：耗尽后还没开始的子任务直接返回 `timeout`，不再占用网络与浏览器
   - 客户端请求进度（传 `progressToken`）时，每完成一条上报 `已抓取 n/N 个 URL`

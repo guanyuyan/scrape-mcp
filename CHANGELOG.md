@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- `web_fetch` / `web_batch` 新增 `format=chunks`：固定字符窗口 + `chunk_overlap`，每块带 `heading_path` 与 `start`/`end` 偏移，`content` 可直接写入向量库；新增 `chunk_size` / `chunk_overlap` 参数（默认 1200 / 200）
 - `web_screenshot` 新增元素裁剪：`selector` 命中时按元素包围盒截图，未命中或元素不可见时回退整页并写入 `notes`
 - `web_screenshot` 新增 `pdf=true`：导出整页 PDF（需 Chromium），失败时返回稳定的 `unsupported_content`
 - `web_screenshot` 新增 `device` 设备预设（desktop 1280x800 / mobile 390x844）；mobile 使用独立 context（移动 UA + 触屏）

@@ -114,7 +114,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Total budget with degradation**: `web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start` accept `deadline_ms`. When time runs short it degrades step by step — cap each request → skip retries → skip L2 rendering → return `timeout` — while any content already fetched is still returned. Degraded results are never cached, so later calls with a larger budget cannot inherit truncated content. The budget also covers the compliance stage (rate-limit wait and robots.txt fetch): if it is too tight, the call returns `timeout` early instead of burning the budget on preparation.
 - **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent. Third-party packages can register their own field types through an entry point.
 - **Site recipes**: keep per-site rendering hints, root selector, extraction schema and pagination rules in a JSON file; later calls need no arguments, and per-call arguments still win.
-- **Selectable output format**: `format=markdown|text|json`; `json` yields a paragraph array ready for storage.
+- **Selectable output format**: `format=markdown|text|json|chunks`; `json` yields a paragraph array, while `chunks` yields RAG-ready chunks (fixed window + overlap + heading path) that can be stored as-is.
 - **Per-host concurrency gate**: at most 2 concurrent requests per host by default, while different hosts still run in parallel.
 - **Stealth hardening**: `webdriver` wiped, UA data aligned, deterministic Canvas/WebGL noise, timezone matching.
 
@@ -338,7 +338,9 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
 
 - **`web_fetch(url, max_tokens=4000, link_policy="internal", format="markdown", ...)`** → status + compact content
   - `link_policy`: `internal` (keep same-site links, demote off-site) / `all` / `none`
-  - `format`: `markdown` (default, keeps headings/lists/links) / `text` (plain) / `json` (`content` is a paragraph array)
+  - `format`: `markdown` (default, keeps headings/lists/links) / `text` (plain) / `json` (`content` is a paragraph array) / `chunks` (RAG chunks, see below)
+  - `format=chunks`: `content` is an array of chunks, each with `index` / `text` / `heading_path` / `start` / `end` (character offsets in the content) / `tokens`; the payload also carries `chunk_count`, ready for a vector store
+  - `chunk_size` / `chunk_overlap`: window and overlap in characters for `chunks` (default `1200` / `200`; window 100~8000, overlap at most half the window)
   - Fetch options: `headers` / `cookies` (custom requests bypass the shared cache), `timeout`, `bypass_cache`
   - Proxy: `proxy` (e.g. `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`) applies to this call only, and both L1 and any L2 escalation use the same exit; omit it to let `SCRAPE_MCP_PROXY_POOL` assign one per site, falling back to `SCRAPE_MCP_PROXY`. An explicit proxy bypasses the shared cache so results from different exits never mix
   - Total budget: optional `deadline_ms` caps the whole call; degradation markers are listed under "Error codes and diagnostics"
@@ -357,7 +359,7 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Plugin types: third-party packages can register custom field types via an entry point (see "Custom field types" below) and use them exactly like built-ins
   - Fetch/render options match `web_fetch` (without `link_policy` / `format`); non-HTML returns `unsupported_content` — use `web_fetch` instead
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → concurrent fetch, one result per URL; a single failure does not sink the batch
-  - Supports `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session` for the whole batch
+  - Supports `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session` for the whole batch; `format=chunks` with `chunk_size` / `chunk_overlap` applies per URL as well
   - `proxy` also applies to every URL in the batch; omit it to use the proxy pool, then `SCRAPE_MCP_PROXY`
   - `deadline_ms` is shared by the batch: tasks that have not started when it runs out return `timeout` without touching the network or browser
   - Reports progress per completed URL when the client requests it (`progressToken`)

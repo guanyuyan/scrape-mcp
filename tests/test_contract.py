@@ -338,6 +338,22 @@ def test_web_fetch_json_format_returns_blocks(monkeypatch):
     assert isinstance(out["content"], list)
 
 
+def test_web_fetch_chunks_format_locks_fields(monkeypatch):
+    _patch_fetch(monkeypatch, _outcome())
+    out = _run(server.web_fetch(URL, format="chunks"))
+    assert set(out) == FETCH_OK_PAYLOAD | {"format", "chunk_count"}
+    assert out["format"] == "chunks"
+    assert out["chunk_count"] == len(out["content"]) >= 1
+    assert set(out["content"][0]) == {"index", "text", "heading_path", "start", "end", "tokens"}
+
+
+def test_web_fetch_chunks_rejects_bad_window(monkeypatch):
+    out = _run(server.web_fetch(URL, format="chunks", chunk_size=50))
+    assert out["error_code"] == errors.INVALID_ARGUMENT
+    out = _run(server.web_fetch(URL, format="chunks", chunk_overlap=700))
+    assert out["error_code"] == errors.INVALID_ARGUMENT
+
+
 def test_web_fetch_debug_diagnostics_keys(monkeypatch):
     _patch_fetch(monkeypatch, _outcome(decisions=["escalate_l2:cloudflare"], attempts=2))
     out = _run(server.web_fetch(URL, debug=True))

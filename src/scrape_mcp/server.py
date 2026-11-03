@@ -55,6 +55,13 @@ from .core.siteindex import (
 )
 from .core.stats import get_stats
 from .core.watch import MAX_SNAPSHOT_CHARS, WatchStore, content_hash, diff_summary, watch_key
+from .extract.chunks import (
+    CHUNK_OVERLAP_DEFAULT,
+    CHUNK_SIZE_DEFAULT,
+    CHUNK_SIZE_MAX,
+    CHUNK_SIZE_MIN,
+    chunk_markdown,
+)
 from .extract.compact import LINK_POLICIES, compact_html
 from .extract.links import extract_links, next_link
 from .extract.pdf import PdfError, pdf_pages
@@ -695,7 +702,14 @@ async def _fetch_html(
     return outcome, None
 
 
-def _plain_payload(outcome: FetchOutcome, url: str, budget: int, fmt: str) -> dict:
+def _plain_payload(
+    outcome: FetchOutcome,
+    url: str,
+    budget: int,
+    fmt: str,
+    chunk_size: int = CHUNK_SIZE_DEFAULT,
+    chunk_overlap: int = CHUNK_OVERLAP_DEFAULT,
+) -> dict:
     """PDF / 纯文本的返回载荷：主键与 HTML 路径保持一致，便于调用方统一处理。"""
     extra: dict = {}
     if outcome.kind == "pdf":
@@ -762,6 +776,10 @@ def _plain_payload(outcome: FetchOutcome, url: str, budget: int, fmt: str) -> di
         if fmt == "text":
             payload["content"] = to_plain_text(text)
             payload["token_estimate"] = count_tokens(payload["content"])
+        elif fmt == "chunks":
+            payload["content"] = chunk_markdown(text, size=chunk_size, overlap=chunk_overlap)
+            payload["chunk_count"] = len(payload["content"])
+            payload["token_estimate"] = sum(c["tokens"] for c in payload["content"])
         else:  # json：按行分块，PDF 也是逐行切，调用方按需再按页聚合
             payload["content"] = blocks
             payload["token_estimate"] = sum(count_tokens(b) for b in blocks)
@@ -776,6 +794,8 @@ async def _fetch_dict(
     link_policy: str,
     *,
     fmt: str = "markdown",
+    chunk_size: int = CHUNK_SIZE_DEFAULT,
+    chunk_overlap: int = CHUNK_OVERLAP_DEFAULT,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
@@ -807,6 +827,28 @@ async def _fetch_dict(
             "error": f"format 必须是 {FORMATS} 之一",
             "retryable": False,
         }
+    if (
+        isinstance(chunk_size, bool)
+        or not isinstance(chunk_size, int)
+        or not CHUNK_SIZE_MIN <= chunk_size <= CHUNK_SIZE_MAX
+    ):
+        return {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": f"chunk_size 需在 {CHUNK_SIZE_MIN}~{CHUNK_SIZE_MAX} 之间（字符数）",
+            "retryable": False,
+        }
+    if (
+        isinstance(chunk_overlap, bool)
+        or not isinstance(chunk_overlap, int)
+        or not 0 <= chunk_overlap <= chunk_size // 2
+    ):
+        return {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": "chunk_overlap 需在 0~chunk_size/2 之间（字符数）",
+            "retryable": False,
+        }
 
     budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
     recipe = _recipe_for(url)
@@ -823,6 +865,8 @@ async def _fetch_dict(
             url=url,
             session=session,
             format=fmt,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             link_policy=link_policy,
             budget=budget,
             root=recipe.root_selector if recipe else None,
@@ -854,7 +898,7 @@ async def _fetch_dict(
 
     budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
     if outcome.kind != "html":
-        payload = _plain_payload(outcome, url, budget, fmt)
+        payload = _plain_payload(outcome, url, budget, fmt, chunk_size, chunk_overlap)
         if payload.get("ok"):
             get_stats().record_tokens(payload.get("token_estimate", 0))
             if cache is not None and not _deadline_limited(outcome):
@@ -892,6 +936,12 @@ async def _fetch_dict(
         if fmt == "text":
             payload["content"] = to_plain_text(result.content)
             payload["token_estimate"] = count_tokens(payload["content"])
+        elif fmt == "chunks":
+            payload["content"] = chunk_markdown(
+                result.content, size=chunk_size, overlap=chunk_overlap
+            )
+            payload["chunk_count"] = len(payload["content"])
+            payload["token_estimate"] = sum(c["tokens"] for c in payload["content"])
         else:  # json：按行分块，方便调用方逐段入库/切片
             payload["content"] = to_blocks(result.content)
             payload["token_estimate"] = sum(count_tokens(b) for b in payload["content"])
@@ -1964,6 +2014,8 @@ async def web_fetch(
     max_tokens: int = 4000,
     link_policy: str = "internal",
     format: str = "markdown",
+    chunk_size: int = CHUNK_SIZE_DEFAULT,
+    chunk_overlap: int = CHUNK_OVERLAP_DEFAULT,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
@@ -1988,7 +2040,10 @@ async def web_fetch(
         link_policy: 链接处理策略。internal=站内链接保留为相对路径、站外降级为纯文本（默认，最省）；
             all=站内外链接全保留；none=全部降级为纯文本。
         format: 输出格式。markdown=保留标题/列表/链接标记（默认）；
-            text=剥掉 markdown 标记的纯文本；json=按行切分的块数组（content 为字符串列表）。
+            text=剥掉 markdown 标记的纯文本；json=按行切分的块数组（content 为字符串列表）；
+            chunks=RAG 分块数组（固定字符窗口 + overlap + heading_path，可直接入库）。
+        chunk_size: format=chunks 时的窗口字符数（默认 1200，范围 100~8000）。
+        chunk_overlap: format=chunks 时相邻块的重叠字符数（默认 200，范围 0~chunk_size/2）。
         headers: 自定义请求头，如 {"Referer": "...", "User-Agent": "..."}；传入时不走共享缓存。
         cookies: 自定义 cookie 字典；传入时不走共享缓存。
         timeout: 单次请求超时秒数（默认取配置 request_timeout）。
@@ -2034,6 +2089,8 @@ async def web_fetch(
             max_tokens,
             link_policy,
             fmt=format,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             headers=headers,
             cookies=cookies,
             timeout=timeout,
@@ -2234,6 +2291,8 @@ async def web_batch(
     max_tokens: int = 3000,
     link_policy: str = "internal",
     format: str = "markdown",
+    chunk_size: int = CHUNK_SIZE_DEFAULT,
+    chunk_overlap: int = CHUNK_OVERLAP_DEFAULT,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
@@ -2250,7 +2309,9 @@ async def web_batch(
         urls: 目标 URL 列表（最多 batch_max_urls 个，默认 20）。
         max_tokens: 每个 URL 的正文 token 预算上限。
         link_policy: 同 web_fetch。
-        format: 同 web_fetch（markdown / text / json）。
+        format: 同 web_fetch（markdown / text / json / chunks）。
+        chunk_size: format=chunks 时的窗口字符数；对所有 URL 生效。
+        chunk_overlap: format=chunks 时相邻块的重叠字符数；对所有 URL 生效。
         headers: 所有 URL 共用的自定义请求头；传入时不走共享缓存。
         cookies: 所有 URL 共用的自定义 cookie；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
@@ -2309,6 +2370,8 @@ async def web_batch(
                         max_tokens,
                         link_policy,
                         fmt=format,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
                         headers=headers,
                         cookies=cookies,
                         timeout=timeout,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-FORMATS = ("markdown", "text", "json")
+FORMATS = ("markdown", "text", "json", "chunks")
 
 _HEADING = re.compile(r"^#{1,6}\s*", re.M)
 _BULLET = re.compile(r"^\s{0,2}[-*]\s+", re.M)
