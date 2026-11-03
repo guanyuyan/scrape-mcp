@@ -146,7 +146,7 @@ def test_browser_context_is_isolated_by_proxy(tmp_path):
     renderer = BrowserRenderer(Settings(data_dir=str(tmp_path)))
     created: list[str | None] = []
 
-    async def fake_new_context(host, session="default", *, headless=None, proxy=None):
+    async def fake_new_context(host, session="default", *, headless=None, proxy=None, mobile=False):
         created.append(proxy)
 
         class _Ctx:

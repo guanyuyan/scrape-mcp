@@ -930,6 +930,13 @@ async def _fetch_dict(
 _SEARCH_ORDER = ("duckduckgo", "searxng", "brave", "tavily")
 _MAX_ENGINES = 10
 
+# web_screenshot 的设备预设：视口尺寸 + 是否走移动端 context（UA/触屏）
+_DEVICE_PRESETS: dict[str, dict] = {
+    "desktop": {"width": 1280, "height": 800, "mobile": False},
+    "mobile": {"width": 390, "height": 844, "mobile": True},
+}
+_MAX_HIDE = 10
+
 
 def _argument_error(message: str) -> dict:
     return {
@@ -985,6 +992,24 @@ def _engines_arg(engines: list[str] | None) -> tuple[list[str] | None, dict | No
         name = item.strip()
         if name not in normalized:
             normalized.append(name)
+    return normalized, None
+
+
+def _hide_arg(hide: list[str] | None) -> tuple[list[str] | None, dict | None]:
+    """校验截图前要隐藏的选择器列表：非空字符串、去重、限制数量。"""
+    if hide is None:
+        return None, None
+    if not isinstance(hide, list) or not hide:
+        return None, _argument_error("hide 必须是非空字符串数组")
+    if len(hide) > _MAX_HIDE:
+        return None, _argument_error(f"hide 最多 {_MAX_HIDE} 个选择器")
+    normalized: list[str] = []
+    for item in hide:
+        if not isinstance(item, str) or not item.strip():
+            return None, _argument_error("hide 必须是非空字符串数组")
+        selector = item.strip()
+        if selector not in normalized:
+            normalized.append(selector)
     return normalized, None
 
 
@@ -1295,16 +1320,19 @@ async def web_screenshot(
     url: str,
     path: str | None = None,
     full_page: bool = False,
-    width: int = 1280,
-    height: int = 800,
+    width: int | None = None,
+    height: int | None = None,
     wait_ms: int = 0,
     selector: str | None = None,
+    hide: list[str] | None = None,
+    device: str | None = None,
+    pdf: bool = False,
     actions: list[dict] | None = None,
     session: str = "default",
     deadline_ms: int | None = None,
     proxy: str | None = None,
 ) -> str:
-    """用真实浏览器渲染页面并截图，保存为 PNG 并返回本地文件路径。
+    """用真实浏览器渲染页面并截图，保存为 PNG（或 PDF）并返回本地文件路径。
 
     与 web_fetch 共用浏览器池与登录态：需要登录/JS 渲染的页面会先带上已保存的
     session，再按需等待某个元素出现后截图，适合"给模型看一眼页面长什么样"。
@@ -1314,10 +1342,14 @@ async def web_screenshot(
         path: 保存路径（可为相对或绝对路径，父目录自动创建）；不传则存到
             ``DATA_DIR/screenshots/`` 下，文件名按 URL 与参数派生。
         full_page: True 时截整页（含滚动区域），默认只截当前视口。
-        width: 视口宽度（像素），默认 1280。
-        height: 视口高度（像素），默认 800。
+        width: 视口宽度（像素）；不传时取 device 预设（desktop 1280 / mobile 390）。
+        height: 视口高度（像素）；不传时取 device 预设（desktop 800 / mobile 844）。
         wait_ms: 页面加载后额外等待的毫秒数，给动画/懒加载留时间。
-        selector: 截图前等待该 CSS 选择器出现（不命中不致命，照常截图）。
+        selector: 截图前等待该 CSS 选择器出现，命中时按元素包围盒裁剪；
+            未命中或元素不可见时回退整页并在 notes 中说明。
+        hide: 截图前隐藏的元素选择器（如固定导航/弹窗）；单个失败只写入 notes。
+        device: 设备预设 desktop / mobile；mobile 使用 390x844 视口、移动 UA 与触屏。
+        pdf: True 时导出整页 PDF（需 Chromium 内核），此时忽略元素裁剪与 full_page。
         actions: 截图前按顺序执行的浏览器动作链（click/type/press/select/wait/scroll），
             适合先展开菜单/搜索再截图；单个动作失败只写入 notes，不影响截图。
         session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致。
@@ -1338,6 +1370,18 @@ async def web_screenshot(
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
+    if device is not None and (
+        not isinstance(device, str) or device.strip().lower() not in _DEVICE_PRESETS
+    ):
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"device 需为 {'/'.join(_DEVICE_PRESETS)} 之一",
+        )
+    preset = _DEVICE_PRESETS[(device or "desktop").strip().lower()]
+    width = preset["width"] if width is None else width
+    height = preset["height"] if height is None else height
     for label, value in (("width", width), ("height", height)):
         if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 5000:
             return _payload(
@@ -1346,6 +1390,13 @@ async def web_screenshot(
                 error_code=errors.INVALID_ARGUMENT,
                 error=f"{label} 需在 100~5000 之间",
             )
+    if not isinstance(pdf, bool):
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="pdf 必须是布尔值",
+        )
     if isinstance(wait_ms, bool) or not isinstance(wait_ms, int) or not 0 <= wait_ms <= 30000:
         return _payload(
             ok=False,
@@ -1360,6 +1411,9 @@ async def web_screenshot(
             error_code=errors.INVALID_ARGUMENT,
             error="selector 必须是非空字符串",
         )
+    hide, hide_err = _hide_arg(hide)
+    if hide_err is not None:
+        return _payload(**hide_err)
     actions, actions_err = _actions_arg(actions)
     if actions_err is not None:
         return _payload(**actions_err)
@@ -1378,6 +1432,9 @@ async def web_screenshot(
             height=height,
             wait_ms=wait_ms,
             selector=selector,
+            hide=hide or [],
+            pdf=pdf,
+            mobile=preset["mobile"],
             actions=actions,
             session=session,
             timeout=dl.remaining(deadline),
@@ -1385,7 +1442,12 @@ async def web_screenshot(
         )
 
     if not result.ok:
-        code = errors.classify_message(result.error)
+        # PDF 导出失败用固定前缀标记，映射到稳定的 unsupported_content
+        code = (
+            errors.UNSUPPORTED_CONTENT
+            if (result.error or "").startswith("Unsupported")
+            else errors.classify_message(result.error)
+        )
         return _payload(
             ok=False,
             url=url,
@@ -1395,20 +1457,22 @@ async def web_screenshot(
         )
 
     settings = get_settings()
+    suffix = ".pdf" if pdf else ".png"
     if path:
         target = Path(path).expanduser()
     else:
         digest = hashlib.sha256(
-            f"{result.final_url}|{full_page}|{width}x{height}|{selector or ''}".encode()
+            f"{result.final_url}|{full_page}|{width}x{height}|{selector or ''}"
+            f"|{device or 'desktop'}|{'|'.join(hide or [])}|{pdf}".encode()
         ).hexdigest()[:16]
         target = (
             Path(settings.data_dir).expanduser()
             / "screenshots"
-            / f"{digest}_{int(time.time() * 1000)}.png"
+            / f"{digest}_{int(time.time() * 1000)}{suffix}"
         )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(result.png)
+        target.write_bytes(result.pdf if pdf else result.png)
     except OSError as exc:
         return _payload(
             ok=False,
@@ -1423,11 +1487,14 @@ async def web_screenshot(
         final_url=result.final_url,
         status=result.status,
         file=str(target),
-        bytes=len(result.png),
+        bytes=len(result.pdf if pdf else result.png),
         width=width,
         height=height,
         full_page=full_page,
         selector=selector,
+        hide=hide or [],
+        device=device or "desktop",
+        pdf=pdf,
         wait_ms=wait_ms,
         elapsed_ms=result.elapsed_ms,
         notes=result.notes,

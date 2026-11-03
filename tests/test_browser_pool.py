@@ -70,7 +70,9 @@ def test_context_reused_per_host_and_session(tmp_path, monkeypatch):
     renderer = _renderer(tmp_path)
     created: list[tuple[str, str]] = []
 
-    async def fake_new_context(host: str, session: str = "default", *, headless=None, proxy=None):
+    async def fake_new_context(
+        host: str, session: str = "default", *, headless=None, proxy=None, mobile=False
+    ):
         created.append((host, session))
         return _Resource(f"{host}/{session}")
 
@@ -93,7 +95,9 @@ def test_contexts_evicted_lru_beyond_limit(tmp_path, monkeypatch):
     renderer = _renderer(tmp_path, l2_max_contexts=2)
     store: dict[tuple[str, str], _Resource] = {}
 
-    async def fake_new_context(host: str, session: str = "default", *, headless=None, proxy=None):
+    async def fake_new_context(
+        host: str, session: str = "default", *, headless=None, proxy=None, mobile=False
+    ):
         resource = _Resource(f"{host}/{session}")
         store[(host, session)] = resource
         return resource
@@ -109,8 +113,8 @@ def test_contexts_evicted_lru_beyond_limit(tmp_path, monkeypatch):
     asyncio.run(run())
 
     assert set(renderer._contexts) == {
-        ("a.test", "default", ""),
-        ("c.test", "default", ""),
+        ("a.test", "default", "", "desktop"),
+        ("c.test", "default", "", "desktop"),
     }
     assert store[("a.test", "default")].closed is False
     assert store[("b.test", "default")].closed is True

@@ -110,7 +110,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。页数多时改用 `web_crawl_start` 起后台任务，用 `status` 轮询、`cancel` 停止，进程重启后自动续跑。
 - **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
 - **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要 / 来源引擎 / 发布时间），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API 或配置 key 使用 Brave / Tavily；支持 `site`、`time_range`、`engines` 过滤与后端失败自动回退，结果可缓存，适合"先搜再抓"的两步流程。
-- **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG，支持整页/视口、自定义尺寸、等待元素与额外延时；`actions` 可在截图前先点击/输入/翻页。复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
+- **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG 或整页 PDF，支持整页/视口、自定义尺寸、元素裁剪、设备预设（desktop/mobile）、截图前隐藏固定导航/弹窗，以及等待元素与额外延时；`actions` 可在截图前先点击/输入/翻页。复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
 - **站点索引**：`web_index` 读 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`），递归展开 sitemap index 并解压 `.gz`；清单落盘后，下次返回新增 / 变更 / 未变 / 移除，可选回抓正文比哈希过滤"只改了时间戳"的假变更。
 - **站点 URL 发现**：`web_map` 同时读 sitemap 与入口页站内链接（可选合并 `web_search` 结果），同一 URL 只出现一次并标出来源；支持 `include`/`exclude` 正则、`search` 子串过滤与 `limit` 截断，适合无 sitemap 的站点。
 - **异步爬取任务**：`web_crawl_start` 立即返回 `job_id`，任务在后台推进并把状态逐页原子落盘到 `DATA_DIR/jobs/`；`web_crawl_status` 可读进度与部分结果、并在进程重启后自动续跑，`web_crawl_cancel` 停止任务，`web_crawl_list` 列出最近任务。同参数重复 start 幂等。
@@ -393,9 +393,11 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 后端失败（限流/拦截/传输错误）时按 `fallback`（默认取 `SEARCH_FALLBACK`）自动回退到其他已配置的后端；全部不可用时行为与之前一致
   - 搜索服务按接口使用：仍遵守主机白/黑名单与全局限流，但不套目标站的 robots 抓取规则
   - `bypass_cache` 强制现查；`proxy` 与 `deadline_ms` 语义同 `web_fetch`，回退同样受总预算约束
-- **`web_screenshot(url, path=None, full_page=False, width=1280, height=800, wait_ms=0, selector=None, ...)`** → 浏览器渲染并截图，返回本地 PNG 路径
-  - 不传 `path` 时存到 `DATA_DIR/screenshots/`；`full_page=true` 截整页，否则只截视口
-  - `selector` 是截图前等待出现的 CSS 选择器（不命中不致命，`notes` 会记录）；`wait_ms` 额外等动画/懒加载；`actions` 可在截图前执行点击/输入/滚动等动作
+- **`web_screenshot(url, path=None, full_page=False, width=None, height=None, wait_ms=0, selector=None, hide=None, device=None, pdf=False, ...)`** → 浏览器渲染并截图，返回本地 PNG/PDF 路径
+  - 不传 `path` 时存到 `DATA_DIR/screenshots/`；`full_page=true` 截整页，否则只截视口；`pdf=true` 导出整页 PDF（需 Chromium，忽略元素裁剪）
+  - `selector` 截图前等待该 CSS 选择器出现，命中时按元素包围盒裁剪；未命中或元素不可见时回退整页并在 `notes` 说明
+  - `width`/`height` 不传时取 `device` 预设（desktop 1280x800 / mobile 390x844，mobile 同时用移动 UA 与触屏）；`hide` 在截图前隐藏指定元素（如固定导航/弹窗），单个失败只记 `notes`
+  - `wait_ms` 额外等动画/懒加载；`actions` 可在截图前执行点击/输入/滚动等动作
   - 复用 `session` 登录态与浏览器池；`proxy` / `deadline_ms` 语义同 `web_fetch`
 - **`web_map(url, include=None, exclude=None, search=None, limit=500, homepage=True, use_search=False, ...)`** → 发现站点 URL（sitemap + 入口页链接）
   - 同一 URL 只出现一次，`urls` 每项带 `source`（`sitemap` / `homepage` / `search`），`sources` 给出各类计数

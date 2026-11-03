@@ -5,6 +5,11 @@
 ## [Unreleased]
 
 ### Added
+- `web_screenshot` 新增元素裁剪：`selector` 命中时按元素包围盒截图，未命中或元素不可见时回退整页并写入 `notes`
+- `web_screenshot` 新增 `pdf=true`：导出整页 PDF（需 Chromium），失败时返回稳定的 `unsupported_content`
+- `web_screenshot` 新增 `device` 设备预设（desktop 1280x800 / mobile 390x844）；mobile 使用独立 context（移动 UA + 触屏）
+- `web_screenshot` 新增 `hide` 选择器列表：截图前隐藏固定导航/弹窗，单个失败只记 `notes`
+- `web_screenshot` 的 `width`/`height` 改为可选，未传时取设备预设；载荷新增 `hide` / `device` / `pdf`
 - `web_search` 新增 `site` / `time_range` / `engines` / `fallback` 参数：`site` 拼成 `site:` 运算符、`time_range` 按后端映射（DDG `df`、Brave `freshness`、Tavily/SearXNG 原生参数），`engines` 透传给 SearXNG；均真实作用于请求
 - `web_search` 结果新增 `engine` / `published_at` 字段（DDG 无发布时间时留空），并新增顶层 `attempts` 记录回退链上的失败后端
 - 新增可选搜索后端 Brave / Tavily（需 `SEARCH_BRAVE_API_KEY` / `SEARCH_TAVILY_API_KEY`）；Tavily 走 JSON POST，其他后端走 GET

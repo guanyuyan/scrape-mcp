@@ -136,6 +136,8 @@ class ScreenshotOutcome:
     elapsed_ms: int
     error: str | None = None
     notes: list[str] = field(default_factory=list)
+    # pdf=True 时的整页 PDF；此时 png 为空
+    pdf: bytes = b""
 
 
 class BrowserRenderer:
@@ -181,16 +183,22 @@ class BrowserRenderer:
     # ---------- 生命周期 ----------
 
     async def _context_for(
-        self, host: str, session: str = "default", *, proxy: str | None = None
+        self,
+        host: str,
+        session: str = "default",
+        *,
+        proxy: str | None = None,
+        mobile: bool = False,
     ) -> Any:
-        key = (host, session, proxy or "")
+        # 移动端需要 is_mobile/has_touch/UA，这些是 context 级属性，不能对已有页面临时改
+        key = (host, session, proxy or "", "mobile" if mobile else "desktop")
         async with self._lock:
             context = self._contexts.get(key)
             if context is not None:
                 self._contexts.move_to_end(key)
                 return context
             try:
-                context = await self._new_context(host, session, proxy=proxy)
+                context = await self._new_context(host, session, proxy=proxy, mobile=mobile)
             except Exception:
                 # 半途失败会留下已启动的浏览器/驱动进程，先收干净再抛，避免每次重试都漏一个
                 await self._shutdown()
@@ -269,6 +277,7 @@ class BrowserRenderer:
         *,
         headless: bool | None = None,
         proxy: str | None = None,
+        mobile: bool = False,
     ) -> Any:
         # 延迟导入：没装 playwright 时 L1 仍然可用
         from playwright.async_api import async_playwright
@@ -289,6 +298,14 @@ class BrowserRenderer:
             "viewport": {"width": 1440, "height": 900},
             "proxy": {"server": server} if server else None,
         }
+        if mobile:
+            # 设备预设的移动端：改 UA 并开启触屏，视口尺寸由调用方随后 set_viewport_size
+            kwargs["user_agent"] = (
+                "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            )
+            kwargs["is_mobile"] = True
+            kwargs["has_touch"] = True
         # 该站该会话已有登录态则直接带上，跳过登录墙/再登录
         saved = self._sessions.load(host, session)
         if saved:
@@ -625,6 +642,9 @@ class BrowserRenderer:
         height: int = 800,
         wait_ms: int = 0,
         selector: str | None = None,
+        hide: list[str] | None = None,
+        pdf: bool = False,
+        mobile: bool = False,
         actions: list[dict[str, Any]] | None = None,
         session: str = "default",
         timeout: float | None = None,
@@ -651,6 +671,9 @@ class BrowserRenderer:
                 height=height,
                 wait_ms=wait_ms,
                 selector=selector,
+                hide=hide,
+                pdf=pdf,
+                mobile=mobile,
                 actions=actions,
                 session=session,
                 timeout=timeout,
@@ -671,6 +694,9 @@ class BrowserRenderer:
         height: int,
         wait_ms: int,
         selector: str | None,
+        hide: list[str] | None,
+        pdf: bool,
+        mobile: bool,
         actions: list[dict[str, Any]] | None,
         session: str,
         timeout: float | None,
@@ -678,7 +704,7 @@ class BrowserRenderer:
     ) -> ScreenshotOutcome:
         nav_ms = int((timeout or self._s.l2_navigate_timeout) * 1000)
         try:
-            context = await self._context_for(host, session, proxy=proxy)
+            context = await self._context_for(host, session, proxy=proxy, mobile=mobile)
         except Exception as exc:
             return ScreenshotOutcome(
                 ok=False,
@@ -699,15 +725,66 @@ class BrowserRenderer:
             status = resp.status if resp is not None else 0
             if actions:
                 await self._apply_actions(page, actions, notes, timeout)
+            if hide:
+                # 用行内样式隐藏而不是删节点：保留布局上下文，避免页面重排后截图错位
+                for css in hide:
+                    try:
+                        await page.locator(css).evaluate_all(
+                            "els => els.forEach((el) => "
+                            "el.style.setProperty('display', 'none', 'important'))"
+                        )
+                    except Exception as exc:
+                        notes.append(f"hide 失败: {css} ({type(exc).__name__})")
+
+            hit = True
             if selector:
-                # 选择器只是"等它出现再拍"的稳定点；没命中不致命，照常截图
+                # 选择器既是"等它出现再拍"的稳定点，也是元素裁剪的目标
                 try:
                     await page.wait_for_selector(selector, timeout=min(nav_ms, 5000))
                 except Exception:
                     notes.append(f"selector 未命中: {selector}")
+                    hit = False
             if wait_ms > 0:
                 await page.wait_for_timeout(wait_ms)
-            png = await page.screenshot(full_page=full_page)
+
+            if pdf:
+                # PDF 始终是整页；selector 只当等待点，元素裁剪不适用
+                try:
+                    data = await page.pdf(print_background=True)
+                except Exception as exc:
+                    # 非 Chromium 内核不支持 page.pdf；用固定前缀让上层映射成稳定错误码
+                    return ScreenshotOutcome(
+                        ok=False,
+                        url=url,
+                        final_url=page.url,
+                        status=status,
+                        png=b"",
+                        elapsed_ms=_ms(t0),
+                        error=f"Unsupported: PDF 导出失败（需 Chromium）: {type(exc).__name__}",
+                        notes=notes,
+                    )
+                return ScreenshotOutcome(
+                    ok=True,
+                    url=url,
+                    final_url=page.url,
+                    status=status,
+                    png=b"",
+                    pdf=data,
+                    elapsed_ms=_ms(t0),
+                    notes=notes,
+                )
+            if selector:
+                if hit:
+                    try:
+                        png = await page.locator(selector).screenshot(timeout=min(nav_ms, 5000))
+                    except Exception as exc:
+                        # 元素不可见/被遮挡时不让整次调用失败，回退整页并留下线索
+                        notes.append(f"selector 元素截图失败，已回退整页: {type(exc).__name__}")
+                        png = await page.screenshot(full_page=True)
+                else:
+                    png = await page.screenshot(full_page=True)
+            else:
+                png = await page.screenshot(full_page=full_page)
             return ScreenshotOutcome(
                 ok=True,
                 url=url,
@@ -775,11 +852,14 @@ class BrowserRenderer:
 
             state = await context.storage_state()
             self._sessions.save(host, state, session)
-            # 该站该会话若还留着带旧登录态的 context，关掉它，下次抓取重新加载新登录态
-            stale = self._contexts.pop((host, session), None)
-            if stale is not None:
-                with contextlib.suppress(Exception):
-                    await stale.close()
+            # 该站该会话若还留着带旧登录态的 context（桌面/移动各一份），都关掉，
+            # 下次抓取重新加载新登录态
+            stale_keys = [k for k in self._contexts if k[0] == host and k[1] == session]
+            for key in stale_keys:
+                stale = self._contexts.pop(key, None)
+                if stale is not None:
+                    with contextlib.suppress(Exception):
+                        await stale.close()
 
             return {
                 "ok": True,
