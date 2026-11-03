@@ -109,7 +109,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。页数多时改用 `web_crawl_start` 起后台任务，用 `status` 轮询、`cancel` 停止，进程重启后自动续跑。
 - **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
-- **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API；结果可缓存，适合"先搜再抓"的两步流程。
+- **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要 / 来源引擎 / 发布时间），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API 或配置 key 使用 Brave / Tavily；支持 `site`、`time_range`、`engines` 过滤与后端失败自动回退，结果可缓存，适合"先搜再抓"的两步流程。
 - **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG，支持整页/视口、自定义尺寸、等待元素与额外延时；`actions` 可在截图前先点击/输入/翻页。复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
 - **站点索引**：`web_index` 读 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`），递归展开 sitemap index 并解压 `.gz`；清单落盘后，下次返回新增 / 变更 / 未变 / 移除，可选回抓正文比哈希过滤"只改了时间戳"的假变更。
 - **站点 URL 发现**：`web_map` 同时读 sitemap 与入口页站内链接（可选合并 `web_search` 结果），同一 URL 只出现一次并标出来源；支持 `include`/`exclude` 正则、`search` 子串过滤与 `limit` 截断，适合无 sitemap 的站点。
@@ -191,8 +191,11 @@ cp .env.example .env    # 生成配置模板
 | `BATCH_MAX_URLS` | `20` | `web_batch` 单批上限 |
 | `HOST_MAX_CONCURRENCY` | `2` | 同一主机的并发上限（`web_batch`/`web_crawl` 共用） |
 | `CRAWL_MAX_PAGES` | `20` | `web_crawl` 单次最多抓取页数硬上限 |
-| `SEARCH_PROVIDER` | `duckduckgo` | `web_search` 后端：`duckduckgo`（HTML 端点，无需 key）/ `searxng`（自托管 JSON API） |
+| `SEARCH_PROVIDER` | `duckduckgo` | `web_search` 后端：`duckduckgo`（HTML 端点，无需 key）/ `searxng`（自托管 JSON API）/ `brave` / `tavily`（商业 API，需 key） |
 | `SEARCH_SEARXNG_URL` | — | SearXNG 实例根地址，如 `http://127.0.0.1:8080`；`provider=searxng` 时必填 |
+| `SEARCH_BRAVE_API_KEY` | — | Brave Search API key；留空则该后端不可用，也不参与回退 |
+| `SEARCH_TAVILY_API_KEY` | — | Tavily API key；留空则该后端不可用，也不参与回退 |
+| `SEARCH_FALLBACK` | `true` | 后端失败时是否自动回退到其他已配置的后端（duckduckgo → searxng → brave → tavily） |
 | `SEARCH_MAX_RESULTS` | `20` | `web_search` 单次返回条数硬上限 |
 | `DATASET` | — | 数据集导出路径（JSONL，一行一次成功抓取）；留空不导出 |
 | `RESPECT_ROBOTS` | `true` | 默认遵循目标站 robots.txt；`false` 忽略（仅建议自用合规场景关闭） |
@@ -383,11 +386,13 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `selector` 只看页面内某一块（按命中的全部节点拼接），适合盯榜单/价格/公告位；不同 `selector` 各存一份快照，互不覆盖
   - `reset=true` 丢弃旧快照重建基线；比较口径忽略行尾空白与空行，避免渲染噪声误报
   - 抓取失败（拦截/超时/登录墙）不会覆盖快照，恢复后仍能对比出期间变化；`bypass_cache` 默认 `true`，保证拿到的是最新内容
-- **`web_search(query, max_results=10, provider=None, ...)`** → 搜索关键词，返回结构化结果列表
-  - `provider`: `duckduckgo`（默认，取 `SEARCH_PROVIDER`）/ `searxng`（需先设 `SEARCH_SEARXNG_URL`）
-  - 每条结果含 `rank` / `title` / `url` / `snippet`；`count` 与 `cached` 标明条数与是否命中结果缓存
+- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, ...)`** → 搜索关键词，返回结构化结果列表
+  - `provider`: `duckduckgo`（默认，取 `SEARCH_PROVIDER`）/ `searxng`（需先设 `SEARCH_SEARXNG_URL`）/ `brave` / `tavily`（需先设对应 key）
+  - `site` 以 `site:` 运算符透传给后端（是否严格限定取决于该引擎支持程度）；`time_range` 取 `day` / `week` / `month` / `year`；`engines` 为 SearXNG 引擎名单（仅对 searxng 生效）
+  - 每条结果含 `rank` / `title` / `url` / `snippet` / `engine` / `published_at`；`attempts` 记录回退前的失败后端
+  - 后端失败（限流/拦截/传输错误）时按 `fallback`（默认取 `SEARCH_FALLBACK`）自动回退到其他已配置的后端；全部不可用时行为与之前一致
   - 搜索服务按接口使用：仍遵守主机白/黑名单与全局限流，但不套目标站的 robots 抓取规则
-  - `bypass_cache` 强制现查；`proxy` 与 `deadline_ms` 语义同 `web_fetch`
+  - `bypass_cache` 强制现查；`proxy` 与 `deadline_ms` 语义同 `web_fetch`，回退同样受总预算约束
 - **`web_screenshot(url, path=None, full_page=False, width=1280, height=800, wait_ms=0, selector=None, ...)`** → 浏览器渲染并截图，返回本地 PNG 路径
   - 不传 `path` 时存到 `DATA_DIR/screenshots/`；`full_page=true` 截整页，否则只截视口
   - `selector` 是截图前等待出现的 CSS 选择器（不命中不致命，`notes` 会记录）；`wait_ms` 额外等动画/懒加载；`actions` 可在截图前执行点击/输入/滚动等动作

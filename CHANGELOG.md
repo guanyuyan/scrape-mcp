@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Added
+- `web_search` 新增 `site` / `time_range` / `engines` / `fallback` 参数：`site` 拼成 `site:` 运算符、`time_range` 按后端映射（DDG `df`、Brave `freshness`、Tavily/SearXNG 原生参数），`engines` 透传给 SearXNG；均真实作用于请求
+- `web_search` 结果新增 `engine` / `published_at` 字段（DDG 无发布时间时留空），并新增顶层 `attempts` 记录回退链上的失败后端
+- 新增可选搜索后端 Brave / Tavily（需 `SEARCH_BRAVE_API_KEY` / `SEARCH_TAVILY_API_KEY`）；Tavily 走 JSON POST，其他后端走 GET
+- 单后端失败（限流/拦截/传输错误/解析失败）时按 `SEARCH_FALLBACK`（默认开启）回退到其他已配置的后端，顺序 duckduckgo → searxng → brave → tavily；未配置任何额外后端时行为与 0.21.x 一致
+- 新增配置 `SEARCH_BRAVE_API_KEY` / `SEARCH_TAVILY_API_KEY` / `SEARCH_FALLBACK`；README 中英文与 `.env.example` 同步更新
+
 ## [0.21.1] - 2026-11-03
 
 ### Fixed

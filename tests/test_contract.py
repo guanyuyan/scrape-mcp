@@ -133,9 +133,18 @@ CRAWL_OK_PAYLOAD = {
 
 BATCH_OK_PAYLOAD = {"ok", "total", "ok_count", "results"}
 
-SEARCH_OK_PAYLOAD = {"ok", "query", "provider", "count", "results", "elapsed_ms", "cached"}
+SEARCH_OK_PAYLOAD = {
+    "ok",
+    "query",
+    "provider",
+    "count",
+    "results",
+    "attempts",
+    "elapsed_ms",
+    "cached",
+}
 
-SEARCH_ERROR_PAYLOAD = {"ok", "query", "provider", "error_code", "error", "retryable"}
+SEARCH_ERROR_PAYLOAD = {"ok", "query", "provider", "error_code", "error", "retryable", "attempts"}
 
 SCREENSHOT_OK_PAYLOAD = {
     "ok",
@@ -619,8 +628,16 @@ def test_web_search_success_keys(monkeypatch):
     _patch_fetch(monkeypatch, _outcome(html=SEARCH_HTML))
     out = _run(server.web_search("示例", provider="duckduckgo"))
     assert set(out) == SEARCH_OK_PAYLOAD
-    assert set(out["results"][0]) == {"rank", "title", "url", "snippet"}
+    assert set(out["results"][0]) == {
+        "rank",
+        "title",
+        "url",
+        "snippet",
+        "engine",
+        "published_at",
+    }
     assert out["results"][0]["url"] == "https://a.test/one"
+    assert out["attempts"] == []
 
 
 def test_web_search_failure_keys(monkeypatch):

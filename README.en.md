@@ -105,7 +105,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Two cache layers**: HTTP responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; compacted content and extraction results get their own cache so repeat calls return immediately. `bypass_cache=true` skips both layers. `web_batch` fetches a list concurrently.
 - **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped. For large jobs use `web_crawl_start` to run in the background, poll with `status`, stop with `cancel`, and it resumes after a restart.
 - **Change detection**: `web_watch` keeps a snapshot of the body after every successful fetch and reports `changed` plus an added/removed line summary on the next call; pass `selector` to watch just one block (leaderboard, price box). Failed fetches never overwrite the snapshot, so changes that happened during a block are still visible afterwards.
-- **Search discovery**: `web_search` turns keywords into structured results (title / URL / snippet). It uses DuckDuckGo's HTML endpoint by default (no API key) or a self-hosted SearXNG JSON API; results are cacheable, ideal for a search-then-fetch flow.
+- **Search discovery**: `web_search` turns keywords into structured results (title / URL / snippet / engine / publish date). It uses DuckDuckGo's HTML endpoint by default (no API key), or a self-hosted SearXNG JSON API, or Brave / Tavily with configured keys; it supports `site`, `time_range` and `engines` filters plus automatic backend fallback, and results are cacheable — ideal for a search-then-fetch flow.
 - **Page screenshots**: `web_screenshot` renders in a real browser and exports a PNG, supporting full-page or viewport capture, custom dimensions, selector waiting and extra delay; `actions` can click/type/scroll before the shot. It reuses the login session, so pages behind auth or JS rendering still work.
 - **Site index**: `web_index` reads `Sitemap:` lines from robots.txt (falling back to `/sitemap.xml`), recursively expands sitemap indexes and unpacks `.gz` files. It persists a baseline and later reports new / changed / unchanged / removed entries, optionally re-fetching changed pages to filter out timestamp-only changes.
 - **Site URL discovery**: `web_map` combines sitemap entries with the entry page's same-site links (optionally merged with `web_search` hits), dedupes URLs and tags each with its source; supports `include`/`exclude` regexes, a `search` substring filter and `limit` truncation, so sites without a sitemap still work.
@@ -185,8 +185,11 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `BATCH_MAX_URLS` | `20` | `web_batch` batch size cap |
 | `HOST_MAX_CONCURRENCY` | `2` | Per-host concurrency cap (`web_batch` / `web_crawl`) |
 | `CRAWL_MAX_PAGES` | `20` | Hard cap on pages per `web_crawl` |
-| `SEARCH_PROVIDER` | `duckduckgo` | `web_search` backend: `duckduckgo` (HTML endpoint, no key) / `searxng` (self-hosted JSON API) |
+| `SEARCH_PROVIDER` | `duckduckgo` | `web_search` backend: `duckduckgo` (HTML endpoint, no key) / `searxng` (self-hosted JSON API) / `brave` / `tavily` (commercial APIs, key required) |
 | `SEARCH_SEARXNG_URL` | — | SearXNG base URL, e.g. `http://127.0.0.1:8080`; required when `provider=searxng` |
+| `SEARCH_BRAVE_API_KEY` | — | Brave Search API key; empty makes that backend unavailable and excludes it from fallback |
+| `SEARCH_TAVILY_API_KEY` | — | Tavily API key; empty makes that backend unavailable and excludes it from fallback |
+| `SEARCH_FALLBACK` | `true` | Whether to fall back to other configured backends on failure (duckduckgo → searxng → brave → tavily) |
 | `SEARCH_MAX_RESULTS` | `20` | Hard cap on results per `web_search` |
 | `DATASET` | — | Dataset export path (JSONL, one successful scrape per line); empty disables it |
 | `RESPECT_ROBOTS` | `true` | Follow robots.txt by default; `false` ignores it |
@@ -377,11 +380,13 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `selector` narrows the watch to one block (all matched nodes joined); different selectors keep separate snapshots
   - `reset=true` drops the old snapshot and rebuilds the baseline; comparison ignores trailing whitespace and blank lines so render noise does not count
   - Failed fetches (blocked/timeout/login wall) never overwrite the snapshot; `bypass_cache` defaults to `true` so the content is fresh
-- **`web_search(query, max_results=10, provider=None, ...)`** → search keywords and return structured results
-  - `provider`: `duckduckgo` (default, from `SEARCH_PROVIDER`) / `searxng` (requires `SEARCH_SEARXNG_URL`)
-  - Each hit has `rank` / `title` / `url` / `snippet`; `count` and `cached` report the number of hits and cache status
+- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, ...)`** → search keywords and return structured results
+  - `provider`: `duckduckgo` (default, from `SEARCH_PROVIDER`) / `searxng` (requires `SEARCH_SEARXNG_URL`) / `brave` / `tavily` (requires the matching key)
+  - `site` is passed through as the `site:` operator (how strictly it is enforced depends on the backend engine); `time_range` takes `day` / `week` / `month` / `year`; `engines` is a SearXNG engine list (searxng only)
+  - Each hit has `rank` / `title` / `url` / `snippet` / `engine` / `published_at`; `attempts` records backends that failed before the fallback succeeded
+  - On failure (rate limit / block / transport error) it falls back to other configured backends per `fallback` (defaults to `SEARCH_FALLBACK`); when nothing else is configured, behaviour matches previous releases
   - The search service is used as an API: host allow/deny lists and the global rate limit still apply, but robots rules for the target site do not
-  - `bypass_cache` forces a fresh query; `proxy` and `deadline_ms` behave like `web_fetch`
+  - `bypass_cache` forces a fresh query; `proxy` and `deadline_ms` behave like `web_fetch`, and fallback attempts share the same budget
 - **`web_screenshot(url, path=None, full_page=False, width=1280, height=800, wait_ms=0, selector=None, ...)`** → render in a browser and save a PNG, returning its local path
   - Without `path`, files go to `DATA_DIR/screenshots/`; `full_page=true` captures the whole page, otherwise only the viewport
   - `selector` waits for a CSS selector before capture (a miss is non-fatal and recorded in `notes`); `wait_ms` adds extra delay for animations or lazy loading; `actions` can click/type/scroll before the shot

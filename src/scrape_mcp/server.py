@@ -23,13 +23,23 @@ from .core.cache import ResultCache
 from .core.dataset import record_result
 from .core.fetcher import Fetcher, FetchOutcome
 from .core.hostlimit import HostLimiter
+from .core.http_client import HttpResponse
 from .core.jobs import CrawlJobManager, JobStore
 from .core.logging import configure, log_event
 from .core.proxy import split_pool, valid_proxy
 from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
-from .core.search import PROVIDERS, SearchError, parse_results, search_url
+from .core.search import (
+    PROVIDERS,
+    TAVILY_ENDPOINT,
+    TIME_RANGES,
+    SearchError,
+    SearchHit,
+    parse_results,
+    search_url,
+    tavily_payload,
+)
 from .core.session import CookieFileError, SessionStore, load_cookie_file, normalize_session
 from .core.siteindex import (
     MAX_CONTENT_CHECKS,
@@ -917,11 +927,205 @@ async def _fetch_dict(
     return payload
 
 
+_SEARCH_ORDER = ("duckduckgo", "searxng", "brave", "tavily")
+_MAX_ENGINES = 10
+
+
+def _argument_error(message: str) -> dict:
+    return {
+        "ok": False,
+        "error_code": errors.INVALID_ARGUMENT,
+        "error": message,
+        "retryable": False,
+    }
+
+
+def _site_arg(site: str | None) -> tuple[str | None, dict | None]:
+    """校验站点过滤：接受域名或站内路径，去掉协议前缀与尾部斜杠。"""
+    if site is None:
+        return None, None
+    if not isinstance(site, str):
+        return None, _argument_error("site 必须是字符串")
+    text = site.strip()
+    if not text:
+        return None, _argument_error("site 不能为空串")
+    if any(ch.isspace() for ch in text):
+        return None, _argument_error("site 不能包含空白字符")
+    lowered = text.lower()
+    for prefix in ("http://", "https://"):
+        if lowered.startswith(prefix):
+            text = text[len(prefix) :]
+            break
+    text = text.rstrip("/")
+    if not text:
+        return None, _argument_error("site 需为域名或站内路径，如 example.com 或 example.com/docs")
+    return text, None
+
+
+def _time_range_arg(time_range: str | None) -> tuple[str | None, dict | None]:
+    if time_range is None:
+        return None, None
+    if not isinstance(time_range, str) or time_range.strip().lower() not in TIME_RANGES:
+        return None, _argument_error(f"time_range 需为 {'/'.join(TIME_RANGES)} 之一")
+    return time_range.strip().lower(), None
+
+
+def _engines_arg(engines: list[str] | None) -> tuple[list[str] | None, dict | None]:
+    """校验 SearXNG 引擎名单：去空、去重、限制数量。"""
+    if engines is None:
+        return None, None
+    if not isinstance(engines, list) or not engines:
+        return None, _argument_error("engines 必须是非空字符串数组")
+    if len(engines) > _MAX_ENGINES:
+        return None, _argument_error(f"engines 最多 {_MAX_ENGINES} 个")
+    normalized: list[str] = []
+    for item in engines:
+        if not isinstance(item, str) or not item.strip():
+            return None, _argument_error("engines 必须是非空字符串数组")
+        name = item.strip()
+        if name not in normalized:
+            normalized.append(name)
+    return normalized, None
+
+
+def _search_chain(primary: str, settings, fallback: bool) -> list[str]:
+    """回退链：请求的后端优先，其余按固定顺序补齐"已配置可用"的后端。"""
+    if not fallback:
+        return [primary]
+    available = {
+        "duckduckgo": True,
+        "searxng": bool((settings.search_searxng_url or "").strip()),
+        "brave": bool((settings.search_brave_api_key or "").strip()),
+        "tavily": bool((settings.search_tavily_api_key or "").strip()),
+    }
+    chain = [primary]
+    for name in _SEARCH_ORDER:
+        if name != primary and available[name]:
+            chain.append(name)
+    return chain
+
+
+def _response_error(label: str, resp: HttpResponse) -> tuple[str, str]:
+    """把 JSON POST 的失败（Tavily）收敛成稳定的错误码与文本。"""
+    if resp.error:
+        return errors.classify_message(resp.error), resp.error
+    if resp.status >= 400:
+        code = errors.HTTP_5XX if resp.status >= 500 else errors.HTTP_4XX
+        return code, f"{label} 返回 HTTP {resp.status}"
+    return errors.UNKNOWN, f"{label} 返回空响应"
+
+
+async def _search_once(
+    name: str,
+    *,
+    query: str,
+    site: str | None,
+    time_range: str | None,
+    engines: list[str] | None,
+    limit: int,
+    bypass_cache: bool,
+    deadline: float | None,
+    proxy: str | None,
+) -> tuple[list[SearchHit] | None, dict]:
+    """跑单个后端；成功返回 (结果, 元信息)，失败返回 (None, 错误描述)。"""
+    settings = get_settings()
+    endpoint = (settings.search_searxng_url or "").strip()
+    if name == "tavily":
+        url = TAVILY_ENDPOINT
+    else:
+        url = search_url(
+            query,
+            name,
+            endpoint=endpoint,
+            site=site or "",
+            time_range=time_range or "",
+            engines=engines,
+            limit=limit,
+        )
+    # 搜索服务按"接口"使用：仍遵守主机白/黑名单与全局限流，但不套目标站的 robots 规则
+    denied = await _compliance_check(url, deadline, check_robots=False)
+    if denied is not None:
+        return None, {
+            "provider": name,
+            "error_code": denied["error_code"],
+            "error": denied["error"],
+        }
+
+    async with _get_hostlimiter().slot(_host_of(url)):
+        if dl.expired(deadline):
+            return None, {
+                "provider": name,
+                "error_code": errors.TIMEOUT,
+                "error": "超出总预算 deadline_ms，未完成搜索",
+            }
+        if name == "tavily":
+            resp = await _get_fetcher().post_json(
+                url,
+                payload=tavily_payload(
+                    query,
+                    api_key=settings.search_tavily_api_key or "",
+                    limit=limit,
+                    site=site or "",
+                    time_range=time_range or "",
+                ),
+                headers={"Accept": "application/json"},
+                timeout=dl.remaining(deadline),
+                proxy=proxy,
+            )
+            if resp.error or resp.status >= 400:
+                code, message = _response_error("Tavily", resp)
+                return None, {"provider": name, "error_code": code, "error": message}
+            cached, body = resp.cached, resp.text
+        else:
+            if name == "brave":
+                headers = {
+                    "Accept": "application/json",
+                    "X-Subscription-Token": settings.search_brave_api_key or "",
+                }
+            else:
+                # SearXNG 会按 Accept 决定返回形态：要 JSON 就别再带浏览器的 text/html
+                headers = {"Accept": "application/json"} if name == "searxng" else None
+            outcome = await _get_fetcher().fetch(
+                url,
+                headers=headers,
+                bypass_cache=bypass_cache,
+                deadline=deadline,
+                timeout=dl.remaining(deadline),
+                proxy=proxy,
+            )
+            code = errors.classify_outcome(outcome)
+            # SearXNG 可能把 JSON 包在 HTML 外壳里返回，拦截判定交给解析阶段
+            blocked_now = outcome.blocked != "none" and name != "searxng"
+            if outcome.error or blocked_now or outcome.status >= 400:
+                if outcome.error:
+                    message = outcome.error
+                elif outcome.blocked != "none":
+                    message = f"搜索服务返回拦截页（{outcome.blocked}）；{outcome.block_reason}"
+                else:
+                    message = f"搜索服务返回 HTTP {outcome.status}"
+                return None, {"provider": name, "error_code": code, "error": message}
+            cached, body = outcome.cached, outcome.html
+
+    try:
+        hits = parse_results(name, body, limit)
+    except SearchError as exc:
+        return None, {
+            "provider": name,
+            "error_code": errors.UNSUPPORTED_CONTENT,
+            "error": str(exc),
+        }
+    return hits, {"cached": cached}
+
+
 @mcp.tool()
 async def web_search(
     query: str,
     max_results: int = 10,
     provider: str | None = None,
+    site: str | None = None,
+    time_range: str | None = None,
+    engines: list[str] | None = None,
+    fallback: bool | None = None,
     bypass_cache: bool = False,
     deadline_ms: int | None = None,
     proxy: str | None = None,
@@ -934,9 +1138,17 @@ async def web_search(
         query: 搜索关键词，不能为空。
         max_results: 期望返回条数，超出配置上限 search_max_results 时按上限截断。
         provider: 搜索后端。duckduckgo=HTML 端点，无需 key（默认，取配置 search_provider）；
-            searxng=自托管实例的 JSON API，需设置 SCRAPE_MCP_SEARCH_SEARXNG_URL。
+            searxng=自托管实例的 JSON API，需设置 SCRAPE_MCP_SEARCH_SEARXNG_URL；
+            brave / tavily=商业 API，需分别设置 SCRAPE_MCP_SEARCH_BRAVE_API_KEY /
+            SCRAPE_MCP_SEARCH_TAVILY_API_KEY。
+        site: 限定站点，填域名或站内路径；会以 ``site:`` 运算符透传给后端，
+            是否严格限定取决于该后端引擎的支持程度。
+        time_range: 时间范围，day / week / month / year 之一，按后端映射成各自参数。
+        engines: SearXNG 的引擎名单（如 ["bing", "startpage"]），仅对 searxng 生效。
+        fallback: 当前后端失败时是否自动回退到其他已配置的后端；不传取配置
+            search_fallback（默认开启）。关闭后只请求 provider 指定的后端。
         bypass_cache: 跳过并绕过搜索结果缓存，强制现查。
-        deadline_ms: 整次调用的总预算（毫秒），不传表示不限。
+        deadline_ms: 整次调用的总预算（毫秒），不传表示不限；回退同样受此预算约束。
         proxy: 本次请求使用的代理；不传则按代理池分配，未配池时沿用全局配置。
     """
     if not isinstance(query, str) or not query.strip():
@@ -958,6 +1170,17 @@ async def web_search(
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
+    site, site_err = _site_arg(site)
+    if site_err is not None:
+        return _payload(**site_err)
+    time_range, time_err = _time_range_arg(time_range)
+    if time_err is not None:
+        return _payload(**time_err)
+    engines, engines_err = _engines_arg(engines)
+    if engines_err is not None:
+        return _payload(**engines_err)
+    if fallback is not None and not isinstance(fallback, bool):
+        return _payload(**_argument_error("fallback 必须是布尔值"))
 
     settings = get_settings()
     name = (provider or settings.search_provider or "duckduckgo").strip().lower()
@@ -968,15 +1191,31 @@ async def web_search(
             error_code=errors.INVALID_ARGUMENT,
             error=f"provider 必须是 {PROVIDERS} 之一",
         )
-    if name == "searxng" and not (settings.search_searxng_url or "").strip():
+    required = {
+        "searxng": (
+            (settings.search_searxng_url or "").strip(),
+            "使用 searxng 需先设置 SCRAPE_MCP_SEARCH_SEARXNG_URL",
+        ),
+        "brave": (
+            (settings.search_brave_api_key or "").strip(),
+            "使用 brave 需先设置 SCRAPE_MCP_SEARCH_BRAVE_API_KEY",
+        ),
+        "tavily": (
+            (settings.search_tavily_api_key or "").strip(),
+            "使用 tavily 需先设置 SCRAPE_MCP_SEARCH_TAVILY_API_KEY",
+        ),
+    }.get(name)
+    if required is not None and not required[0]:
         return _payload(
             ok=False,
             query=query,
             provider=name,
             error_code=errors.INVALID_ARGUMENT,
-            error="使用 searxng 需先设置 SCRAPE_MCP_SEARCH_SEARXNG_URL",
+            error=required[1],
         )
     limit = min(max_results, max(1, int(settings.search_max_results)))
+    use_fallback = settings.search_fallback if fallback is None else fallback
+    chain = _search_chain(name, settings, use_fallback)
 
     cache: ResultCache | None = None
     key = ""
@@ -986,92 +1225,69 @@ async def web_search(
             kind="search",
             version=__version__,
             provider=name,
+            backends=chain,
             endpoint=(settings.search_searxng_url or "").strip(),
             query=query.strip(),
             limit=limit,
+            site=site or "",
+            time_range=time_range or "",
+            engines=engines or [],
         )
         if (hit := _cache_hit(cache, key)) is not None:
             return _payload(**hit)
 
-    url = search_url(query.strip(), name, endpoint=(settings.search_searxng_url or "").strip())
-    # 搜索服务按"接口"使用：仍遵守主机白/黑名单与全局限流，但不套目标站的 robots 抓取规则
-    denied = await _compliance_check(url, deadline, check_robots=False)
-    if denied is not None:
-        return _payload(
-            ok=False,
-            query=query,
-            provider=name,
-            error_code=denied["error_code"],
-            error=denied["error"],
-            retryable=denied["retryable"],
-        )
-
-    async with _get_hostlimiter().slot(_host_of(url)):
-        if dl.expired(deadline):
-            return _payload(
-                ok=False,
-                query=query,
-                provider=name,
-                error_code=errors.TIMEOUT,
-                error="超出总预算 deadline_ms，未完成搜索",
-                retryable=True,
-            )
-        outcome = await _get_fetcher().fetch(
-            url,
-            # SearXNG 会按 Accept 决定返回形态：要 JSON 就别再带浏览器的 text/html
-            headers={"Accept": "application/json"} if name == "searxng" else None,
+    started = time.perf_counter()
+    attempts: list[dict] = []
+    for backend in chain:
+        hits, meta = await _search_once(
+            backend,
+            query=query.strip(),
+            site=site,
+            time_range=time_range,
+            engines=engines,
+            limit=limit,
             bypass_cache=bypass_cache,
             deadline=deadline,
-            timeout=dl.remaining(deadline),
             proxy=proxy,
         )
+        if hits is not None:
+            payload = {
+                "ok": True,
+                "query": query,
+                "provider": backend,
+                "count": len(hits),
+                "results": [
+                    {
+                        "rank": i,
+                        "title": hit.title,
+                        "url": hit.url,
+                        "snippet": hit.snippet,
+                        "engine": hit.engine,
+                        "published_at": hit.published_at,
+                    }
+                    for i, hit in enumerate(hits, start=1)
+                ],
+                "attempts": attempts,
+                "elapsed_ms": max(1, int((time.perf_counter() - started) * 1000)),
+                "cached": bool(meta.get("cached")),
+            }
+            if cache is not None:
+                cache.put(key, payload)
+            return _payload(**payload)
+        attempts.append(meta)
+        if dl.expired(deadline):
+            break
 
-    code = errors.classify_outcome(outcome)
-    # SearXNG 可能把 JSON 包在 HTML 外壳里返回，拦截判定交给解析阶段（非 JSON 会报错）
-    blocked_now = outcome.blocked != "none" and name != "searxng"
-    if outcome.error or blocked_now or outcome.status >= 400:
-        if outcome.error:
-            message = outcome.error
-        elif outcome.blocked != "none":
-            message = f"搜索服务返回拦截页（{outcome.blocked}）；{outcome.block_reason}"
-        else:
-            message = f"搜索服务返回 HTTP {outcome.status}"
-        return _payload(
-            ok=False,
-            query=query,
-            provider=name,
-            error_code=code,
-            error=message,
-            retryable=errors.is_retryable(code),
-        )
-
-    try:
-        hits = parse_results(name, outcome.html, limit)
-    except SearchError as exc:
-        return _payload(
-            ok=False,
-            query=query,
-            provider=name,
-            error_code=errors.UNSUPPORTED_CONTENT,
-            error=str(exc),
-            retryable=False,
-        )
-
-    payload = {
-        "ok": True,
-        "query": query,
-        "provider": name,
-        "count": len(hits),
-        "results": [
-            {"rank": i, "title": hit.title, "url": hit.url, "snippet": hit.snippet}
-            for i, hit in enumerate(hits, start=1)
-        ],
-        "elapsed_ms": outcome.elapsed_ms,
-        "cached": outcome.cached,
-    }
-    if cache is not None:
-        cache.put(key, payload)
-    return _payload(**payload)
+    # 全部后端都失败：错误码沿用首个被请求后端的失败原因，attempts 里保留完整链路
+    first = attempts[0]
+    return _payload(
+        ok=False,
+        query=query,
+        provider=name,
+        error_code=first["error_code"],
+        error=first["error"],
+        attempts=attempts,
+    )
 
 
 @mcp.tool()

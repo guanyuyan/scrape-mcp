@@ -15,7 +15,7 @@ from ..config import Settings
 from . import deadline as budget
 from .browser import BrowserRenderer, ScreenshotOutcome
 from .detector import detect_block, looks_like_login_wall, looks_like_shell
-from .http_client import HttpClient
+from .http_client import HttpClient, HttpResponse
 from .proxy import ProxyPool, split_pool
 
 # 这些判定不值得升级浏览器：同一 IP 下换浏览器通常仍被限流，
@@ -112,6 +112,20 @@ class Fetcher:
             await self._browser.aclose()
             self._browser = None
         await self._http.aclose()
+
+    async def post_json(
+        self,
+        url: str,
+        *,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+        proxy: str | None = None,
+    ) -> HttpResponse:
+        """发送 JSON POST（Tavily 等 API 用），失败不触发浏览器升级。"""
+        return await self._http.post_json(
+            url, payload=payload, headers=headers, timeout=timeout, proxy=proxy
+        )
 
     def _sticky_active(self, host: str, url: str) -> bool:
         """该主机上次是否确认过"必须上浏览器"，且还没过期。"""

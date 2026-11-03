@@ -117,10 +117,17 @@ class Settings(BaseSettings):
     login_timeout: float = 180.0
 
     # ---- 搜索 ----
-    # web_search 后端：duckduckgo（HTML 端点，无需 API key）/ searxng（自托管 JSON API）
+    # web_search 后端：duckduckgo（HTML 端点，无需 API key）/ searxng（自托管 JSON API）/
+    # brave / tavily（商业 API，需要 key）
     search_provider: str = "duckduckgo"
     # SearXNG 实例根地址，如 http://127.0.0.1:8080；provider=searxng 时必填
     search_searxng_url: str = ""
+    # Brave / Tavily 的 API key；留空表示该后端不可用，也不参与自动回退
+    search_brave_api_key: str | None = None
+    search_tavily_api_key: str | None = None
+    # 当前后端失败时是否按 duckduckgo → searxng → brave → tavily 自动回退；
+    # 只回退到已配置可用的后端，全部不可用时行为与关闭回退一致
+    search_fallback: bool = True
     # 单次返回的结果条数硬上限（max_results 超出时按此截断）
     search_max_results: int = 20
 

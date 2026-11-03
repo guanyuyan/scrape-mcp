@@ -243,3 +243,61 @@ class HttpClient:
                 },
             )
         return out
+
+    async def post_json(
+        self,
+        url: str,
+        *,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+        proxy: str | None = None,
+    ) -> HttpResponse:
+        """发送 JSON POST（目前只给 Tavily 用）。
+
+        请求体与凭证决定结果，不读写共享缓存，也不做单飞合并。
+        """
+        t0 = time.perf_counter()
+        merged = {
+            "Accept-Language": self._s.accept_language,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if headers:
+            merged.update(headers)
+        try:
+            session = self._session(self._s.impersonate)
+            resp = await session.post(
+                url,
+                json=payload,
+                headers=merged,
+                timeout=timeout or self._s.request_timeout,
+                proxy=proxy or self._s.proxy,
+                allow_redirects=True,
+            )
+        except Exception as exc:  # 网络层是系统边界，需要兜住所有传输异常
+            return HttpResponse(
+                ok=False,
+                status=0,
+                url=url,
+                content_type="",
+                text="",
+                elapsed_ms=int((time.perf_counter() - t0) * 1000),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+        content_type = ""
+        for key, value in (resp.headers or {}).items():
+            if key.lower() == "content-type":
+                content_type = value
+                break
+        raw = resp.content or b""
+        return HttpResponse(
+            ok=True,
+            status=resp.status_code,
+            url=str(resp.url) or url,
+            content_type=content_type,
+            text=_decode(raw, content_type),
+            elapsed_ms=int((time.perf_counter() - t0) * 1000),
+            content=raw,
+        )
