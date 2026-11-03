@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.22.0] - 2026-11-03
 
 ### Added
 - `web_fetch` / `web_batch` 新增 `format=chunks`：固定字符窗口 + `chunk_overlap`，每块带 `heading_path` 与 `start`/`end` 偏移，`content` 可直接写入向量库；新增 `chunk_size` / `chunk_overlap` 参数（默认 1200 / 200）
