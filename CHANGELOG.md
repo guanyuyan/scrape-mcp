@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- `web_extract` 新增可选 `prompt`：配置 `LLM_BASE_URL` + `LLM_MODEL` 时走 OpenAI 兼容模型抽取，返回 `extract_mode` / `model`；未配置或调用失败自动回退确定性 schema，不产生默认外部调用
+
 ## [0.22.0] - 2026-11-03
 
 ### Added

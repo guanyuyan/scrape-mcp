@@ -64,6 +64,15 @@ from .extract.chunks import (
 )
 from .extract.compact import LINK_POLICIES, compact_html
 from .extract.links import extract_links, next_link
+from .extract.llm import (
+    MAX_PROMPT_CHARS,
+    LlmError,
+    auth_headers,
+    build_request,
+    chat_url,
+    llm_ready,
+    parse_response,
+)
 from .extract.pdf import PdfError, pdf_pages
 from .extract.render import FORMATS, to_blocks, to_plain_text
 from .http_auth import (
@@ -2107,10 +2116,38 @@ async def web_fetch(
     )
 
 
+async def _llm_extract(
+    settings,
+    prompt: str,
+    fields: list,
+    html: str,
+    url: str,
+    *,
+    proxy: str | None,
+) -> tuple[dict, str]:
+    """把页面正文交给 OpenAI 兼容端点做字段抽取；失败抛 LlmError 由调用方回退。"""
+    compacted = compact_html(html, url, max_tokens=settings.llm_max_input_tokens)
+    if not compacted.content.strip():
+        raise LlmError("页面正文为空，无法进行 LLM 抽取")
+    response = await _get_fetcher().post_json(
+        chat_url(settings.llm_base_url),
+        payload=build_request(settings, prompt=prompt, fields=fields, content=compacted.content),
+        headers=auth_headers(settings),
+        timeout=settings.llm_timeout,
+        proxy=proxy,
+    )
+    if not response.ok:
+        detail = (response.error or response.text or "").strip()[:200]
+        raise LlmError(f"请求失败（HTTP {response.status}）：{detail}")
+    result = parse_response(response.text, [item.key for item in fields])
+    return result.fields, result.model
+
+
 @mcp.tool()
 async def web_extract(
     url: str,
     schema: dict | None = None,
+    prompt: str | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
@@ -2155,6 +2192,9 @@ async def web_extract(
     Args:
         url: 目标网页完整 URL。
         schema: 字段抽取规则字典，见上方示例；不传则套用该站 recipe 的 extract 规则。
+        prompt: 可选的自然语言抽取要求。配置了 LLM（SCRAPE_MCP_LLM_BASE_URL / MODEL）时
+            交给模型抽取；未配置或调用失败时自动回退确定性 schema，不产生默认外部调用。
+            字段规则里可用 ``description`` 说明字段含义，会一并传给模型。
         headers: 自定义请求头；传入时不走共享缓存。
         cookies: 自定义 cookie 字典；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
@@ -2182,6 +2222,22 @@ async def web_extract(
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
+
+    prompt_text = ""
+    if prompt is not None:
+        if not isinstance(prompt, str) or not prompt.strip():
+            return _payload(
+                ok=False,
+                error_code=errors.INVALID_ARGUMENT,
+                error="prompt 必须是非空字符串；不传则只按 schema 抽取",
+            )
+        prompt_text = prompt.strip()
+        if len(prompt_text) > MAX_PROMPT_CHARS:
+            return _payload(
+                ok=False,
+                error_code=errors.INVALID_ARGUMENT,
+                error=f"prompt 最多 {MAX_PROMPT_CHARS} 字符，当前 {len(prompt_text)} 字符",
+            )
 
     recipe = _recipe_for(url)
     if schema is None:
@@ -2219,6 +2275,8 @@ async def web_extract(
             url=url,
             session=session,
             schema=schema,
+            prompt=prompt_text or None,
+            llm_model=get_settings().llm_model if prompt_text else None,
             wait_for=wait_for if wait_for is not None else (recipe.wait_for if recipe else None),
             click=click if click is not None else (recipe.click if recipe else None),
             scroll=scroll if scroll is not None else (recipe.scroll if recipe else None),
@@ -2254,6 +2312,37 @@ async def web_extract(
         )
 
     result = extract_fields(outcome.html, fields, base_url=outcome.final_url or url)
+    data = result.fields
+    required_missing = result.required_missing
+    schema_notes = list(result.errors)
+    notes = list(outcome.notes)
+    model = ""
+    extract_mode = ""
+    if prompt_text:
+        extract_mode = "schema"
+        settings = get_settings()
+        if not llm_ready(settings):
+            notes.append(
+                "未配置 LLM（llm_base_url / llm_model），prompt 未生效，已回退确定性 schema"
+            )
+        else:
+            try:
+                data, model = await _llm_extract(
+                    settings,
+                    prompt_text,
+                    fields,
+                    outcome.html,
+                    outcome.final_url or url,
+                    proxy=proxy,
+                )
+                extract_mode = "llm"
+                schema_notes = []
+                required_missing = [
+                    item.key for item in fields if item.required and data.get(item.key) is None
+                ]
+            except LlmError as exc:
+                notes.append(f"LLM 抽取失败，已回退确定性 schema：{exc}")
+
     payload = {
         "ok": True,
         "url": url,
@@ -2263,20 +2352,24 @@ async def web_extract(
         "cached": outcome.cached,
         "elapsed_ms": outcome.elapsed_ms,
         "attempts": outcome.attempts,
-        "data": result.fields,
-        "missing": [k for k, v in result.fields.items() if v is None],
-        "required_missing": result.required_missing,
+        "data": data,
+        "missing": [k for k, v in data.items() if v is None],
+        "required_missing": required_missing,
     }
-    if outcome.notes:
-        payload["notes"] = outcome.notes
-    if result.errors:
-        payload["schema_notes"] = result.errors
+    if extract_mode:
+        payload["extract_mode"] = extract_mode
+        if model:
+            payload["model"] = model
+    if notes:
+        payload["notes"] = notes
+    if schema_notes:
+        payload["schema_notes"] = schema_notes
     if debug:
         payload["diagnostics"] = _diagnostics(outcome, detail=True)
-    if result.required_missing:
+    if required_missing:
         payload["ok"] = False
         payload["error_code"] = errors.MISSING_REQUIRED
-        payload["error"] = "必填字段缺失: " + ", ".join(result.required_missing)
+        payload["error"] = "必填字段缺失: " + ", ".join(required_missing)
         payload["retryable"] = False
     if cache is not None and payload.get("ok") and not _deadline_limited(outcome):
         cache.put(key, payload)

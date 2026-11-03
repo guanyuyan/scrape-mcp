@@ -131,6 +131,17 @@ class Settings(BaseSettings):
     # 单次返回的结果条数硬上限（max_results 超出时按此截断）
     search_max_results: int = 20
 
+    # ---- LLM 辅助抽取（可选）----
+    # OpenAI 兼容的 /v1 根地址（如 https://api.deepseek.com/v1）；留空则永不发起外部调用。
+    # 只有 web_extract 显式传 prompt 且 base_url/model 都配置时才启用，失败自动回退确定性 schema
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_timeout: float = 60.0
+    # 送入模型的正文 token 预算（compact 后截断）与模型输出上限
+    llm_max_input_tokens: int = 6000
+    llm_max_output_tokens: int = 2048
+
     # ---- 传输模式 ----
     # stdio（默认，MCP 进程管道）/ streamable-http（HTTP，Postman/curl 直连）
     transport: str = "stdio"

@@ -197,6 +197,12 @@ cp .env.example .env    # 生成配置模板
 | `SEARCH_TAVILY_API_KEY` | — | Tavily API key；留空则该后端不可用，也不参与回退 |
 | `SEARCH_FALLBACK` | `true` | 后端失败时是否自动回退到其他已配置的后端（duckduckgo → searxng → brave → tavily） |
 | `SEARCH_MAX_RESULTS` | `20` | `web_search` 单次返回条数硬上限 |
+| `LLM_BASE_URL` | — | OpenAI 兼容端点根地址（如 `https://api.deepseek.com/v1`）；留空则完全不发起 LLM 调用 |
+| `LLM_API_KEY` | — | LLM 端点 key（Bearer）；本地兼容端点可不填 |
+| `LLM_MODEL` | — | 模型名；与 `LLM_BASE_URL` 同时配置才启用 LLM 辅助抽取 |
+| `LLM_TIMEOUT` | `60` | 单次 LLM 请求超时（秒） |
+| `LLM_MAX_INPUT_TOKENS` | `6000` | 送入模型的正文 token 预算（compact 后截断） |
+| `LLM_MAX_OUTPUT_TOKENS` | `2048` | 模型输出上限 |
 | `DATASET` | — | 数据集导出路径（JSONL，一行一次成功抓取）；留空不导出 |
 | `RESPECT_ROBOTS` | `true` | 默认遵循目标站 robots.txt；`false` 忽略（仅建议自用合规场景关闭） |
 | `ALLOWED_HOSTS` | — | 主机白名单（逗号分隔）；非空时仅允许名单内主机 |
@@ -364,6 +370,9 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `jsonld` 用点号路径从 `<script type="application/ld+json">` 取值（多个 script / `@graph` 自动聚合，数组自动展开、数字段视为下标）
   - 插件类型：第三方包可通过入口点注册自己的字段类型（见下文「自定义字段类型」），用法与内置类型一致
   - 抓取/渲染参数与 `web_fetch` 相同（不含 `link_policy`/`format`）；非 HTML（PDF/纯文本）返回 `unsupported_content`，请改用 `web_fetch`
+  - `prompt`（可选）：LLM 辅助抽取。配置 `LLM_BASE_URL` + `LLM_MODEL` 后把 compact 正文交给 OpenAI 兼容模型；未配置或调用/解析失败自动回退确定性 schema，**不会产生默认外部调用**
+  - 返回 `extract_mode`（`llm` / `schema`）与 `model`；回退原因写在 `notes`。字段规则可用 `description` 说明含义，会随 prompt 一起交给模型
+  - 隐私提示：启用 LLM 意味着页面正文会发送到你配置的端点，不要把不可外发的页面交给它
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
   - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session`（对该批所有 URL 生效）；`format=chunks` 与 `chunk_size` / `chunk_overlap` 同样逐条生效
   - `proxy` 同样对该批所有 URL 生效；缺省按代理池分配，未配池时沿用全局配置

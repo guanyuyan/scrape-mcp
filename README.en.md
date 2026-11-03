@@ -191,6 +191,12 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `SEARCH_TAVILY_API_KEY` | — | Tavily API key; empty makes that backend unavailable and excludes it from fallback |
 | `SEARCH_FALLBACK` | `true` | Whether to fall back to other configured backends on failure (duckduckgo → searxng → brave → tavily) |
 | `SEARCH_MAX_RESULTS` | `20` | Hard cap on results per `web_search` |
+| `LLM_BASE_URL` | — | OpenAI-compatible endpoint root (e.g. `https://api.deepseek.com/v1`); empty disables every LLM call |
+| `LLM_API_KEY` | — | API key (Bearer) for the endpoint; local compatible servers may omit it |
+| `LLM_MODEL` | — | Model name; LLM-assisted extraction requires both this and `LLM_BASE_URL` |
+| `LLM_TIMEOUT` | `60` | Timeout for a single LLM request (seconds) |
+| `LLM_MAX_INPUT_TOKENS` | `6000` | Token budget for the page content sent to the model (after compaction) |
+| `LLM_MAX_OUTPUT_TOKENS` | `2048` | Max output tokens |
 | `DATASET` | — | Dataset export path (JSONL, one successful scrape per line); empty disables it |
 | `RESPECT_ROBOTS` | `true` | Follow robots.txt by default; `false` ignores it |
 | `ALLOWED_HOSTS` | — | Comma-separated allowlist; when set, only these hosts are allowed |
@@ -358,6 +364,9 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `jsonld` reads `<script type="application/ld+json">` with dotted paths (multiple scripts / `@graph` merged, arrays expanded, numeric segments are indexes)
   - Plugin types: third-party packages can register custom field types via an entry point (see "Custom field types" below) and use them exactly like built-ins
   - Fetch/render options match `web_fetch` (without `link_policy` / `format`); non-HTML returns `unsupported_content` — use `web_fetch` instead
+  - `prompt` (optional): LLM-assisted extraction. With `LLM_BASE_URL` + `LLM_MODEL` configured, the compacted page is sent to an OpenAI-compatible model; when unconfigured or the call/JSON parse fails it falls back to the deterministic schema, and **no external call is made by default**
+  - The payload carries `extract_mode` (`llm` / `schema`) and `model`; fallback reasons go into `notes`. Field rules may set `description` to guide the model
+  - Privacy: enabling the LLM sends page content to your endpoint; do not use it on pages you cannot share
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → concurrent fetch, one result per URL; a single failure does not sink the batch
   - Supports `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session` for the whole batch; `format=chunks` with `chunk_size` / `chunk_overlap` applies per URL as well
   - `proxy` also applies to every URL in the batch; omit it to use the proxy pool, then `SCRAPE_MCP_PROXY`
