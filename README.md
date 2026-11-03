@@ -89,7 +89,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 | 腾讯新闻首页 | 列表/门户 | L2 | 338KB | ~1.4k token（约 1.6%） | 动态页升级浏览器渲染 |
 | 极客邦首页 | SPA/动态 | L2 | 12KB | ~1.4k token | JS 骨架页，需渲染才有正文 |
 
-**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、变更检测 `web_watch`、搜索 `web_search`、截图 `web_screenshot`、站点 URL 发现 `web_map`、sitemap 增量索引 `web_index`、异步爬取任务 `web_crawl_start/status/cancel/list`、登录持久化 `login`，缓存默认开启。
+**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、变更检测 `web_watch`、定时监控 `web_schedule`、搜索 `web_search`、截图 `web_screenshot`、站点 URL 发现 `web_map`、sitemap 增量索引 `web_index`、异步爬取任务 `web_crawl_start/status/cancel/list`、登录持久化 `login`，缓存默认开启。
 
 ---
 
@@ -104,11 +104,12 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **拦截如实上报**：不把挑战页/空壳页当正文喂给模型，返回 `blocked`/`block_reason`。
 - **稳定错误码 + 可诊断**：失败返回 `error_code` 与 `retryable`，`debug=true` 还能看到分层决策、选择器命中数与 L2 交互结果。
 - **登录态持久化 + 多会话**：`login` 工具手动登录并落盘，`web_fetch` 自动带上；`session="work"` 可按身份隔离登录态，`session_export`/`session_import` 在机器之间搬运 cookie。
-- **非 HTML 内容**：`web_fetch` 直接读纯文本；装 `[pdf]` extra 后按页抽取 PDF 文本，扫描件（无文字层）如实返回 `empty`，不伪造正文。
+- **非 HTML 内容**：`web_fetch` 直接读纯文本；DOCX/XLSX/PPTX 走标准库抽取文字层（无需额外依赖）；装 `[pdf]` extra 后按页抽取 PDF 文本；扫描件（无文字层）如实返回 `empty`，开启 `[ocr]` extra 后可选 OCR，不伪造正文。
 - **同 URL 单飞（singleflight）**：同一页面被并发请求时（多租户同时抓、批量/爬取里重复链接）只真抓一次，其余等待并复用同一份响应，省出口流量也少踩目标站风控；L1 与 L2 渲染都会合并。带自定义头/凭证或 `bypass_cache=true` 的请求可能因人而异，不参与合并。
 - **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。页数多时改用 `web_crawl_start` 起后台任务，用 `status` 轮询、`cancel` 停止，进程重启后自动续跑。
 - **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
+- **定时监控与通知**：`web_schedule` 把 `web_watch` / `web_index` 变成计划任务（任务可查、可暂停、可手动跑一次），由本机 `scrape-mcp schedule daemon` 按间隔执行；检测到真实变更后 POST 到你配置的 webhook。首次执行只建立基线，不发通知；抓取失败只记状态，不覆盖快照。
 - **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要 / 来源引擎 / 发布时间），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API 或配置 key 使用 Brave / Tavily；支持 `site`、`time_range`、`engines` 过滤与后端失败自动回退，结果可缓存，适合"先搜再抓"的两步流程。
 - **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG 或整页 PDF，支持整页/视口、自定义尺寸、元素裁剪、设备预设（desktop/mobile）、截图前隐藏固定导航/弹窗，以及等待元素与额外延时；`actions` 可在截图前先点击/输入/翻页。复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
 - **站点索引**：`web_index` 读 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`），递归展开 sitemap index 并解压 `.gz`；清单落盘后，下次返回新增 / 变更 / 未变 / 移除，可选回抓正文比哈希过滤"只改了时间戳"的假变更。
@@ -127,6 +128,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 ```bash
 pip install mcp-scrape                          # 核心：L1 抓取 + 精简 + 抽取
 pip install "mcp-scrape[pdf]"                   # 可选：让 web_fetch 直接读 PDF
+pip install "mcp-scrape[ocr]"                   # 可选：扫描 PDF 的 OCR（另需系统 tesseract 与语言包）
 ```
 
 ```bash
@@ -182,6 +184,10 @@ cp .env.example .env    # 生成配置模板
 | `DATA_DIR` | `~/.scrape_mcp` | 登录态/缓存放盘目录 |
 | `RECIPES_DIR` | `<DATA_DIR>/recipes` | 站点 recipe 目录；留空用默认路径 |
 | `PDF_MAX_PAGES` | `200` | PDF 单次最多解析页数（超出部分不抽取，`pages` 仍返回总页数） |
+| `OCR_ENABLED` | `false` | 是否对无文字层的 PDF 启动 OCR（需 `[ocr]` extra + 系统 tesseract） |
+| `OCR_LANG` | `chi_sim+eng` | tesseract 语言包组合 |
+| `OCR_DPI` | `200` | 渲染页面时的 DPI（越高越准，也越慢） |
+| `OCR_MAX_PAGES` | `10` | 单次 OCR 最多识别页数 |
 | `CACHE_TTL` | `300` | 两层缓存 TTL（秒），`0` 全关；HTTP 层过期后带 `ETag`/`Last-Modified` 做条件请求，正文/抽取结果层命中即直接返回 |
 | `RETRY_TIMES` | `2` | 网络异常/5xx 重试次数（429/403 不重试） |
 | `RETRY_BACKOFF` | `0.5` | 重试退避基数（秒，指数增长） |
@@ -358,7 +364,8 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 总预算：`deadline_ms`（毫秒，可选）限制整次调用；不够时逐级降级，见"错误码与诊断"中的 `deadline:*` 说明
   - 登录态：`session`（默认 `default`），与 `login` 时的会话名一致即可自动带上对应登录态
   - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）；`actions`（动作链，按顺序执行 click/type/press/select/wait/scroll，单个动作失败只写入 `notes`）
-  - 非 HTML：PDF 返回结构化文本（装 `[pdf]` extra；`kind="pdf"` 且带 `pages`/`pages_parsed`），纯文本原样返回（`kind="text"`）
+  - 非 HTML：PDF 返回结构化文本（装 `[pdf]` extra；`kind="pdf"` 且带 `pages`/`pages_parsed`）；DOCX/XLSX/PPTX 直接用标准库抽取（`kind` 对应 `docx`/`xlsx`/`pptx`）；纯文本原样返回（`kind="text"`）
+  - 扫描 PDF：`OCR_ENABLED=1` 且装了 `[ocr]` extra 时对无文字层页面 OCR，载荷带 `ocr=true`；OCR 不可用或仍无文字时返回 `unsupported_content` / `empty`
   - 诊断参数：`debug=true` 时返回 `diagnostics`（决策轨迹、选择器命中数、L2 交互结果），不含页面内容
 - **`web_extract(url, schema=None, ...)`** → 按字段 schema 抽取结构化 JSON（可入库）
   - `schema` 可省略：命中站点 recipe 时直接用 recipe 里的 schema，否则返回 `invalid_argument`
@@ -397,6 +404,12 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `selector` 只看页面内某一块（按命中的全部节点拼接），适合盯榜单/价格/公告位；不同 `selector` 各存一份快照，互不覆盖
   - `reset=true` 丢弃旧快照重建基线；比较口径忽略行尾空白与空行，避免渲染噪声误报
   - 抓取失败（拦截/超时/登录墙）不会覆盖快照，恢复后仍能对比出期间变化；`bypass_cache` 默认 `true`，保证拿到的是最新内容
+- **`web_schedule(action="list", id=None, kind="watch", url=None, selector=None, interval_s=3600, webhook_url=None, session="default", ...)`** → 管理定时监控任务
+  - `create`：登记"盯什么、多久一次、变化后通知谁"；`kind=watch` 复用 `web_watch`（可配 `selector`），`kind=index` 复用 `web_index`；同 `kind+url+selector` 只有一条任务，重复 create 视为更新
+  - `interval_s` 允许 60 ~ 604800（一周），默认 3600；`webhook_url` 只接受 http/https
+  - `list` / `get` 查看任务与上次状态；`pause` / `resume` 启停（暂停后 daemon 不再执行）；`delete` 删除调度状态（页面快照保留）
+  - `run` 立即执行一次：首次返回 `first_seen=true` 且不发通知；之后仅在真实变更时推送 webhook，失败不影响任务状态
+  - 实际执行由 `scrape-mcp schedule daemon` 驱动（见下文「定时监控」）；任务状态落在 `DATA_DIR/schedule/tasks.json`
 - **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, ...)`** → 搜索关键词，返回结构化结果列表
   - `provider`: `duckduckgo`（默认，取 `SEARCH_PROVIDER`）/ `searxng`（需先设 `SEARCH_SEARXNG_URL`）/ `brave` / `tavily`（需先设对应 key）
   - `site` 以 `site:` 运算符透传给后端（是否严格限定取决于该引擎支持程度）；`time_range` 取 `day` / `week` / `month` / `year`；`engines` 为 SearXNG 引擎名单（仅对 searxng 生效）
@@ -443,7 +456,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
 | `login_required` | ❌ | 页面确有登录入口（密码框/登录字样），先调用 `login`；裸 403 拒绝页没有登录入口，只报 `blocked` |
 | `denied` / `robots_disallowed` | ❌ | 黑白名单或 robots.txt 拒绝 |
 | `missing_required` | ❌ | 必填字段缺失，见 `required_missing`；补齐 schema 或放宽 `required` |
-| `unsupported_content` | ❌ | 内容形态不支持当前工具（如对 PDF 用 `web_extract`）；改用 `web_fetch`，PDF 需装 `[pdf]` extra |
+| `unsupported_content` | ❌ | 内容形态不支持当前工具（如对 PDF/Office 用 `web_extract`）；改用 `web_fetch`，PDF 需装 `[pdf]` extra，扫描件还需 `[ocr]` |
 | `invalid_url` / `invalid_argument` | ❌ | 参数问题 |
 
 失败时默认带精简 `diagnostics.decisions`（如 `["retry:5xx", "escalate_l2:cloudflare", "l2_ok"]`）；
@@ -661,6 +674,30 @@ scrape-mcp dataset to-parquet                   # 生成同目录 .parquet（需
 - 只记成功结果；同一 URL 重复抓取会重复记录，去重交给下游（`url` + `ts` 足够）
 - 写盘失败只记 warning，不影响抓取本身；导出是旁路能力
 - 文件是持续追加，长期运行请自行按天轮转（如 `scrapes-2026-10-29.jsonl`）
+
+## 定时监控
+
+把 `web_watch` / `web_index` 交给本机 daemon 定时执行，变化后推送 webhook。任务只存在本地，不引入常驻云服务：
+
+```bash
+scrape-mcp schedule add --url https://example.com/news --selector "main .list" --interval 3600 \
+  --webhook https://hooks.example.com/scrape
+scrape-mcp schedule add --kind index --url https://example.com --interval 86400 \
+  --webhook https://hooks.example.com/sitemap
+scrape-mcp schedule list          # 查看 ID、状态、下次/上次执行
+scrape-mcp schedule run <ID>      # 手动跑一次（首次只建基线）
+scrape-mcp schedule pause <ID>    # 暂停，保留快照
+scrape-mcp schedule resume <ID>
+scrape-mcp schedule delete <ID>
+scrape-mcp schedule daemon        # 常驻：每 30 秒扫描到期任务；Ctrl+C 退出
+scrape-mcp schedule daemon --once # 只跑当前到期任务（适合系统 cron）
+```
+
+- 首次执行只建立基线，不算变更、不发通知；之后 watch 比对正文哈希，index 比对 sitemap 清单的 `new` + `changed`。
+- webhook 为 JSON POST：`{"event":"change","task_id","kind","url","selector","checked_at","summary"}`；`summary` 带 diff 摘要或新增/变更 URL 列表。
+- webhook 失败只体现在本次执行结果里，不改写任务状态；下一次仍会照常检测。
+- 想复用系统 cron 时，把 `schedule daemon --once` 放进 crontab 即可，不必常驻进程。
+- 任务状态在 `DATA_DIR/schedule/tasks.json`；页面快照仍在 `DATA_DIR/watch/`、`DATA_DIR/index/`，删除任务不会丢快照。
 
 ## Python SDK
 
@@ -882,9 +919,9 @@ benchmarks/
 ├── sites.json         # 真实站点质量基准站点集（分层、期望结果、完整性检查项）
 └── baseline.json      # 夜间子集基线（趋势参照，每月更新）
 src/scrape_mcp
-├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/web_map/web_crawl_*/login/session_*）
+├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/web_map/web_crawl_*/web_schedule/login/session_*）
 ├── http_auth.py       # HTTP Bearer 鉴权中间件 + 非回环绑定校验
-├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）
+├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）/ schedule（定时任务 daemon）
 ├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/crawl_*/site_map/batch/watch/aclose）
 ├── config.py          # 环境变量配置
 ├── metrics.py         # Prometheus 文本格式指标（/metrics 端点）
@@ -900,6 +937,7 @@ src/scrape_mcp
 │   ├── stats.py       # 进程内计数（/stats 端点数据源）
 │   ├── jobs.py        # 异步爬取任务（状态落盘、进度、恢复与取消）
 │   ├── watch.py       # 变更检测（正文快照 + diff 摘要）
+│   ├── schedule.py    # 定时任务（状态落盘、到期计算、启停）
 │   ├── errors.py      # 统一错误码
 │   └── hostlimit.py   # 同域并发闸门
 └── extract/
@@ -907,6 +945,8 @@ src/scrape_mcp
     ├── schema.py      # 结构化抽取（按字段 schema 出 JSON）
     ├── links.py       # 链接发现（web_crawl 用）
     ├── pdf.py         # PDF → 文本（可选依赖 pypdf）
+    ├── documents.py   # DOCX/XLSX/PPTX → 文本（标准库，无额外依赖）
+    ├── ocr.py         # 扫描 PDF 的 OCR（可选依赖 pymupdf + pytesseract）
     └── render.py      # markdown → 纯文本 / 分块
 ```
 

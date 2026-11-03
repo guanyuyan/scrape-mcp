@@ -393,7 +393,7 @@ class Fetcher:
         """需要升级 L2 时返回原因标签；不需要返回 None。"""
         if not self._settings.l2_enabled or outcome.error:
             return None
-        # PDF/纯文本没有 DOM，浏览器渲染不会带来更多信息，只会白付一次启动成本；
+        # PDF/Office/纯文本没有 DOM，浏览器渲染不会带来更多信息，只会白付一次启动成本；
         # XML（sitemap/接口响应）同理，浏览器渲染不会多出正文
         if outcome.kind != "html":
             return None
@@ -618,12 +618,21 @@ def _needs_raw_bytes(content_type: str, url: str) -> bool:
 
 
 def _content_kind(content_type: str, url: str) -> str:
-    """按 Content-Type（必要时看 URL 后缀）区分 HTML / PDF / 纯文本。"""
+    """按 Content-Type（必要时看 URL 后缀）区分 HTML / PDF / Office / 纯文本。"""
     ctype = (content_type or "").lower()
+    path = url.lower().split("?")[0]
     if "application/pdf" in ctype:
         return "pdf"
-    if ctype in ("", "application/octet-stream") and url.lower().split("?")[0].endswith(".pdf"):
-        return "pdf"
+    if "wordprocessingml.document" in ctype:
+        return "docx"
+    if "spreadsheetml.sheet" in ctype:
+        return "xlsx"
+    if "presentationml.presentation" in ctype:
+        return "pptx"
+    if ctype in ("", "application/octet-stream"):
+        for suffix in (".pdf", ".docx", ".xlsx", ".pptx"):
+            if path.endswith(suffix):
+                return suffix.lstrip(".")
     if ctype.startswith("text/plain") or "text/markdown" in ctype or "text/x-markdown" in ctype:
         return "text"
     return "html"

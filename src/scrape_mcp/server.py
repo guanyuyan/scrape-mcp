@@ -30,6 +30,7 @@ from .core.proxy import split_pool, valid_proxy
 from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
+from .core.schedule import STATUS_ERROR, STATUS_OK, ScheduleError, ScheduleStore
 from .core.search import (
     PROVIDERS,
     TAVILY_ENDPOINT,
@@ -63,6 +64,7 @@ from .extract.chunks import (
     chunk_markdown,
 )
 from .extract.compact import LINK_POLICIES, compact_html
+from .extract.documents import DocumentError, document_text
 from .extract.links import extract_links, next_link
 from .extract.llm import (
     MAX_PROMPT_CHARS,
@@ -73,7 +75,8 @@ from .extract.llm import (
     llm_ready,
     parse_response,
 )
-from .extract.pdf import PdfError, pdf_pages
+from .extract.ocr import OcrError, ocr_pages
+from .extract.pdf import PdfError, PdfUnavailableError, pdf_pages
 from .extract.render import FORMATS, to_blocks, to_plain_text
 from .http_auth import (
     BearerAuthMiddleware,
@@ -719,13 +722,27 @@ def _plain_payload(
     chunk_size: int = CHUNK_SIZE_DEFAULT,
     chunk_overlap: int = CHUNK_OVERLAP_DEFAULT,
 ) -> dict:
-    """PDF / 纯文本的返回载荷：主键与 HTML 路径保持一致，便于调用方统一处理。"""
+    """PDF / Office / 纯文本的返回载荷：主键与 HTML 路径保持一致，便于调用方统一处理。"""
     extra: dict = {}
+    notes = list(outcome.notes)
     if outcome.kind == "pdf":
+        settings = get_settings()
+        pages: list[str] = []
+        total = parsed = 0
         try:
-            pages, total, parsed = pdf_pages(
-                outcome.content, max_pages=get_settings().pdf_max_pages
-            )
+            pages, total, parsed = pdf_pages(outcome.content, max_pages=settings.pdf_max_pages)
+        except PdfUnavailableError:
+            if not settings.ocr_enabled:
+                return {
+                    "ok": False,
+                    "url": url,
+                    "status": outcome.status,
+                    "tier": outcome.tier,
+                    "error_code": errors.UNSUPPORTED_CONTENT,
+                    "error": '未安装 PDF 支持，请执行 pip install "mcp-scrape[pdf]"',
+                    "retryable": False,
+                    "diagnostics": _diagnostics(outcome),
+                }
         except PdfError as exc:
             return {
                 "ok": False,
@@ -737,18 +754,71 @@ def _plain_payload(
                 "retryable": False,
                 "diagnostics": _diagnostics(outcome),
             }
-        text = "\n\n".join(pages)
-        extra = {"pages": total, "pages_parsed": parsed}
-        if not text.strip():
+
+        if settings.ocr_enabled and not any(page.strip() for page in pages):
+            try:
+                pages, total, parsed = ocr_pages(
+                    outcome.content,
+                    dpi=settings.ocr_dpi,
+                    lang=settings.ocr_lang,
+                    max_pages=settings.ocr_max_pages,
+                )
+            except OcrError as exc:
+                return {
+                    "ok": False,
+                    "url": url,
+                    "status": outcome.status,
+                    "tier": outcome.tier,
+                    "error_code": errors.UNSUPPORTED_CONTENT,
+                    "error": str(exc),
+                    "retryable": False,
+                    "pages": total,
+                    "diagnostics": _diagnostics(outcome),
+                }
+            extra["ocr"] = True
+            notes.append("PDF 无文字层，已启用 OCR")
+        text = "\n\n".join(pages).strip()
+        extra.update({"pages": total, "pages_parsed": parsed})
+        if not text:
+            hint = "（可能是扫描件）"
+            if settings.ocr_enabled:
+                hint = "，OCR 后仍未识别到文本"
             return {
                 "ok": False,
                 "url": url,
                 "status": outcome.status,
                 "tier": outcome.tier,
                 "error_code": errors.EMPTY,
-                "error": "PDF 未提取到文本（可能是扫描件，需要 OCR）",
+                "error": f"PDF 未提取到文本{hint}",
                 "retryable": False,
                 "pages": total,
+                "diagnostics": _diagnostics(outcome),
+            }
+    elif outcome.kind in ("docx", "xlsx", "pptx"):
+        try:
+            text = document_text(outcome.kind, outcome.content)
+        except DocumentError as exc:
+            return {
+                "ok": False,
+                "url": url,
+                "status": outcome.status,
+                "tier": outcome.tier,
+                "error_code": errors.UNSUPPORTED_CONTENT,
+                "error": str(exc),
+                "retryable": False,
+                "kind": outcome.kind,
+                "diagnostics": _diagnostics(outcome),
+            }
+        if not text:
+            return {
+                "ok": False,
+                "url": url,
+                "status": outcome.status,
+                "tier": outcome.tier,
+                "error_code": errors.EMPTY,
+                "error": f"{outcome.kind.upper()} 未提取到文本",
+                "retryable": False,
+                "kind": outcome.kind,
                 "diagnostics": _diagnostics(outcome),
             }
     else:
@@ -792,8 +862,8 @@ def _plain_payload(
         else:  # json：按行分块，PDF 也是逐行切，调用方按需再按页聚合
             payload["content"] = blocks
             payload["token_estimate"] = sum(count_tokens(b) for b in blocks)
-    if outcome.notes:
-        payload["notes"] = outcome.notes
+    if notes:
+        payload["notes"] = notes
     return payload
 
 
@@ -2040,8 +2110,9 @@ async def web_fetch(
 ) -> str:
     """抓取网页并返回极省 token 的紧凑正文（自动辨别反爬拦截页并如实上报）。
 
-    支持 HTML 页面、PDF（需安装 ``mcp-scrape[pdf]``）与纯文本（``.txt``/``.md``）；
-    后两者直接返回文本内容，不做 DOM 精简。
+    支持 HTML 页面、PDF（需安装 ``mcp-scrape[pdf]``；扫描件可开 OCR）、
+    DOCX/XLSX/PPTX（标准库抽取，无需额外依赖）与纯文本（``.txt``/``.md``）；
+    非 HTML 内容直接返回文本，不做 DOM 精简。
 
     Args:
         url: 目标网页完整 URL，需带 http/https 协议头。
@@ -2307,7 +2378,7 @@ async def web_extract(
             status=outcome.status,
             tier=outcome.tier,
             error_code=errors.UNSUPPORTED_CONTENT,
-            error="该 URL 不是 HTML（PDF/纯文本不支持 CSS 字段抽取），请改用 web_fetch",
+            error="该 URL 不是 HTML（PDF/Office/纯文本不支持 CSS 字段抽取），请改用 web_fetch",
             retryable=False,
         )
 
@@ -2531,7 +2602,7 @@ async def _crawl_page(
                 "status": outcome.status,
                 "tier": outcome.tier,
                 "error_code": errors.UNSUPPORTED_CONTENT,
-                "error": "该页不是 HTML（PDF/纯文本不支持爬取正文），已跳过",
+                "error": "该页不是 HTML（PDF/Office/纯文本不支持爬取正文），已跳过",
                 "retryable": False,
             },
             [],
@@ -3166,6 +3237,226 @@ async def web_watch(
     )
 
 
+_SCHEDULE_ACTIONS = frozenset({"list", "get", "create", "pause", "resume", "delete", "run"})
+_WATCH_SUMMARY_KEYS = (
+    "changed",
+    "first_seen",
+    "hash",
+    "previous_hash",
+    "chars",
+    "previous_chars",
+    "added_lines",
+    "removed_lines",
+    "diff",
+    "diff_truncated",
+)
+_INDEX_SUMMARY_KEYS = (
+    "total",
+    "entries",
+    "new",
+    "changed",
+    "unchanged",
+    "removed",
+    "new_urls",
+    "changed_urls",
+    "removed_urls",
+    "first_seen",
+)
+
+
+def _schedule_store() -> ScheduleStore:
+    return ScheduleStore(get_settings().data_dir)
+
+
+def _run_summary(kind: str, result: dict) -> dict:
+    """只留真正表示"变了什么"的字段，避免把整页数据塞进通知。"""
+    keys = _WATCH_SUMMARY_KEYS if kind == "watch" else _INDEX_SUMMARY_KEYS
+    return {key: result[key] for key in keys if key in result}
+
+
+async def _post_webhook(url: str, payload: dict) -> dict:
+    """推送变更通知；失败如实返回，不影响任务状态与已有快照。"""
+    try:
+        response = await _get_fetcher().post_json(url, payload=payload, timeout=10)
+    except Exception as exc:  # webhook 指向外部系统，任何异常都不该中断调度
+        return {"ok": False, "status": 0, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ok": response.ok, "status": response.status, "error": response.error}
+
+
+async def run_scheduled_task(task: dict, *, proxy: str | None = None) -> dict:
+    """执行一次计划任务：复用 web_watch / web_index，变更后推送 webhook。
+
+    首次执行只建立基线，不算变更、不发通知；抓取失败记入任务状态，
+    但 watch / index 各自的存储会保证旧快照不被覆盖。
+    """
+    kind = task.get("kind")
+    session = str(task.get("session") or "default")
+    url = str(task.get("url") or "")
+    if kind == "watch":
+        raw = await web_watch(url, selector=task.get("selector"), session=session, proxy=proxy)
+    else:
+        raw = await web_index(url, session=session, proxy=proxy)
+    result = json.loads(raw)
+    ok = bool(result.get("ok"))
+    first_seen = bool(result.get("first_seen"))
+    if kind == "watch":
+        changed = ok and bool(result.get("changed"))
+    else:
+        changed = ok and (int(result.get("new") or 0) + int(result.get("changed") or 0)) > 0
+    notify = changed and not first_seen
+
+    summary = _run_summary(kind, result)
+    webhook = None
+    if notify and task.get("webhook_url"):
+        webhook = await _post_webhook(
+            str(task["webhook_url"]),
+            {
+                "event": "change",
+                "task_id": task.get("id"),
+                "kind": kind,
+                "url": url,
+                "selector": task.get("selector"),
+                "checked_at": time.time(),
+                "summary": summary,
+            },
+        )
+
+    status = STATUS_OK if ok else STATUS_ERROR
+    error = "" if ok else str(result.get("error") or result.get("error_code") or "未知错误")
+    updated = _schedule_store().mark_run(
+        str(task.get("id")),
+        status=status,
+        error=error,
+        changed=notify,
+        summary=summary,
+    )
+    return {
+        "ok": ok,
+        "changed": notify,
+        "first_seen": first_seen,
+        "status": status,
+        "error": error,
+        "summary": summary,
+        "webhook": webhook,
+        "task": updated,
+    }
+
+
+@mcp.tool()
+async def web_schedule(
+    action: str = "list",
+    id: str | None = None,
+    kind: str = "watch",
+    url: str | None = None,
+    selector: str | None = None,
+    interval_s: int = 3600,
+    webhook_url: str | None = None,
+    session: str = "default",
+    proxy: str | None = None,
+) -> str:
+    """管理定时监控任务：按间隔执行 web_watch / web_index，变更后推送 webhook。
+
+    任务本身不抓取，只记录"盯什么、多久一次、变化后通知谁"；实际执行由本机
+    ``scrape-mcp schedule daemon`` 完成（也可用 action=run 手动跑一次）。
+    首次执行只建立基线，不算变更、不发通知；暂停的任务保留状态但不再被 daemon 执行。
+    同 kind + url + selector 只有一条任务，重复 create 视为更新间隔与通知地址。
+
+    Args:
+        action: list / get / create / pause / resume / delete / run，默认 list。
+        id: 任务 ID；除 list 与 create 外的动作必填（可从 list 结果拿到）。
+        kind: watch（对比正文/区块）或 index（对比 sitemap 清单），默认 watch。
+        url: 目标网页或站点 URL（create 时必填）。
+        selector: 只看页面内某个区块（CSS 选择器），仅 kind=watch 有效。
+        interval_s: 执行间隔（秒），默认 3600，允许 60 ~ 604800（一周）。
+        webhook_url: 检测到变更后 POST 的地址（http/https）；不传则只记录状态。
+        session: 执行时使用的登录态会话名，默认 default。
+        proxy: 执行时使用的代理；不传则按代理池分配，未配池时沿用全局配置。
+    """
+    action = (action or "").strip().lower()
+    if action not in _SCHEDULE_ACTIONS:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"action 需为 {'/'.join(sorted(_SCHEDULE_ACTIONS))}",
+        )
+
+    store = _schedule_store()
+    if action == "list":
+        tasks = store.list()
+        return _payload(
+            ok=True,
+            count=len(tasks),
+            due=len(store.due()),
+            tasks=tasks,
+        )
+
+    if action == "create":
+        if not url:
+            return _payload(
+                ok=False,
+                error_code=errors.INVALID_ARGUMENT,
+                error="create 需要提供 url",
+            )
+        if (session_err := _session_error(session)) is not None:
+            return _payload(**session_err)
+        try:
+            task = store.create(
+                kind=kind,
+                url=url,
+                selector=selector,
+                interval_s=interval_s,
+                webhook_url=webhook_url,
+                session=session,
+            )
+        except ScheduleError as exc:
+            return _payload(ok=False, error_code=errors.INVALID_ARGUMENT, error=str(exc))
+        return _payload(ok=True, task=task)
+
+    task_id_value = (id or "").strip()
+    if not task_id_value:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="需要提供任务 id；先用 action=list 查看",
+        )
+
+    if action in ("pause", "resume"):
+        try:
+            task = store.set_enabled(task_id_value, action == "resume")
+        except ScheduleError as exc:
+            return _payload(ok=False, error_code=errors.INVALID_ARGUMENT, error=str(exc))
+        return _payload(ok=True, task=task)
+
+    if action == "delete":
+        if not store.delete(task_id_value):
+            return _payload(
+                ok=False,
+                error_code=errors.INVALID_ARGUMENT,
+                error=f"任务不存在: {task_id_value}",
+            )
+        return _payload(ok=True, deleted=task_id_value)
+
+    task = store.get(task_id_value)
+    if task is None:
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error=f"任务不存在: {task_id_value}",
+        )
+    if action == "get":
+        return _payload(ok=True, task=task)
+
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
+    outcome = await run_scheduled_task(task, proxy=proxy)
+    return _payload(
+        ok=True,
+        task=outcome["task"],
+        run={key: value for key, value in outcome.items() if key != "task"},
+    )
+
+
 @mcp.tool()
 async def login(url: str, timeout: float = 180.0, session: str = "default") -> str:
     """打开带界面的浏览器手动登录，并把该站登录态持久化到磁盘。
@@ -3350,8 +3641,9 @@ def main(argv: list[str] | None = None) -> None:
     """
     if argv is None:
         argv = sys.argv[1:]
-    # 子命令（init / schema / session / recipe / dataset）走独立模块，不启动服务；其余参数保持原有零配置行为
-    if argv and argv[0] in ("init", "schema", "session", "recipe", "dataset"):
+    # 子命令（init / schema / session / recipe / dataset / schedule）走独立模块，不启动服务；
+    # 其余参数保持原有零配置行为
+    if argv and argv[0] in ("init", "schema", "session", "recipe", "dataset", "schedule"):
         from .cli import run as run_subcommand
 
         raise SystemExit(run_subcommand(argv))
@@ -3365,12 +3657,14 @@ def main(argv: list[str] | None = None) -> None:
             "      scrape-mcp schema [--tool NAME] [--output FILE]\n"
             "      scrape-mcp session <list|import> [...]\n"
             "      scrape-mcp recipe <list|validate> [...]\n"
-            "      scrape-mcp dataset <stats|to-parquet> [...]\n\n"
+            "      scrape-mcp dataset <stats|to-parquet> [...]\n"
+            "      scrape-mcp schedule <list|add|pause|resume|delete|run|daemon> [...]\n\n"
             "零配置默认作为 stdio MCP 服务运行，供 Claude/Cursor 等客户端接管。\n"
             "init 生成客户端配置（默认只预览 diff），schema 导出工具定义，\n"
             "session 查看或导入登录态（容器内无法开浏览器时用 import 导入 cookies），\n"
             "recipe 列出或校验站点 recipe（放进 RECIPES_DIR 即自动生效），\n"
-            "dataset 查看/导出抓取数据集（设置 SCRAPE_MCP_DATASET 后自动累积 JSONL）。\n"
+            "dataset 查看/导出抓取数据集（设置 SCRAPE_MCP_DATASET 后自动累积 JSONL），\n"
+            "schedule 管理定时监控任务（daemon 按间隔执行 web_watch / web_index 并推送 webhook）。\n"
             "如需 HTTP 直连（Postman/curl），加 --transport streamable-http [--port 8000]；\n"
             "绑定非回环地址时必须设置 SCRAPE_MCP_HTTP_TOKEN。\n"
             "配置详见 .env / SCRAPE_MCP_* 环境变量。"

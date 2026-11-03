@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -502,9 +503,159 @@ def _cmd_dataset(argv: list[str]) -> int:
         return 1
 
 
+def _format_time(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "-"
+    return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M")
+
+
+def _schedule_line(task: dict[str, Any]) -> str:
+    selector = f"  [selector={task['selector']}]" if task.get("selector") else ""
+    state = "启用" if task.get("enabled") else "暂停"
+    return (
+        f"{task.get('id')}  {task.get('kind', ''):<5} {state}  每 {task.get('interval_s')}s  "
+        f"下次 {_format_time(task.get('next_run_at'))}  上次 {_format_time(task.get('last_run_at'))} "
+        f"{task.get('last_status') or '-'}  {task.get('url')}{selector}"
+    )
+
+
+def _print_run(task: dict[str, Any], outcome: dict[str, Any]) -> int:
+    if outcome.get("first_seen"):
+        state = "建立基线"
+    elif outcome.get("changed"):
+        state = "检测到变更"
+    elif outcome.get("ok"):
+        state = "无变化"
+    else:
+        state = "失败"
+    print(f"[执行] {task.get('id')} {task.get('url')}：{state}")
+    if outcome.get("error"):
+        print(f"  错误：{outcome['error']}")
+    hook = outcome.get("webhook")
+    if hook is not None:
+        detail = hook.get("status") if hook.get("ok") else hook.get("error")
+        print(f"  webhook：{'成功' if hook.get('ok') else '失败'}（{detail}）")
+    return 0 if outcome.get("ok") else 1
+
+
+def _cmd_schedule(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="scrape-mcp schedule",
+        description="管理定时监控任务；daemon 在本机按间隔执行 web_watch / web_index。",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("list", help="列出任务（ID、类型、状态、间隔、下次执行）")
+
+    adder = sub.add_parser("add", help="新增或更新任务（同类型+URL+选择器只有一条）")
+    adder.add_argument("--kind", choices=("watch", "index"), default="watch")
+    adder.add_argument("--url", required=True, help="目标网页或站点 URL")
+    adder.add_argument("--selector", help="只盯页面内某个区块（仅 watch）")
+    adder.add_argument("--interval", type=int, default=3600, help="执行间隔秒，最小 60")
+    adder.add_argument("--webhook", help="变更后 POST 的 http/https 地址")
+    adder.add_argument("--session", default="default", help="执行时使用的登录态会话")
+    adder.add_argument("--paused", action="store_true", help="创建后先暂停")
+
+    for name, help_text in (
+        ("pause", "暂停任务：保留状态，daemon 不再执行"),
+        ("resume", "恢复任务：下一轮 daemon 立即执行"),
+        ("delete", "删除任务与调度状态（页面快照不受影响）"),
+        ("run", "立即执行一次，不等待下个周期"),
+    ):
+        runner = sub.add_parser(name, help=help_text)
+        runner.add_argument("id", help="任务 ID（schedule list 可查）")
+        if name == "run":
+            runner.add_argument("--proxy", help="执行时使用的代理")
+
+    daemon = sub.add_parser("daemon", help="按间隔执行到期任务（Ctrl+C 退出）")
+    daemon.add_argument("--interval", type=int, default=30, help="扫描间隔秒，默认 30")
+    daemon.add_argument("--once", action="store_true", help="只执行当前到期任务后退出")
+    daemon.add_argument("--proxy", help="执行时使用的代理")
+    args = parser.parse_args(argv)
+
+    from .config import get_settings
+    from .core.schedule import ScheduleError, ScheduleStore
+
+    store = ScheduleStore(get_settings().data_dir)
+    if args.action == "list":
+        tasks = store.list()
+        if not tasks:
+            print("[空] 还没有定时任务；用 scrape-mcp schedule add --url <URL> 添加")
+            return 0
+        for task in tasks:
+            print(_schedule_line(task))
+        print(f"[完成] 共 {len(tasks)} 个任务，到期 {len(store.due())} 个")
+        return 0
+
+    if args.action == "add":
+        try:
+            task = store.create(
+                kind=args.kind,
+                url=args.url,
+                selector=args.selector,
+                interval_s=args.interval,
+                webhook_url=args.webhook,
+                session=args.session,
+                enabled=False if args.paused else None,
+            )
+        except ScheduleError as exc:
+            print(f"[错误] {exc}", file=sys.stderr)
+            return 2
+        print(f"[完成] 任务 {task['id']}（{task['kind']}）已保存：{task['url']}")
+        if task["enabled"]:
+            print("  下次执行：daemon 启动后的第一轮；也可先跑一次 schedule run <ID>")
+        return 0
+
+    if args.action in ("pause", "resume"):
+        try:
+            task = store.set_enabled(args.id, args.action == "resume")
+        except ScheduleError as exc:
+            print(f"[错误] {exc}", file=sys.stderr)
+            return 2
+        print(f"[完成] {args.id} 已{'恢复' if args.action == 'resume' else '暂停'}")
+        if args.action == "resume":
+            print(f"  下次执行：{_format_time(task.get('next_run_at'))}")
+        return 0
+
+    if args.action == "delete":
+        if not store.delete(args.id):
+            print(f"[错误] 任务不存在: {args.id}", file=sys.stderr)
+            return 1
+        print(f"[完成] 已删除 {args.id}")
+        return 0
+
+    # run / daemon 需要真正抓取，复用 Server 侧的执行逻辑，避免两套行为分叉
+    from . import server as server_module
+
+    if args.action == "run":
+        task = store.get(args.id)
+        if task is None:
+            print(f"[错误] 任务不存在: {args.id}", file=sys.stderr)
+            return 1
+        outcome = asyncio.run(server_module.run_scheduled_task(task, proxy=args.proxy))
+        return _print_run(task, outcome)
+
+    async def _loop() -> int:
+        while True:
+            due = store.due()
+            for task in due:
+                outcome = await server_module.run_scheduled_task(task, proxy=args.proxy)
+                _print_run(task, outcome)
+            if args.once:
+                if not due:
+                    print("[完成] 没有到期任务")
+                return 0
+            await asyncio.sleep(max(1, args.interval))
+
+    try:
+        return asyncio.run(_loop())
+    except KeyboardInterrupt:
+        print("\n[停止] daemon 已退出")
+        return 0
+
+
 def run(argv: list[str]) -> int:
     """执行子命令；未知子命令给出用法提示。"""
-    usage = "用法: scrape-mcp <init|schema|session|recipe|dataset> ..."
+    usage = "用法: scrape-mcp <init|schema|session|recipe|dataset|schedule> ..."
     if not argv:
         print(usage, file=sys.stderr)
         return 2
@@ -519,5 +670,7 @@ def run(argv: list[str]) -> int:
         return _cmd_recipe(rest)
     if command == "dataset":
         return _cmd_dataset(rest)
+    if command == "schedule":
+        return _cmd_schedule(rest)
     print(f"未知子命令: {command}\n{usage}", file=sys.stderr)
     return 2

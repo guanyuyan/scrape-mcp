@@ -86,7 +86,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 | A news portal home | portal/listing | L2 | 338 KB | ~1.4k tokens (~1.6%) | dynamic page, browser render |
 | A tech blog home | SPA | L2 | 12 KB | ~1.4k tokens | JS shell, needs rendering |
 
-**Shape**: a local MCP server (stdio or HTTP) with privacy under your control. Tools: `web_fetch`, `web_batch`, `web_extract`, `web_crawl`, `web_map`, async crawl jobs (`web_crawl_start/status/cancel/list`), `web_watch`, `web_search`, `web_screenshot`, `web_index`, `login`, `session_*`. Caching is on by default.
+**Shape**: a local MCP server (stdio or HTTP) with privacy under your control. Tools: `web_fetch`, `web_batch`, `web_extract`, `web_crawl`, `web_map`, async crawl jobs (`web_crawl_start/status/cancel/list`), `web_watch`, `web_schedule`, `web_search`, `web_screenshot`, `web_index`, `login`, `session_*`. Caching is on by default.
 
 ---
 
@@ -100,11 +100,12 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Honest blocking reports**: challenge pages and empty shells are never treated as content; you get `blocked` / `block_reason`.
 - **Stable error codes + diagnostics**: failures carry `error_code` and `retryable`; `debug=true` exposes tier decisions, selector hit counts and L2 interaction results.
 - **Persisted logins + named sessions**: `login` opens a visible browser and saves the session; `web_fetch` reuses it. `session="work"` isolates identities, and `session_export` / `session_import` move cookies between machines.
-- **Non-HTML content**: `web_fetch` reads plain text directly; with the `[pdf]` extra it extracts PDF text per page, returning `empty` for scanned files without a text layer instead of inventing content.
+- **Non-HTML content**: `web_fetch` reads plain text directly; DOCX/XLSX/PPTX text is extracted with the standard library (no extra dependency); with the `[pdf]` extra it extracts PDF text per page; scanned files without a text layer return `empty`, and with the `[ocr]` extra are optionally OCR'd instead of inventing content.
 - **Single-flight per URL**: concurrent requests for the same page (multiple tenants, or duplicate links inside a batch/crawl) fetch it once and share the response — less egress and fewer anti-bot triggers. Both L1 and L2 renders are coalesced. Requests with custom headers/credentials or `bypass_cache=true` may be caller-specific, so they are never merged.
 - **Two cache layers**: HTTP responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; compacted content and extraction results get their own cache so repeat calls return immediately. `bypass_cache=true` skips both layers. `web_batch` fetches a list concurrently.
 - **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped. For large jobs use `web_crawl_start` to run in the background, poll with `status`, stop with `cancel`, and it resumes after a restart.
 - **Change detection**: `web_watch` keeps a snapshot of the body after every successful fetch and reports `changed` plus an added/removed line summary on the next call; pass `selector` to watch just one block (leaderboard, price box). Failed fetches never overwrite the snapshot, so changes that happened during a block are still visible afterwards.
+- **Scheduled monitoring + notifications**: `web_schedule` turns `web_watch` / `web_index` into scheduled tasks (listable, pausable, runnable on demand) executed by a local `scrape-mcp schedule daemon`; real changes are POSTed to your webhook. The first run only establishes a baseline and never notifies, and failed fetches are recorded without overwriting snapshots.
 - **Search discovery**: `web_search` turns keywords into structured results (title / URL / snippet / engine / publish date). It uses DuckDuckGo's HTML endpoint by default (no API key), or a self-hosted SearXNG JSON API, or Brave / Tavily with configured keys; it supports `site`, `time_range` and `engines` filters plus automatic backend fallback, and results are cacheable — ideal for a search-then-fetch flow.
 - **Page screenshots**: `web_screenshot` renders in a real browser and exports a PNG or a full-page PDF, supporting full-page/viewport capture, custom dimensions, element cropping, device presets (desktop/mobile), hiding fixed navigation or pop-ups before capture, selector waiting and extra delay; `actions` can click/type/scroll before the shot. It reuses the login session, so pages behind auth or JS rendering still work.
 - **Site index**: `web_index` reads `Sitemap:` lines from robots.txt (falling back to `/sitemap.xml`), recursively expands sitemap indexes and unpacks `.gz` files. It persists a baseline and later reports new / changed / unchanged / removed entries, optionally re-fetching changed pages to filter out timestamp-only changes.
@@ -123,6 +124,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 ```bash
 pip install mcp-scrape                          # core: L1 fetching + compaction + extraction
 pip install "mcp-scrape[pdf]"                   # optional: let web_fetch read PDFs
+pip install "mcp-scrape[ocr]"                   # optional: OCR for scanned PDFs (needs system tesseract + language packs)
 ```
 
 ```bash
@@ -176,6 +178,10 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `DATA_DIR` | `~/.scrape_mcp` | Where sessions and cache live |
 | `RECIPES_DIR` | `<DATA_DIR>/recipes` | Site recipe directory; empty means default |
 | `PDF_MAX_PAGES` | `200` | Max pages parsed per PDF (remaining pages are skipped; `pages` still reports the total) |
+| `OCR_ENABLED` | `false` | OCR PDFs without a text layer (needs the `[ocr]` extra + system tesseract) |
+| `OCR_LANG` | `chi_sim+eng` | tesseract language pack combination |
+| `OCR_DPI` | `200` | Render DPI (higher is more accurate but slower) |
+| `OCR_MAX_PAGES` | `10` | Max pages OCR'd per call |
 | `CACHE_TTL` | `300` | TTL for both cache layers (seconds); `0` disables them. HTTP entries are revalidated after expiry; content/extraction hits return directly |
 | `RETRY_TIMES` | `2` | Retries for network errors / 5xx (429/403 are not retried) |
 | `RETRY_BACKOFF` | `0.5` | Backoff base (seconds, exponential) |
@@ -352,7 +358,8 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Total budget: optional `deadline_ms` caps the whole call; degradation markers are listed under "Error codes and diagnostics"
   - Session: `session` (default `default`); use the same name as `login` to attach the stored session
   - Render options (L2 only): `wait_for` (CSS selector), `scroll` (trigger lazy loading), `click` ("load more"); `actions` runs an ordered chain (click/type/press/select/wait/scroll) with per-step failures recorded in `notes`
-  - Non-HTML: PDFs return structured text (with the `[pdf]` extra; `kind="pdf"` plus `pages` / `pages_parsed`); plain text is returned as-is (`kind="text"`)
+  - Non-HTML: PDFs return structured text (with the `[pdf]` extra; `kind="pdf"` plus `pages` / `pages_parsed`); DOCX/XLSX/PPTX are parsed with the standard library (`kind` is `docx`/`xlsx`/`pptx`); plain text is returned as-is (`kind="text"`)
+  - Scanned PDFs: with `OCR_ENABLED=1` and the `[ocr]` extra, text-layer-free pages are OCR'd and the payload carries `ocr=true`; if OCR is unavailable or still empty the result is `unsupported_content` / `empty`
   - Diagnostics: `debug=true` adds `diagnostics` (tier decisions, selector hits, L2 interactions), without page content
 - **`web_extract(url, schema=None, ...)`** → structured JSON from a field schema
   - `schema` may be omitted when a site recipe exists; otherwise `invalid_argument`
@@ -391,6 +398,12 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `selector` narrows the watch to one block (all matched nodes joined); different selectors keep separate snapshots
   - `reset=true` drops the old snapshot and rebuilds the baseline; comparison ignores trailing whitespace and blank lines so render noise does not count
   - Failed fetches (blocked/timeout/login wall) never overwrite the snapshot; `bypass_cache` defaults to `true` so the content is fresh
+- **`web_schedule(action="list", id=None, kind="watch", url=None, selector=None, interval_s=3600, webhook_url=None, session="default", ...)`** → manage scheduled monitoring tasks
+  - `create` records what to watch, how often, and where to notify; `kind=watch` reuses `web_watch` (with optional `selector`), `kind=index` reuses `web_index`. One task per `kind+url+selector`; creating again updates it
+  - `interval_s` accepts 60 ~ 604800 (one week), default 3600; `webhook_url` must be http/https
+  - `list` / `get` show tasks and last status; `pause` / `resume` toggle execution; `delete` removes the schedule (page snapshots are kept)
+  - `run` executes once now: the first run returns `first_seen=true` without notifying; later runs notify only on real changes, and failures never break task state
+  - Execution is driven by `scrape-mcp schedule daemon` (see "Scheduled monitoring" below); task state lives in `DATA_DIR/schedule/tasks.json`
 - **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, ...)`** → search keywords and return structured results
   - `provider`: `duckduckgo` (default, from `SEARCH_PROVIDER`) / `searxng` (requires `SEARCH_SEARXNG_URL`) / `brave` / `tavily` (requires the matching key)
   - `site` is passed through as the `site:` operator (how strictly it is enforced depends on the backend engine); `time_range` takes `day` / `week` / `month` / `year`; `engines` is a SearXNG engine list (searxng only)
@@ -440,7 +453,7 @@ With `deadline_ms`, a degraded call shows up in `diagnostics.decisions` as `dead
 | `login_required` | ❌ | The page actually offers a login affordance (password field / login wording); call `login` first. A bare 403 rejection page is reported as `blocked` |
 | `denied` / `robots_disallowed` | ❌ | Rejected by allow/deny lists or robots.txt |
 | `missing_required` | ❌ | A required field is missing; see `required_missing` |
-| `unsupported_content` | ❌ | Content type unsupported by this tool (e.g. PDF via `web_extract`); use `web_fetch`, install the `[pdf]` extra for PDFs |
+| `unsupported_content` | ❌ | Content type unsupported by this tool (e.g. PDF/Office via `web_extract`); use `web_fetch`, install the `[pdf]` extra for PDFs and `[ocr]` for scans |
 | `invalid_url` / `invalid_argument` | ❌ | Bad arguments |
 
 Failures include a compact `diagnostics.decisions` (e.g. `["retry:5xx", "escalate_l2:cloudflare", "l2_ok"]`); a sticky call starts with `skip_l1:sticky_l2`, and a failed render shows `sticky_l2_failed:fallback_l1`. `debug=true` expands counts:
@@ -652,6 +665,30 @@ Limits:
 - A failed write only logs a warning — export is a side path and never breaks the scrape
 - The file keeps growing; rotate it yourself (`scrapes-2026-10-29.jsonl`) for long-running deployments
 
+## Scheduled monitoring
+
+Let a local daemon run `web_watch` / `web_index` on a schedule and push a webhook when something changes. Tasks stay on your machine — no hosted service:
+
+```bash
+scrape-mcp schedule add --url https://example.com/news --selector "main .list" --interval 3600 \
+  --webhook https://hooks.example.com/scrape
+scrape-mcp schedule add --kind index --url https://example.com --interval 86400 \
+  --webhook https://hooks.example.com/sitemap
+scrape-mcp schedule list          # IDs, state, next/last run
+scrape-mcp schedule run <ID>      # run once now (first run is a baseline)
+scrape-mcp schedule pause <ID>    # pause; snapshots are kept
+scrape-mcp schedule resume <ID>
+scrape-mcp schedule delete <ID>
+scrape-mcp schedule daemon        # long-running: scans every 30s; Ctrl+C to stop
+scrape-mcp schedule daemon --once # run currently due tasks only (cron-friendly)
+```
+
+- The first run only establishes a baseline and never notifies; afterwards watch compares body hashes and index compares the sitemap list's `new` + `changed`.
+- Webhooks are JSON POSTs: `{"event":"change","task_id","kind","url","selector","checked_at","summary"}`; `summary` carries the diff summary or the new/changed URL lists.
+- A failed webhook only shows up in that run's result and never rewrites task state; the next cycle still runs.
+- To reuse system cron, put `schedule daemon --once` in crontab instead of keeping a process alive.
+- Task state lives in `DATA_DIR/schedule/tasks.json`; snapshots stay in `DATA_DIR/watch/` and `DATA_DIR/index/`, so deleting a task never loses them.
+
 ## Python SDK
 
 Use the same implementation without an MCP client (identical arguments, payloads and error codes):
@@ -823,9 +860,9 @@ benchmarks/
 ├── sites.json         # Real-site quality corpus (tiers, expected outcome, completeness checks)
 └── baseline.json      # Nightly-subset baseline for trend checks (updated monthly)
 src/scrape_mcp
-├── server.py          # MCP entry + tools (web_fetch/web_extract/web_batch/web_crawl/web_map/web_crawl_*/login/session_*)
+├── server.py          # MCP entry + tools (web_fetch/web_extract/web_batch/web_crawl/web_map/web_crawl_*/web_schedule/login/session_*)
 ├── http_auth.py       # HTTP Bearer middleware + non-loopback bind guard
-├── cli.py             # Subcommands: init (client config) / schema (export tool definitions)
+├── cli.py             # Subcommands: init (client config) / schema (export tool definitions) / schedule (task daemon)
 ├── sdk.py             # Python SDK wrappers (fetch/extract/crawl/crawl_*/site_map/batch/watch/aclose)
 ├── config.py          # Environment configuration
 ├── metrics.py         # Prometheus text metrics (source for /metrics)
@@ -841,6 +878,7 @@ src/scrape_mcp
 │   ├── stats.py       # In-process counters (source for /stats)
 │   ├── jobs.py        # Async crawl jobs (state persistence, progress, resume, cancel)
 │   ├── watch.py       # Change detection (body snapshot + diff summary)
+│   ├── schedule.py    # Scheduled tasks (state, due calculation, pause/resume)
 │   ├── errors.py      # Stable error codes
 │   └── hostlimit.py   # Per-host concurrency gate
 └── extract/
@@ -848,6 +886,8 @@ src/scrape_mcp
     ├── schema.py      # Structured extraction from a field schema
     ├── links.py       # Link discovery (web_crawl)
     ├── pdf.py         # PDF → text (optional pypdf)
+    ├── documents.py   # DOCX/XLSX/PPTX → text (standard library only)
+    ├── ocr.py         # OCR for scanned PDFs (optional pymupdf + pytesseract)
     └── render.py      # markdown → plain text / blocks
 ```
 

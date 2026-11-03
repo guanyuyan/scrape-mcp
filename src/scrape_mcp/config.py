@@ -111,6 +111,14 @@ class Settings(BaseSettings):
     recipes_dir: str = ""
     # PDF 单次最多解析页数；超出部分截断（防止超大文件拖住单次调用）
     pdf_max_pages: int = 200
+    # ---- 扫描 PDF 的 OCR（可选依赖 mcp-scrape[ocr] + 系统 tesseract）----
+    # 默认关闭：OCR 资源开销大，只在 PDF 没有文字层时按需启用
+    ocr_enabled: bool = False
+    # tesseract 语言包，如 chi_sim+eng / eng
+    ocr_lang: str = "chi_sim+eng"
+    ocr_dpi: int = 200
+    # 单次 OCR 最多识别页数（超出部分截断）
+    ocr_max_pages: int = 10
     # 数据集导出：非空时把每次成功抓取追加到该 JSONL（一行一条）；留空不导出
     dataset: str = ""
     # login 工具默认打开带界面的窗口供手动登录；确认后可按需切回无头

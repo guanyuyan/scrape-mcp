@@ -30,6 +30,8 @@ dependencies = [
 [project.optional-dependencies]
 # PDF 文本抽取是可选能力，不装也能用其余工具，装上后 web_fetch 直接吃 PDF
 pdf = ["pypdf>=6.21.2"]
+# 扫描 PDF 的 OCR：pymupdf 渲染 + pytesseract 识别，另需系统安装 tesseract 与语言包
+ocr = ["pymupdf>=1.24", "pytesseract>=0.3", "pillow>=10"]
 # 数据集导出成 Parquet（JSONL 累积本身不需要额外依赖）
 dataset = ["pyarrow>=14"]
 dev = [

@@ -5,7 +5,12 @@
 ## [Unreleased]
 
 ### Added
+- `web_fetch` 支持 DOCX / XLSX / PPTX：标准库解压 OOXML 抽取文字层（段落、单元格、幻灯片），无需额外依赖；包损坏返回 `unsupported_content`，无文字返回 `empty`
+- 扫描 PDF 支持可选 OCR：`OCR_ENABLED=1` + `pip install "mcp-scrape[ocr]"`（pymupdf + pytesseract）后对无文字层页面识别，载荷带 `ocr=true`；依赖缺失时返回可执行的安装提示
 - `web_extract` 新增可选 `prompt`：配置 `LLM_BASE_URL` + `LLM_MODEL` 时走 OpenAI 兼容模型抽取，返回 `extract_mode` / `model`；未配置或调用失败自动回退确定性 schema，不产生默认外部调用
+- 新增 `web_schedule` 工具：把 `web_watch` / `web_index` 登记为计划任务（`create` / `list` / `get` / `pause` / `resume` / `delete` / `run`），任务状态落在 `DATA_DIR/schedule/tasks.json`；同 `kind+url+selector` 幂等
+- 新增 `scrape-mcp schedule` 子命令：`add` / `list` / `pause` / `resume` / `delete` / `run` / `daemon`（`--once` 可交给系统 cron）；daemon 按间隔执行到期任务
+- 定时任务检测到真实变更后 POST webhook（`event=change` + diff 摘要或新增/变更 URL）；首次执行只建立基线不发通知，webhook 失败不影响任务状态与快照
 
 ## [0.22.0] - 2026-11-03
 
