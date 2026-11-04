@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-04
+
 ### Added
 - `login` 支持无头登录：`headless=true` 时不弹窗口，把登录页截图保存到 `DATA_DIR/login/` 并在载荷返回 `screenshot` 路径；`qr_selector` 可只截二维码供手机扫码（未命中回退整页并写入 `notes`）
 - `login` 新增 `cdp_url`：连接远程浏览器（http/https/ws/wss）完成登录，适合本地无 GUI 的场景；无头登录失败时提示 `session_import` 导入 cookie
