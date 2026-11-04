@@ -172,6 +172,10 @@ cp .env.example .env    # 生成配置模板
 | `PROXY_POOL_FAIL_THRESHOLD` | `2` | 同一出口连续失败多少次后进入冷却 |
 | `PROXY_POOL_COOLDOWN` | `60` | 出口冷却时长（秒），冷却期内不再分配 |
 | `PROXY_POOL_STICKY_TTL` | `300` | 同一主机固定走同一出口的时长（秒） |
+| `PROXY_SESSIONS` | — | 会话绑定代理（`名字=代理` 条目，逗号/分号/空白分隔），如 `work=http://1.2.3.4:8080`；同一会话（含登录态）固定走该出口。优先级：单请求 `proxy` > 会话绑定 > 代理池 > `PROXY` |
+| `CAPTCHA_SOLVER_URL` | — | 可选 CAPTCHA 服务钩子，留空即关闭（默认）。配置后仅在检测到人机验证时把 URL/状态码/拦截类型转给该端点，接受其返回的 `cookies` 做一次重试 |
+| `CAPTCHA_SOLVER_KEY` | — | 钩子服务的 Bearer 令牌（可选） |
+| `CAPTCHA_SOLVER_TIMEOUT` | `10` | 钩子调用超时（秒） |
 | `L2_ENABLED` | `true` | 是否启用 Playwright 升级链 |
 | `L2_CHANNEL` | — | 关联浏览器：空=自带 Chromium，`chrome`/`msedge`=系统 |
 | `L2_SETTLE_TIMEOUT` | `8` | 挑战页等待窗口（秒） |
@@ -364,7 +368,10 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `format=chunks`: `content` 为分块数组，每块含 `index` / `text` / `heading_path`（标题层级路径）/ `start` / `end`（在正文中的字符偏移）/ `tokens`；顶层另有 `chunk_count`，可直接写入向量库
   - `chunk_size` / `chunk_overlap`: `chunks` 模式的窗口与重叠字符数（默认 `1200` / `200`；窗口 100~8000，重叠不超过窗口一半）
   - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
-  - 代理：`proxy`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）只对本次调用生效，L1 与升级后的 L2 走同一个出口；不传则按 `SCRAPE_MCP_PROXY_POOL` 代理池分配，未配池时沿用 `SCRAPE_MCP_PROXY`。显式传入代理的请求不读也不写共享缓存，避免不同出口的结果混在一起
+  - 代理：`proxy`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）只对本次调用生效，L1 与升级后的 L2 走同一个出口；不传则按代理池分配，未配池时沿用 `SCRAPE_MCP_PROXY`。显式传入代理的请求不读也不写共享缓存，避免不同出口的结果混在一起
+  - 出口优先级：单请求 `proxy` > 会话绑定（`SCRAPE_MCP_PROXY_SESSIONS`）> 代理池 > 全局 `PROXY`
+  - 地区定向：`region`（如 `us` / `hk` / `jp`）只在走代理池时生效，仅从带该地区标签的出口中选择（池条目写成 `http://host:port|us`）；没有该地区出口时直接返回 `invalid_argument`，不会悄悄换出口。会话绑定了代理或显式传了 `proxy` 时不生效，`notes` 会说明实际出口
+  - CAPTCHA 钩子（`SCRAPE_MCP_CAPTCHA_SOLVER_URL`）默认关闭且**不做破解**：仅在检测到人机验证时把 URL/状态码/拦截类型转给你指定的合规服务（人工值守或已获授权的 solver），按对方返回的 `cookies` 重试一次；失败只写 `notes`，不影响原有结果。使用前请确认目标站条款与当地法律，不要用于大规模绕过验证或批量注册
   - 总预算：`deadline_ms`（毫秒，可选）限制整次调用；不够时逐级降级，见"错误码与诊断"中的 `deadline:*` 说明
   - 登录态：`session`（默认 `default`），与 `login` 时的会话名一致即可自动带上对应登录态
   - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）；`actions`（动作链，按顺序执行 click/type/press/select/wait/scroll，单个动作失败只写入 `notes`）
@@ -387,6 +394,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
   - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session`（对该批所有 URL 生效）；`format=chunks` 与 `chunk_size` / `chunk_overlap` 同样逐条生效
   - `proxy` 同样对该批所有 URL 生效；缺省按代理池分配，未配池时沿用全局配置
+  - `region` 同样对该批所有 URL 生效（如 `us`）；只在走代理池时生效，无该地区出口时整批返回 `invalid_argument`
   - `deadline_ms` 为整批共用的预算：耗尽后还没开始的子任务直接返回 `timeout`，不再占用网络与浏览器
   - 客户端请求进度（传 `progressToken`）时，每完成一条上报 `已抓取 n/N 个 URL`
 - **`web_crawl(url, depth=1, limit=10, same_host=True, max_tokens=2000, ...)`** → 从一个入口逐页抓取，返回带 `mode` 标明模式
@@ -394,6 +402,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `mode=paginate`：传 `next_selector` 即启用分页模式，按"下一页"链接顺序翻页，`max_pages` 封顶（默认 `5`），已访问 URL 自动去重，默认不跟随站外链接（`same_host=false` 可放开）
   - 单页失败只影响该页；图片/压缩包等静态资源链接自动跳过；`session` 对该次所有页面生效
   - `proxy` 对该次所有页面生效；缺省按代理池分配，未配池时沿用全局配置
+  - `region` 对该次所有页面生效（如 `us`）；只在走代理池时生效，无该地区出口时直接返回 `invalid_argument`
   - `deadline_ms` 为整次爬取的预算：耗尽后不再抓新页，已抓到的页面照常返回
   - 客户端请求进度时逐页上报（分页模式为 `已翻到第 n/N 页`，链接模式为 `已抓取 n/N 页`）
 - **`web_crawl_start(url, depth=1, limit=10, ..., next_selector=None, max_pages=None, deadline_ms=None, session="default")`** → 启动异步爬取任务，立即返回 `job_id`

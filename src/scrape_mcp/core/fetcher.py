@@ -12,11 +12,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..config import Settings
+from . import captcha
 from . import deadline as budget
 from .browser import BrowserRenderer, ScreenshotOutcome
 from .detector import detect_block, looks_like_login_wall, looks_like_shell
 from .http_client import HttpClient, HttpResponse
-from .proxy import ProxyPool, split_pool
+from .proxy import ProxyPool, parse_pool, parse_session_proxies
 
 # 这些判定不值得升级浏览器：同一 IP 下换浏览器通常仍被限流，
 # 只是白付一次浏览器启动成本。
@@ -92,11 +93,13 @@ class Fetcher:
         # host -> 粘性结论的到期时刻（monotonic）
         self._sticky: dict[str, float] = {}
         self._pool = ProxyPool(
-            split_pool(settings.proxy_pool),
+            parse_pool(settings.proxy_pool),
             fail_threshold=settings.proxy_pool_fail_threshold,
             cooldown_s=settings.proxy_pool_cooldown,
             sticky_ttl_s=settings.proxy_pool_sticky_ttl,
         )
+        # 会话绑定代理：name -> proxy；配置非法项会被忽略，该会话自然回落到池/全局
+        self._session_proxies = parse_session_proxies(settings.proxy_sessions)
 
     def _get_browser(self) -> BrowserRenderer:
         if self._browser is None:
@@ -106,6 +109,10 @@ class Fetcher:
     def proxy_snapshot(self) -> dict[str, int] | None:
         """代理池状态（出口数/健康/冷却）；未配置代理池时返回 None。"""
         return self._pool.snapshot() if self._pool else None
+
+    def proxy_regions(self) -> list[str]:
+        """代理池中已标注的地区（排序），用于地区不可用时的提示。"""
+        return self._pool.regions()
 
     async def aclose(self) -> None:
         if self._browser is not None:
@@ -164,15 +171,17 @@ class Fetcher:
         session: str = "default",
         deadline: float | None = None,
         proxy: str | None = None,
+        region: str | None = None,
     ) -> FetchOutcome:
         """为本次抓取固定一个出口，再走分级链路。
 
-        出口优先级：单请求 proxy > 代理池 > 全局 SCRAPE_MCP_PROXY。池化出口按站点
-        粘性分配，L1、重试与 L2 升级都走同一个 IP；结束后把结果回报给池用于冷却判定。
+        出口优先级：单请求 proxy > 会话绑定代理 > 代理池（region 过滤）> 全局
+        SCRAPE_MCP_PROXY。池化出口按站点粘性分配，L1、重试与 L2 升级都走同一个 IP；
+        结束后把结果回报给池用于冷却判定。只有池化出口可共享缓存：单请求与会话
+        绑定的出口可能因身份/地区而异，结果不写入共享缓存。
         """
-        explicit = proxy is not None
-        if not explicit:
-            proxy = self._pool.pick(_host_of(url))
+        proxy, source = self._resolve_egress(url, session=session, proxy=proxy, region=region)
+        allow_cache = source in ("pool", "global")
         outcome = await self._fetch(
             url,
             headers=headers,
@@ -184,13 +193,103 @@ class Fetcher:
             actions=actions,
             # 显式指定的出口可能让同一 URL 拿到不同内容，这类结果不进共享缓存
             bypass_cache=bypass_cache,
-            allow_cache=not explicit,
+            allow_cache=allow_cache,
             session=session,
             deadline=deadline,
             proxy=proxy,
         )
-        if proxy is not None and not explicit:
+        if source == "session":
+            outcome.notes.append(f"出口：会话绑定代理（session={session}）")
+        if region is not None:
+            if source == "pool":
+                outcome.notes.append(f"出口：代理池 region={region}")
+            else:
+                outcome.notes.append("region 未生效：本次使用显式代理、会话绑定代理或全局代理")
+        outcome = await self._try_captcha_hook(
+            outcome,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            deadline=deadline,
+            proxy=proxy,
+        )
+        if proxy is not None and source == "pool":
             self._pool.report(proxy, ok=not _egress_failed(outcome))
+        return outcome
+
+    def _resolve_egress(
+        self,
+        url: str,
+        *,
+        session: str,
+        proxy: str | None,
+        region: str | None,
+    ) -> tuple[str | None, str]:
+        """解析本次出口，返回 (代理, 来源)。来源取值 request/session/pool/global。"""
+        if proxy is not None:
+            return proxy, "request"
+        bound = self._session_proxies.get(session)
+        if bound is not None:
+            return bound, "session"
+        picked = self._pool.pick(_host_of(url), region=region)
+        if picked is not None:
+            return picked, "pool"
+        return None, "global"
+
+    def region_available(self, region: str, *, session: str = "default") -> bool:
+        """指定地区是否有可用出口；会话已绑定代理时 region 不参与分配。"""
+        if session in self._session_proxies:
+            return True
+        return self._pool.has_region(region)
+
+    async def _try_captcha_hook(
+        self,
+        outcome: FetchOutcome,
+        *,
+        headers: dict[str, str] | None,
+        cookies: dict[str, str] | None,
+        timeout: float | None,
+        deadline: float | None,
+        proxy: str | None,
+    ) -> FetchOutcome:
+        """检测到人机验证且配置了服务端点时，交给外部服务并按其 cookie 重试一次。
+
+        未配置端点时是纯 no-op；钩子失败/不给 cookie 时只追加 notes，保留原有结果。
+        """
+        if outcome.blocked != "captcha" or not captcha.enabled(self._settings):
+            return outcome
+        result = await captcha.request_solve(
+            self._http,
+            self._settings,
+            url=outcome.final_url or outcome.url,
+            status=outcome.status,
+            blocked=outcome.blocked,
+            deadline=deadline,
+        )
+        if result is None:  # 竞态下配置被清空，按未启用处理
+            return outcome
+        outcome.decisions.append("captcha_hook:called")
+        if not result.ok:
+            outcome.notes.append(result.note)
+            return outcome
+        retry = await self._fetch_l1_with_retry(
+            outcome.url,
+            headers=headers,
+            # 原有 cookie 与求解服务返回的 cookie 合并；后者优先
+            cookies={**(cookies or {}), **result.cookies},
+            timeout=timeout,
+            bypass_cache=True,
+            allow_cache=False,
+            deadline=deadline,
+            proxy=proxy,
+        )
+        if result.note:
+            retry.notes.append(result.note)
+        if retry.error is None and retry.blocked == "none" and retry.html.strip():
+            retry.decisions = [*outcome.decisions, "captcha_hook:solved", *retry.decisions]
+            retry.notes = [*outcome.notes, *retry.notes]
+            return retry
+        outcome.decisions.append("captcha_hook:still_blocked")
         return outcome
 
     async def _fetch(

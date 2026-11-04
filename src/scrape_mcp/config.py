@@ -29,11 +29,21 @@ class Settings(BaseSettings):
     hard_max_tokens: int = 8000
     proxy: str | None = None
     # 代理池（逗号/分号/空白分隔，支持 http/https/socks4/socks5）。非空时优先于上面的单代理：
-    # 按主机粘性轮询分配，连续失败达阈值后冷却；单请求传入的 proxy 优先级最高
+    # 按主机粘性轮询分配，连续失败达阈值后冷却。条目可带地区标签（http://host:port|us），
+    # 供按 region 定向；单请求传入的 proxy 优先级最高
     proxy_pool: str = ""
     proxy_pool_fail_threshold: int = 2
     proxy_pool_cooldown: float = 60.0
     proxy_pool_sticky_ttl: float = 300.0
+    # 会话绑定代理（name=proxy 条目，逗号/分号/空白分隔），如 work=http://1.2.3.4:8080。
+    # 同一会话（含登录态）始终走同一个出口；优先级：单请求 proxy > 会话绑定 > 代理池 > 全局
+    proxy_sessions: str = ""
+    # 可选 CAPTCHA 服务钩子：留空即关闭（默认）。配置后仅在检测到人机验证时把
+    # URL/状态码/拦截类型转给该服务，接受其返回的 cookies 做一次重试；
+    # 不做验证码破解，使用前请自行确认目标站条款与当地法律
+    captcha_solver_url: str = ""
+    captcha_solver_key: str = ""
+    captcha_solver_timeout: float = 10.0
     accept_language: str = "zh-CN,zh;q=0.9,en;q=0.8"
 
     # ---- M4 缓存与批量 ----

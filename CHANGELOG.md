@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Added
+- 代理按会话绑定：`PROXY_SESSIONS=work=http://host:port` 让同一会话（含登录态）始终走同一出口，优先级为单请求 `proxy` > 会话绑定 > 代理池 > 全局 `PROXY`；会话绑定的结果不进共享缓存
+- 代理池支持地区标签：条目写成 `http://host:port|us`，工具新增 `region`（`web_fetch` / `web_extract` / `web_batch` / `web_crawl`），只从该地区出口中选择；没有可用出口时返回 `invalid_argument` 并提示已标注地区，不会悄悄换出口
+- 出口来源写入 `notes`（会话绑定 / 代理池 region），便于确认实际走了哪个出口
+- 可选 CAPTCHA 服务钩子：`CAPTCHA_SOLVER_URL` 默认关闭，配置后在检测到人机验证时把 URL/状态码/拦截类型转发给用户指定的合规服务，按返回的 `cookies` 重试一次；失败只写 `notes`。不做验证码破解
+
 ## [0.24.0] - 2026-11-04
 
 ### Added

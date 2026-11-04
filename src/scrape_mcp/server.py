@@ -27,7 +27,7 @@ from .core.hostlimit import HostLimiter
 from .core.http_client import HttpResponse
 from .core.jobs import CrawlJobManager, JobStore
 from .core.logging import configure, log_event
-from .core.proxy import split_pool, valid_proxy
+from .core.proxy import normalize_region, split_pool, valid_proxy
 from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
 from .core.robots import RobotsChecker
@@ -168,8 +168,9 @@ def _cacheable(
     bypass_cache: bool,
     debug: bool,
     proxy: str | None = None,
+    region: str | None = None,
 ) -> bool:
-    """带自定义头/凭证/代理的结果可能因人因出口而异；debug 要现算诊断，都不走结果缓存。"""
+    """带自定义头/凭证/代理/地区的结果可能因人因出口而异；debug 要现算诊断，都不走结果缓存。"""
     return (
         get_settings().cache_ttl > 0
         and not bypass_cache
@@ -177,6 +178,7 @@ def _cacheable(
         and not headers
         and not cookies
         and not proxy
+        and not region
     )
 
 
@@ -224,6 +226,37 @@ def _proxy_arg(proxy: str | None) -> tuple[str | None, dict | None]:
         "error": "proxy 需为 http/https/socks4/socks5 代理 URL，如 http://127.0.0.1:7890",
         "retryable": False,
     }
+
+
+def _region_arg(region: str | None, *, session: str = "default") -> tuple[str | None, dict | None]:
+    """校验地区定向参数，并确认代理池里确有该地区出口。
+
+    没有可用出口时直接拒绝（而不是悄悄换成别的地区）：地区定向的结果
+    如果来自错误出口，调用方很难察觉，往往比明确失败代价更高。
+    """
+    if region is None:
+        return None, None
+    text = normalize_region(region)
+    if text is None:
+        return None, {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": "region 需为 1~32 位字母数字/下划线/连字符，如 us、hk、jp",
+            "retryable": False,
+        }
+    fetcher = _get_fetcher()
+    if not fetcher.region_available(text, session=session):
+        available = ", ".join(fetcher.proxy_regions()) or "无"
+        return None, {
+            "ok": False,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": (
+                f"代理池中没有 region={text} 的可用出口（已标注地区：{available}）；"
+                "请在 SCRAPE_MCP_PROXY_POOL 中用 http://host:port|region 标注"
+            ),
+            "retryable": False,
+        }
+    return text, None
 
 
 def _denied_payload(url: str, code: str, message: str) -> dict:
@@ -607,6 +640,7 @@ async def _fetch_html(
     session: str = "default",
     deadline: float | None = None,
     proxy: str | None = None,
+    region: str | None = None,
 ) -> tuple[FetchOutcome | None, dict | None]:
     """抓取单个 URL，返回 (outcome, 错误 payload)。
 
@@ -614,7 +648,8 @@ async def _fetch_html(
     拦截/登录墙统一如实上报，避免把挑战页当正文/当数据。成功时 error 为 None。
     wait_for/scroll/click 为 None 时套用该站 recipe，显式传值优先。
     deadline 是绝对截止时间（见 core.deadline），预算耗尽时不再发起新请求。
-    proxy 为单请求代理，缺省按代理池分配、再回落到全局配置；L1 与 L2 都走同一个出口。
+    proxy 为单请求代理，缺省按会话绑定/代理池分配、再回落到全局配置；
+    region 只在走代理池时生效，L1 与 L2 都走同一个出口。
     """
     recipe = _recipe_for(url)
     if recipe is not None:
@@ -648,6 +683,7 @@ async def _fetch_html(
                 session=session,
                 deadline=deadline,
                 proxy=proxy,
+                region=region,
             )
             code = errors.classify_outcome(outcome)
             if span is not None:
@@ -922,6 +958,7 @@ async def _fetch_dict(
     session: str = "default",
     deadline: float | None = None,
     proxy: str | None = None,
+    region: str | None = None,
     record_tool: str = "fetch",
 ) -> dict:
     """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
@@ -969,7 +1006,12 @@ async def _fetch_dict(
     cache: ResultCache | None = None
     key = ""
     if _cacheable(
-        headers=headers, cookies=cookies, bypass_cache=bypass_cache, debug=debug, proxy=proxy
+        headers=headers,
+        cookies=cookies,
+        bypass_cache=bypass_cache,
+        debug=debug,
+        proxy=proxy,
+        region=region,
     ):
         cache = _result_cache("fetch")
         # 命中 key 必须覆盖所有会改变正文的参数：recipe 的正文根与 L2 交互也算在内
@@ -1006,6 +1048,7 @@ async def _fetch_dict(
         session=session,
         deadline=deadline,
         proxy=proxy,
+        region=region,
     )
     if error is not None:
         return error
@@ -2142,6 +2185,7 @@ async def web_fetch(
     debug: bool = False,
     session: str = "default",
     proxy: str | None = None,
+    region: str | None = None,
 ) -> str:
     """抓取网页并返回极省 token 的紧凑正文（自动辨别反爬拦截页并如实上报）。
 
@@ -2180,6 +2224,9 @@ async def web_fetch(
             L1 与升级后的 L2 都走该出口；不传则按代理池 SCRAPE_MCP_PROXY_POOL 分配，
             未配池时沿用 SCRAPE_MCP_PROXY。
             显式传入代理的请求不读也不写共享缓存，避免把不同出口的结果混在一起。
+        region: 地区定向（如 us / hk / jp），只在走代理池时生效：仅从带该地区标签的
+            出口中选择。池里没有该地区时直接返回 invalid_argument，不会悄悄换出口。
+            会话已在 SCRAPE_MCP_PROXY_SESSIONS 绑定代理、或显式传了 proxy 时不生效。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -2192,6 +2239,9 @@ async def web_fetch(
     proxy, proxy_err = _proxy_arg(proxy)
     if proxy_err is not None:
         return _payload(**proxy_err)
+    region, region_err = _region_arg(region, session=session)
+    if region_err is not None:
+        return _payload(**region_err)
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
@@ -2218,6 +2268,7 @@ async def web_fetch(
             session=session,
             deadline=deadline,
             proxy=proxy,
+            region=region,
         )
     )
 
@@ -2265,6 +2316,7 @@ async def web_extract(
     debug: bool = False,
     session: str = "default",
     proxy: str | None = None,
+    region: str | None = None,
 ) -> str:
     """抓取网页并按字段 schema 抽取结构化 JSON（字段级数据，可入库）。
 
@@ -2313,6 +2365,8 @@ async def web_extract(
         session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致。
         proxy: 本次请求使用的代理（如 ``http://127.0.0.1:7890``）；不传则按代理池分配，
             未配池时沿用全局配置。显式传入代理的请求不读也不写共享缓存。
+        region: 地区定向（如 us / hk / jp），只在走代理池时生效；没有该地区出口时
+            直接返回 invalid_argument。会话绑定代理或显式 proxy 优先于它。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -2325,6 +2379,9 @@ async def web_extract(
     proxy, proxy_err = _proxy_arg(proxy)
     if proxy_err is not None:
         return _payload(**proxy_err)
+    region, region_err = _region_arg(region, session=session)
+    if region_err is not None:
+        return _payload(**region_err)
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
@@ -2371,7 +2428,12 @@ async def web_extract(
     cache: ResultCache | None = None
     key = ""
     if _cacheable(
-        headers=headers, cookies=cookies, bypass_cache=bypass_cache, debug=debug, proxy=proxy
+        headers=headers,
+        cookies=cookies,
+        bypass_cache=bypass_cache,
+        debug=debug,
+        proxy=proxy,
+        region=region,
     ):
         cache = _result_cache("extract")
         # schema 决定字段结果，recipe 的 L2 交互决定渲染后的 DOM，都进 key
@@ -2402,6 +2464,7 @@ async def web_extract(
         session=session,
         deadline=deadline,
         proxy=proxy,
+        region=region,
     )
     if error is not None:
         return _payload(**error)
@@ -2500,6 +2563,7 @@ async def web_batch(
     debug: bool = False,
     session: str = "default",
     proxy: str | None = None,
+    region: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """并发抓取一批 URL，各自走完整分级链路，返回逐个结果。
@@ -2521,6 +2585,8 @@ async def web_batch(
         session: 登录态会话名（默认 default）；对该批所有 URL 生效。
         proxy: 该批所有 URL 共用的代理；不传则按代理池分配，未配池时沿用全局配置。
             显式传入代理时该批不读也不写共享缓存。
+        region: 该批所有 URL 共用的地区定向（如 us）；只在走代理池时生效，
+            没有该地区出口时直接返回 invalid_argument。
         ctx: MCP 上下文，由框架注入，用于逐条上报进度（客户端请求进度时才发通知）。
     """
     settings = get_settings()
@@ -2529,6 +2595,9 @@ async def web_batch(
     proxy, proxy_err = _proxy_arg(proxy)
     if proxy_err is not None:
         return _payload(**proxy_err)
+    region, region_err = _region_arg(region, session=session)
+    if region_err is not None:
+        return _payload(**region_err)
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
@@ -2579,6 +2648,7 @@ async def web_batch(
                         session=session,
                         deadline=deadline,
                         proxy=proxy,
+                        region=region,
                         record_tool="batch",
                     )
                 except Exception as exc:  # 单条意外异常不应拖垮整批
@@ -2614,6 +2684,7 @@ async def _crawl_page(
     session: str = "default",
     deadline: float | None = None,
     proxy: str | None = None,
+    region: str | None = None,
 ) -> tuple[dict, list[str], str | None]:
     """抓一页并顺手抽链接/下一页；失败页返回错误 payload 和空链接列表。"""
     outcome, error = await _fetch_html(
@@ -2625,6 +2696,7 @@ async def _crawl_page(
         session=session,
         deadline=deadline,
         proxy=proxy,
+        region=region,
     )
     if error is not None:
         return error, [], None
@@ -2726,6 +2798,7 @@ async def web_crawl(
     bypass_cache: bool = False,
     session: str = "default",
     proxy: str | None = None,
+    region: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """从起始页发现站内链接并批量抓取，或按"下一页"顺序翻页，适合把一个栏目的前 N 篇读进来。
@@ -2755,6 +2828,8 @@ async def web_crawl(
         session: 登录态会话名（默认 default）；对本次所有页面生效。
         proxy: 本次爬取所有页面共用的代理；不传则按代理池分配，未配池时沿用全局配置。
             显式传入代理时不走共享缓存。
+        region: 本次爬取所有页面共用的地区定向（如 us）；只在走代理池时生效，
+            没有该地区出口时直接返回 invalid_argument。
         ctx: MCP 上下文，由框架注入，用于逐页上报进度（客户端请求进度时才发通知）。
     """
     if not url.startswith(("http://", "https://")):
@@ -2768,6 +2843,9 @@ async def web_crawl(
     proxy, proxy_err = _proxy_arg(proxy)
     if proxy_err is not None:
         return _payload(**proxy_err)
+    region, region_err = _region_arg(region, session=session)
+    if region_err is not None:
+        return _payload(**region_err)
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
@@ -2825,6 +2903,7 @@ async def web_crawl(
                     session=session,
                     deadline=deadline,
                     proxy=proxy,
+                    region=region,
                 )
             except Exception as exc:  # 单页异常不中断整次爬取
                 code = errors.classify_exception(exc)
@@ -2880,6 +2959,7 @@ async def web_crawl(
                         session=session,
                         deadline=deadline,
                         proxy=proxy,
+                        region=region,
                     )
                 except Exception as exc:  # 单页异常不中断整次爬取
                     code = errors.classify_exception(exc)

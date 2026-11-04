@@ -80,7 +80,9 @@ scrape.example.com {
 | `SCRAPE_MCP_MAX_QPS` | 全网抓取限流，默认 10 次/秒；比 HTTP 层限流更贴近目标站压力 |
 | `SCRAPE_MCP_ALLOWED_HOSTS` | 目标站白名单（逗号分隔）。公网部署建议设置，避免被当成任意 URL 抓取器 |
 | `SCRAPE_MCP_DENIED_HOSTS` | 目标站黑名单，优先于白名单；可用来挡内网网段域名 |
-| `SCRAPE_MCP_PROXY_POOL` | 出口代理池（逗号/分号/空白分隔）；比单个 `SCRAPE_MCP_PROXY` 优先 |
+| `SCRAPE_MCP_PROXY_POOL` | 出口代理池（逗号/分号/空白分隔）；比单个 `SCRAPE_MCP_PROXY` 优先；条目可带地区标签 `url\|us` |
+| `SCRAPE_MCP_PROXY_SESSIONS` | 会话绑定代理（`名字=代理` 条目）；同一登录会话固定走同一出口，优先级高于代理池 |
+| `SCRAPE_MCP_CAPTCHA_SOLVER_URL` | 可选 CAPTCHA 服务钩子，默认关闭；仅转发挑战信息并接受返回 cookie 重试，不做破解 |
 | `SCRAPE_MCP_CACHE_TTL` | 两层缓存 TTL 秒数，默认 300；`0` 全关 |
 | `SCRAPE_MCP_DATA_DIR` | 登录态与缓存目录，镜像内固定为 `/data`，挂卷持久化 |
 | `SCRAPE_MCP_L2_ENABLED` | 是否允许升级真浏览器；不装浏览器层时应设为 `false` |
