@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.23.0] - 2026-11-04
 
 ### Added
 - `web_fetch` 支持 DOCX / XLSX / PPTX：标准库解压 OOXML 抽取文字层（段落、单元格、幻灯片），无需额外依赖；包损坏返回 `unsupported_content`，无文字返回 `empty`
