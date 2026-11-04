@@ -752,6 +752,19 @@ def test_web_index_success_keys(monkeypatch):
     assert out["ok"] is True and out["new"] == 1
 
 
+def test_web_index_content_diff_adds_changes_key(monkeypatch):
+    async def fake_html(url: str, **_kwargs):
+        if url.endswith("/robots.txt"):
+            return _outcome(html="Sitemap: https://a.test/sitemap.xml"), None
+        return _outcome(html=SITEMAP_XML), None
+
+    monkeypatch.setattr(server, "_fetch_html", fake_html)
+    out = _run(server.web_index(URL, dry_run=True, content_diff=True))
+    # content_diff 只在开启时多一个 changes 键，其余契约保持不变
+    assert set(out) == INDEX_OK_PAYLOAD | {"changes"}
+    assert out["changes"] == []
+
+
 # ---- web_map ----
 
 

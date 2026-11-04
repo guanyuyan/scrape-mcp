@@ -271,3 +271,78 @@ def test_web_index_check_content_marks_unchanged_by_hash(monkeypatch, tmp_path):
     out = _run(server.web_index("https://a.test/", check_content=True))
     # lastmod 变了但正文哈希相同：不应报成 changed
     assert out["changed"] == 0 and out["content_checked"] == 1
+
+
+# ---- content_diff：回抓正文并输出差异摘要（与 web_watch 共用快照）----
+
+_OLD_HTML = "<html><body><article><p>旧内容</p></article></body></html>"
+_NEW_HTML = "<html><body><article><p>旧内容</p><p>新增一段</p></article></body></html>"
+
+
+def _seed_watch_baseline(monkeypatch, html: str) -> None:
+    pages = _standard_pages(_urlset([("https://a.test/a", "2026-01-01")]))
+    pages["https://a.test/a"] = _outcome(html)
+    _patch(monkeypatch, pages)
+    _run(server.web_index("https://a.test/"))
+    _run(server.web_watch("https://a.test/a"))
+
+
+def test_web_index_content_diff_reports_summary_and_updates_watch(monkeypatch):
+    _seed_watch_baseline(monkeypatch, _OLD_HTML)
+    pages = _standard_pages(_urlset([("https://a.test/a", "2026-02-01")]))
+    pages["https://a.test/a"] = _outcome(_NEW_HTML)
+    _patch(monkeypatch, pages)
+
+    out = _run(server.web_index("https://a.test/", content_diff=True))
+
+    assert out["changed"] == 1 and out["content_checked"] == 1
+    assert len(out["changes"]) == 1
+    entry = out["changes"][0]
+    assert entry["url"] == "https://a.test/a"
+    assert entry["changed"] is True and entry["first_seen"] is False
+    assert entry["added_lines"] >= 1
+    assert entry["diff"] and entry["diff"][0].startswith("+")
+
+    # index 回写快照后，单页 watch 接着用同一份基线：内容没再变就不报 changed
+    _patch(monkeypatch, pages)
+    watched = _run(server.web_watch("https://a.test/a"))
+    assert watched["changed"] is False
+
+
+def test_web_index_content_diff_marks_same_content_unchanged(monkeypatch):
+    _seed_watch_baseline(monkeypatch, _OLD_HTML)
+    pages = _standard_pages(_urlset([("https://a.test/a", "2026-02-01")]))
+    pages["https://a.test/a"] = _outcome(_OLD_HTML)
+    _patch(monkeypatch, pages)
+
+    out = _run(server.web_index("https://a.test/", content_diff=True))
+
+    assert out["changed"] == 0
+    assert out["changes"][0]["changed"] is False
+    assert out["changes"][0]["diff"] == []
+
+
+def test_web_index_content_diff_dry_run_does_not_write_watch_snapshot(monkeypatch):
+    _seed_watch_baseline(monkeypatch, _OLD_HTML)
+    pages = _standard_pages(_urlset([("https://a.test/a", "2026-02-01")]))
+    pages["https://a.test/a"] = _outcome(_NEW_HTML)
+    _patch(monkeypatch, pages)
+
+    preview = _run(server.web_index("https://a.test/", content_diff=True, dry_run=True))
+
+    assert preview["changes"][0]["added_lines"] >= 1
+    # dry_run 不写快照：单页 watch 仍以旧基线为准，能看到这次变化
+    watched = _run(server.web_watch("https://a.test/a"))
+    assert watched["changed"] is True
+
+
+def test_web_index_content_diff_reports_fetch_error(monkeypatch):
+    _seed_watch_baseline(monkeypatch, _OLD_HTML)
+    pages = _standard_pages(_urlset([("https://a.test/a", "2026-02-01")]))
+    _patch(monkeypatch, pages)  # a.test/a 未登记 → 返回 404
+
+    out = _run(server.web_index("https://a.test/", content_diff=True))
+
+    assert out["changed"] == 1
+    assert out["changes"][0]["url"] == "https://a.test/a"
+    assert out["changes"][0]["error"]

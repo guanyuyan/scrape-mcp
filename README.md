@@ -112,7 +112,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **定时监控与通知**：`web_schedule` 把 `web_watch` / `web_index` 变成计划任务（任务可查、可暂停、可手动跑一次），由本机 `scrape-mcp schedule daemon` 按间隔执行；检测到真实变更后 POST 到你配置的 webhook。首次执行只建立基线，不发通知；抓取失败只记状态，不覆盖快照。
 - **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要 / 来源引擎 / 发布时间），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API 或配置 key 使用 Brave / Tavily；支持 `site`、`time_range`、`engines` 过滤与后端失败自动回退，结果可缓存，适合"先搜再抓"的两步流程。
 - **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG 或整页 PDF，支持整页/视口、自定义尺寸、元素裁剪、设备预设（desktop/mobile）、截图前隐藏固定导航/弹窗，以及等待元素与额外延时；`actions` 可在截图前先点击/输入/翻页。复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
-- **站点索引**：`web_index` 读 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`），递归展开 sitemap index 并解压 `.gz`；清单落盘后，下次返回新增 / 变更 / 未变 / 移除，可选回抓正文比哈希过滤"只改了时间戳"的假变更。
+- **站点索引**：`web_index` 读 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`），递归展开 sitemap index 并解压 `.gz`；清单落盘后，下次返回新增 / 变更 / 未变 / 移除，可选回抓正文比哈希过滤"只改了时间戳"的假变更，或输出与 `web_watch` 同口径的差异摘要。
 - **站点 URL 发现**：`web_map` 同时读 sitemap 与入口页站内链接（可选合并 `web_search` 结果），同一 URL 只出现一次并标出来源；支持 `include`/`exclude` 正则、`search` 子串过滤与 `limit` 截断，适合无 sitemap 的站点。
 - **异步爬取任务**：`web_crawl_start` 立即返回 `job_id`，任务在后台推进并把状态逐页原子落盘到 `DATA_DIR/jobs/`；`web_crawl_status` 可读进度与部分结果、并在进程重启后自动续跑，`web_crawl_cancel` 停止任务，`web_crawl_list` 列出最近任务。同参数重复 start 幂等。
 - **内置运行看板**：HTTP 模式下打开 `/` 即见请求量、L1/L2 分布、耗时分位与分桶、结果码、正文类型、L2 页位与代理池健康度；单文件 HTML，无外部依赖，每 5 秒自动刷新。
@@ -440,10 +440,11 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 同一 URL 只出现一次，`urls` 每项带 `source`（`sitemap` / `homepage` / `search`），`sources` 给出各类计数
   - `include`/`exclude` 为正则，`search` 为 URL 子串过滤；`limit` 默认 500、硬上限 5000，超出时 `truncated=true`
   - 无 sitemap 的站点也能从入口页链接得到候选；`use_search=true` 时额外合并 `site:<host>` 搜索结果
-- **`web_index(url, include=None, exclude=None, limit=1000, check_content=False, dry_run=False, reset=False, ...)`** → sitemap 增量索引
+- **`web_index(url, include=None, exclude=None, limit=1000, check_content=False, content_diff=False, dry_run=False, reset=False, ...)`** → sitemap 增量索引
   - 传站点根/任意页面 URL 按 host 找 sitemap，也可直接传 sitemap 地址；`include`/`exclude` 用正则过滤 URL
   - 返回 `new` / `changed` / `unchanged` / `removed` 计数与对应 URL 列表（每类最多 50 条），`first_seen` 标明是否首次建立基线
   - `check_content=true` 对新增/变更条目回抓正文比哈希（单次最多 20 个），内容没真变的不算 `changed`
+  - `content_diff=true` 在回抓正文的同时与 `web_watch` 共用快照，并额外返回 `changes`：逐 URL 的 `changed` / `first_seen` / `added_lines` / `removed_lines` / `diff`（截断）；快照写回后单页 `web_watch` 可直接接着对比，`dry_run=true` 不写快照
   - `dry_run=true` 只对比不落盘；`reset=true` 丢弃旧基线；`limit` 限制本次处理条数（硬上限 5000）
 - **`login(url, timeout=180, session="default", headless=False, qr_selector=None, cdp_url=None)`** → 打开浏览器登录并持久化登录态
   - 多账号场景用不同 `session` 名分别登录，`web_fetch` 时传同一个名字即可，互不覆盖

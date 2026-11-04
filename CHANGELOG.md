@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- `web_index` 新增 `content_diff`：对 `changed` 条目回抓正文，与 `web_watch` 共用同一份快照并返回 `changes`（逐 URL 的 `changed` / `first_seen` / `added_lines` / `removed_lines` / 截断 `diff`）；快照写回后单页 `web_watch` 可直接接着对比，`dry_run=true` 不写快照。默认关闭，原有载荷键集不变
 - 代理按会话绑定：`PROXY_SESSIONS=work=http://host:port` 让同一会话（含登录态）始终走同一出口，优先级为单请求 `proxy` > 会话绑定 > 代理池 > 全局 `PROXY`；会话绑定的结果不进共享缓存
 - 代理池支持地区标签：条目写成 `http://host:port|us`，工具新增 `region`（`web_fetch` / `web_extract` / `web_batch` / `web_crawl`），只从该地区出口中选择；没有可用出口时返回 `invalid_argument` 并提示已标注地区，不会悄悄换出口
 - 出口来源写入 `notes`（会话绑定 / 代理池 region），便于确认实际走了哪个出口

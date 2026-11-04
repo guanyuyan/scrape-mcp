@@ -1788,6 +1788,7 @@ async def web_index(
     exclude: str | None = None,
     limit: int = 1000,
     check_content: bool = False,
+    content_diff: bool = False,
     dry_run: bool = False,
     reset: bool = False,
     session: str = "default",
@@ -1807,6 +1808,9 @@ async def web_index(
         limit: 本次最多处理多少条 URL（默认 1000，硬上限 5000）。
         check_content: True 时对 lastmod 变过的条目回抓正文并比哈希，内容真没变的不算 changed
             （单次最多回抓 20 个，避免把站点打穿）。
+        content_diff: True 时同样回抓正文，但额外与 ``web_watch`` 的快照对比并返回
+            ``changes``（逐 URL 的增删行数与 diff 摘要）；快照与 web_watch 共用，
+            下次单页 ``web_watch`` 可直接接续对比。``dry_run`` 时不写快照。
         dry_run: True 时只对比、不写入本次清单（便于先预览）。
         reset: 丢弃旧清单并重建基线（本次返回 first_seen=true）。
         session: 回抓正文时使用的登录态会话名（默认 default）。
@@ -1835,6 +1839,13 @@ async def web_index(
             error="limit 必须是正整数",
         )
     limit = min(limit, 5000)
+    if not isinstance(check_content, bool) or not isinstance(content_diff, bool):
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.INVALID_ARGUMENT,
+            error="check_content / content_diff 必须是布尔值",
+        )
     include_re, include_err = _regex_arg(include, "include")
     if include_err is not None:
         return _payload(**include_err)
@@ -1899,10 +1910,13 @@ async def web_index(
     hashes: dict[str, str] = {}
     checked = 0
     content_unchanged: set[str] = set()
-    if check_content:
+    changes: list[dict] = []
+    # content_diff 与 web_watch 共用同一份快照，两个入口看到的变化口径一致
+    watch_store = WatchStore(Path(get_settings().data_dir)) if content_diff else None
+    if check_content or content_diff:
         # 新建条目也顺手记哈希，下次才有基线可比；总量仍受 MAX_CONTENT_CHECKS 约束
-        check_targets = (new + changed_candidates)[:MAX_CONTENT_CHECKS]
-        for target_url in check_targets:
+        targets = (new + changed_candidates) if check_content else changed_candidates
+        for target_url in targets[:MAX_CONTENT_CHECKS]:
             if dl.expired(deadline):
                 break
             page, page_err = await _fetch_html(
@@ -1914,13 +1928,56 @@ async def web_index(
             )
             checked += 1
             if page_err is not None:
+                if watch_store is not None:
+                    changes.append({"url": target_url, "changed": True, "error": page_err["error"]})
                 continue
-            text = compact_html(page.html, page.final_url or target_url).content
-            digest = content_hash(text[:MAX_SNAPSHOT_CHARS])
+            text = _watch_text(page.html, target_url, None)[:MAX_SNAPSHOT_CHARS]
+            digest = content_hash(text)
             hashes[target_url] = digest
-            old = prev_map.get(target_url) or {}
-            if isinstance(old, dict) and old.get("hash") == digest:
+            if watch_store is None:
+                old = prev_map.get(target_url) or {}
+                if isinstance(old, dict) and old.get("hash") == digest:
+                    content_unchanged.add(target_url)
+                continue
+            # 快照对比：内容哈希没变就不算 changed，避免 lastmod 抖动造成误报
+            key = watch_key(target_url, None)
+            previous_snap = watch_store.load(key)
+            content_changed = previous_snap is None or previous_snap.get("hash") != digest
+            summary = (
+                diff_summary(str(previous_snap.get("text") or ""), text)
+                if previous_snap is not None and content_changed
+                else {
+                    "added_lines": 0,
+                    "removed_lines": 0,
+                    "diff": [],
+                    "diff_truncated": False,
+                }
+            )
+            if not content_changed:
                 content_unchanged.add(target_url)
+            changes.append(
+                {
+                    "url": target_url,
+                    "changed": content_changed,
+                    "first_seen": previous_snap is None,
+                    "hash": digest,
+                    "previous_hash": (previous_snap or {}).get("hash"),
+                    "chars": len(text),
+                    "previous_chars": (previous_snap or {}).get("chars"),
+                    **summary,
+                }
+            )
+            if not dry_run:
+                watch_store.save(
+                    key,
+                    {
+                        "url": target_url,
+                        "selector": None,
+                        "hash": digest,
+                        "chars": len(text),
+                        "text": text,
+                    },
+                )
 
     changed = [u for u in changed_candidates if u not in content_unchanged]
     unchanged_count = len(current) - len(new) - len(changed)
@@ -1951,27 +2008,31 @@ async def web_index(
             },
         )
 
-    return _payload(
-        ok=True,
-        url=url,
-        host=host,
-        sitemaps=sitemaps,
-        total=total,
-        entries=len(current),
-        new=len(new),
-        changed=len(changed),
-        unchanged=unchanged_count,
-        removed=len(removed),
-        new_urls=new[:MAX_LISTED],
-        changed_urls=changed[:MAX_LISTED],
-        removed_urls=removed[:MAX_LISTED],
-        content_checked=checked,
-        first_seen=previous is None,
-        truncated=total > len(current),
-        dry_run=dry_run,
-        elapsed_ms=int((time.perf_counter() - started) * 1000),
-        errors=errors_list[:5],
-    )
+    payload: dict = {
+        "ok": True,
+        "url": url,
+        "host": host,
+        "sitemaps": sitemaps,
+        "total": total,
+        "entries": len(current),
+        "new": len(new),
+        "changed": len(changed),
+        "unchanged": unchanged_count,
+        "removed": len(removed),
+        "new_urls": new[:MAX_LISTED],
+        "changed_urls": changed[:MAX_LISTED],
+        "removed_urls": removed[:MAX_LISTED],
+        "content_checked": checked,
+        "first_seen": previous is None,
+        "truncated": total > len(current),
+        "dry_run": dry_run,
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        "errors": errors_list[:5],
+    }
+    if content_diff:
+        # 只在开启时出现在载荷里，默认调用的契约键集保持不变
+        payload["changes"] = changes
+    return _payload(**payload)
 
 
 @_tool()
