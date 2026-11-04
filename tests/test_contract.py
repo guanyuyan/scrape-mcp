@@ -24,11 +24,12 @@ HTML = (
 
 # ---- 各载荷的 golden 键集合 ----
 
-INVALID_PAYLOAD = {"ok", "error_code", "error", "retryable"}
+INVALID_PAYLOAD = {"ok", "request_id", "error_code", "error", "retryable"}
 
 DENIED_PAYLOAD = {"ok", "url", "error_code", "error", "retryable"}
 
 FETCH_ERROR_PAYLOAD = {
+    "request_id",
     "ok",
     "url",
     "tier",
@@ -40,6 +41,7 @@ FETCH_ERROR_PAYLOAD = {
 }
 
 BLOCKED_PAYLOAD = {
+    "request_id",
     "ok",
     "url",
     "final_url",
@@ -55,6 +57,7 @@ BLOCKED_PAYLOAD = {
 }
 
 HTTP_STATUS_PAYLOAD = {
+    "request_id",
     "ok",
     "url",
     "final_url",
@@ -68,6 +71,7 @@ HTTP_STATUS_PAYLOAD = {
 }
 
 FETCH_OK_PAYLOAD = {
+    "request_id",
     "ok",
     "url",
     "final_url",
@@ -86,6 +90,9 @@ FETCH_OK_PAYLOAD = {
     "attempts",
 }
 
+# batch / crawl 的内嵌结果共用同一套主键，但 request_id 只出现在整次调用的顶层
+FETCH_ITEM_PAYLOAD = FETCH_OK_PAYLOAD - {"request_id"}
+
 DIAG_BRIEF = {"decisions", "attempts"}
 DIAG_DETAIL = {"decisions", "attempts", "html_bytes", "l2"}
 
@@ -93,6 +100,7 @@ DIAG_DETAIL = {"decisions", "attempts", "html_bytes", "l2"}
 PLAIN_OK_PAYLOAD = FETCH_OK_PAYLOAD | {"content_type", "kind"}
 
 EXTRACT_OK_PAYLOAD = {
+    "request_id",
     "ok",
     "url",
     "final_url",
@@ -120,6 +128,7 @@ CRAWL_PAGE_PAYLOAD = {
 }
 
 CRAWL_OK_PAYLOAD = {
+    "request_id",
     "ok",
     "start",
     "depth",
@@ -131,9 +140,10 @@ CRAWL_OK_PAYLOAD = {
     "results",
 }
 
-BATCH_OK_PAYLOAD = {"ok", "total", "ok_count", "results"}
+BATCH_OK_PAYLOAD = {"ok", "request_id", "total", "ok_count", "results"}
 
 SEARCH_OK_PAYLOAD = {
+    "request_id",
     "ok",
     "query",
     "provider",
@@ -144,9 +154,19 @@ SEARCH_OK_PAYLOAD = {
     "cached",
 }
 
-SEARCH_ERROR_PAYLOAD = {"ok", "query", "provider", "error_code", "error", "retryable", "attempts"}
+SEARCH_ERROR_PAYLOAD = {
+    "ok",
+    "request_id",
+    "query",
+    "provider",
+    "error_code",
+    "error",
+    "retryable",
+    "attempts",
+}
 
 SCREENSHOT_OK_PAYLOAD = {
+    "request_id",
     "ok",
     "url",
     "final_url",
@@ -165,9 +185,10 @@ SCREENSHOT_OK_PAYLOAD = {
     "notes",
 }
 
-SCREENSHOT_ERROR_PAYLOAD = {"ok", "url", "error_code", "error", "retryable"}
+SCREENSHOT_ERROR_PAYLOAD = {"ok", "request_id", "url", "error_code", "error", "retryable"}
 
 INDEX_OK_PAYLOAD = {
+    "request_id",
     "ok",
     "url",
     "host",
@@ -190,6 +211,7 @@ INDEX_OK_PAYLOAD = {
 }
 
 MAP_OK_PAYLOAD = {
+    "request_id",
     "ok",
     "url",
     "host",
@@ -200,11 +222,12 @@ MAP_OK_PAYLOAD = {
     "elapsed_ms",
 }
 
-MAP_ERROR_PAYLOAD = {"ok", "url", "host", "error_code", "error", "retryable"}
+MAP_ERROR_PAYLOAD = {"ok", "request_id", "url", "host", "error_code", "error", "retryable"}
 
-JOB_START_PAYLOAD = {"ok", "job_id", "state", "url", "existing"}
+JOB_START_PAYLOAD = {"ok", "request_id", "job_id", "state", "url", "existing"}
 
 JOB_STATUS_PAYLOAD = {
+    "request_id",
     "ok",
     "job_id",
     "state",
@@ -216,9 +239,9 @@ JOB_STATUS_PAYLOAD = {
     "updated_at",
 }
 
-JOB_CANCEL_PAYLOAD = {"ok", "job_id", "state"}
+JOB_CANCEL_PAYLOAD = {"ok", "request_id", "job_id", "state"}
 
-JOB_LIST_PAYLOAD = {"ok", "total", "jobs"}
+JOB_LIST_PAYLOAD = {"ok", "request_id", "total", "jobs"}
 
 JOB_SUMMARY_PAYLOAD = {
     "job_id",
@@ -231,7 +254,7 @@ JOB_SUMMARY_PAYLOAD = {
     "updated_at",
 }
 
-JOB_ERROR_PAYLOAD = {"ok", "job_id", "error_code", "error", "retryable"}
+JOB_ERROR_PAYLOAD = {"ok", "request_id", "job_id", "error_code", "error", "retryable"}
 
 SITEMAP_XML = (
     '<?xml version="1.0" encoding="UTF-8"?>'
@@ -501,7 +524,7 @@ def test_session_list_payload_keys(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_session_store", lambda: store)
 
     out = _run(server.session_list())
-    assert set(out) == {"ok", "total", "sessions"}
+    assert set(out) == {"ok", "request_id", "total", "sessions"}
     assert out["total"] == 1
     assert set(out["sessions"][0]) == {"session", "host", "updated_at"}
 
@@ -512,7 +535,7 @@ def test_session_export_payload_keys(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_session_store", lambda: store)
 
     out = _run(server.session_export(URL))
-    assert set(out) == {"ok", "url", "host", "session", "cookies", "cookie_count"}
+    assert set(out) == {"ok", "request_id", "url", "host", "session", "cookies", "cookie_count"}
     assert out["cookie_count"] == 1
 
 
@@ -529,7 +552,7 @@ def test_session_import_from_file_keys(monkeypatch, tmp_path):
     source.write_text(json.dumps({"cookies": [{"name": "sid", "value": "1"}]}), encoding="utf-8")
 
     out = _run(server.session_import(URL, str(source), session="work"))
-    assert set(out) == {"ok", "url", "host", "session", "imported", "path", "message"}
+    assert set(out) == {"ok", "request_id", "url", "host", "session", "imported", "path", "message"}
     assert out["imported"] == 1
     assert store.load("a.test", "work")["cookies"][0]["name"] == "sid"
 
@@ -595,7 +618,7 @@ def test_web_batch_top_level_keys(monkeypatch):
     _patch_fetch(monkeypatch, _outcome())
     out = _run(server.web_batch([URL, "https://a.test/y"]))
     assert set(out) == BATCH_OK_PAYLOAD
-    assert set(out["results"][0]) == FETCH_OK_PAYLOAD
+    assert set(out["results"][0]) == FETCH_ITEM_PAYLOAD
 
 
 # ---- web_crawl ----

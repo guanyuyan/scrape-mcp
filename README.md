@@ -103,7 +103,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
   代码块带语言标记、`figure` 输出图片地址与图注，压缩率可达 1~20% 数量级（如 MDN 214KB → 数百 token）。
 - **拦截如实上报**：不把挑战页/空壳页当正文喂给模型，返回 `blocked`/`block_reason`。
 - **稳定错误码 + 可诊断**：失败返回 `error_code` 与 `retryable`，`debug=true` 还能看到分层决策、选择器命中数与 L2 交互结果。
-- **登录态持久化 + 多会话**：`login` 工具手动登录并落盘，`web_fetch` 自动带上；`session="work"` 可按身份隔离登录态，`session_export`/`session_import` 在机器之间搬运 cookie。
+- **登录态持久化 + 多会话**：`login` 工具手动登录并落盘，`web_fetch` 自动带上；`session="work"` 可按身份隔离登录态，`session_export`/`session_import` 在机器之间搬运 cookie。无 GUI 服务器可 `headless=true` 登录（截图落盘供查看/扫码），或用 `qr_selector` 只截二维码，也可用 `cdp_url` 连远程浏览器。
 - **非 HTML 内容**：`web_fetch` 直接读纯文本；DOCX/XLSX/PPTX 走标准库抽取文字层（无需额外依赖）；装 `[pdf]` extra 后按页抽取 PDF 文本；扫描件（无文字层）如实返回 `empty`，开启 `[ocr]` extra 后可选 OCR，不伪造正文。
 - **同 URL 单飞（singleflight）**：同一页面被并发请求时（多租户同时抓、批量/爬取里重复链接）只真抓一次，其余等待并复用同一份响应，省出口流量也少踩目标站风控；L1 与 L2 渲染都会合并。带自定义头/凭证或 `bypass_cache=true` 的请求可能因人而异，不参与合并。
 - **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
@@ -315,6 +315,10 @@ curl http://127.0.0.1:8000/metrics
 
 `/metrics` 不额外引入 `prometheus_client`，按文本格式直接拼装。鉴权与 `/stats` 相同，但**不计入 QPS 与日配额**，可放心让 Prometheus 按固定间隔抓取；抓取配置见 [DEPLOYMENT.md](DEPLOYMENT.md#6-健康检查与观测)。
 
+**请求关联 ID**：每次工具调用都会生成一个 12 位 `request_id`，同时出现在返回载荷与 stderr 的 JSON 日志里（字段同名）。`web_batch` / `web_crawl` 的子任务共用外层 ID，因此一次调用只有一个 ID；结果缓存命中时载荷里是本次调用新生成的值，不会沿用首次请求的 ID。报障时提供该 ID 即可按日志定位整条链路。
+
+**链路追踪（可选）**：`SCRAPE_MCP_OTEL_ENABLED=1` + `pip install "mcp-scrape[otel]"` 后，每次工具调用产生 `tool.<name>` span、每次抓取产生 `fetch` span（属性含 `request_id` / `tier` / `status` / `code` / `elapsed_ms`），按 OTLP/HTTP 导出到 `SCRAPE_MCP_OTEL_ENDPOINT`（默认 `http://127.0.0.1:4318`）。默认关闭；未安装可选依赖时只记一条警告并退化为空操作，不影响抓取。
+
 必需项：请求头 `MCP-Method`、`Mcp-Name`；body 内 `params` 需带 `_meta`（`protocolVersion` + `clientCapabilities`）。完整示例见下。
 
 ## 接入 MCP 客户端（Claude / Cursor 等）
@@ -432,8 +436,12 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 返回 `new` / `changed` / `unchanged` / `removed` 计数与对应 URL 列表（每类最多 50 条），`first_seen` 标明是否首次建立基线
   - `check_content=true` 对新增/变更条目回抓正文比哈希（单次最多 20 个），内容没真变的不算 `changed`
   - `dry_run=true` 只对比不落盘；`reset=true` 丢弃旧基线；`limit` 限制本次处理条数（硬上限 5000）
-- **`login(url, timeout=180, session="default")`** → 打开带界面浏览器手动登录并持久化登录态
+- **`login(url, timeout=180, session="default", headless=False, qr_selector=None, cdp_url=None)`** → 打开浏览器登录并持久化登录态
   - 多账号场景用不同 `session` 名分别登录，`web_fetch` 时传同一个名字即可，互不覆盖
+  - `headless=true`：服务器无 GUI 时不弹窗口，登录页截图保存到 `DATA_DIR/login/`，载荷给出 `screenshot` 路径供查看/扫码
+  - `qr_selector`：只截取登录二维码元素（选择器未命中时回退整页并在 `notes` 说明），适合手机扫码
+  - `cdp_url`：连接远程浏览器（如另一台机器上的 Chrome）完成登录，适合本地既无 GUI 也不方便扫码的场景
+  - 也可以完全绕开浏览器：用 `session_import` 导入浏览器扩展导出的 cookie
 - **`session_list()`** → 列出本地已保存的登录态（`session` + `host` + `updated_at`），不含 cookie 内容
 - **`session_export(url, session="default", path=None)`** → 导出该站 cookie（`{host, session, cookies}`）；传 `path` 时同时写入本地文件
 - **`session_import(url, path, session="default", replace=False)`** → 从本地文件导入 cookie

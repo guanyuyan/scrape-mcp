@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     # ---- 可观测 ----
     # 日志级别（JSON 行输出到 stderr；stdio 模式下 stdout 必须保持干净）
     log_level: str = "WARNING"
+    # OpenTelemetry 追踪（可选依赖 mcp-scrape[otel]）：默认关闭，开启后按 OTLP/HTTP 导出
+    otel_enabled: bool = False
+    # OTLP/HTTP 端点（如 http://127.0.0.1:4318 的 /v1/traces 由导出器自动拼接）；留空用本地默认
+    otel_endpoint: str = ""
+    # 上报的 service.name，便于在 Jaeger/Tempo 等后端按服务筛选
+    otel_service_name: str = "scrape-mcp"
 
     # ---- 阶段 0 合规（责任边界）----
     # 默认遵循目标站 robots.txt；拉取不到规则时视为允许（不因拿不到而阻断可用性）

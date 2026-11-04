@@ -58,6 +58,7 @@ def test_web_screenshot_success_writes_default_file(monkeypatch, tmp_path):
     out = _run(server.web_screenshot(URL))
     assert set(out) == {
         "ok",
+        "request_id",
         "url",
         "final_url",
         "status",
@@ -162,14 +163,14 @@ def test_web_screenshot_denied_by_compliance(monkeypatch):
 
     monkeypatch.setattr(server, "_compliance_check", denied)
     out = _run(server.web_screenshot(URL))
-    assert set(out) == {"ok", "url", "error_code", "error", "retryable"}
+    assert set(out) == {"ok", "request_id", "url", "error_code", "error", "retryable"}
     assert out["error_code"] == errors.DENIED
 
 
 def test_web_screenshot_failure_payload(monkeypatch):
     _patch(monkeypatch, _shot(ok=False, png=b"", error="Timeout: navigation timeout"))
     out = _run(server.web_screenshot(URL))
-    assert set(out) == {"ok", "url", "error_code", "error", "retryable"}
+    assert set(out) == {"ok", "request_id", "url", "error_code", "error", "retryable"}
     assert out["ok"] is False and out["error_code"] == errors.TIMEOUT
 
 

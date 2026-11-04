@@ -164,6 +164,7 @@ def test_web_search_success_payload(monkeypatch):
     out = _run(server.web_search("测试", provider="duckduckgo"))
     assert set(out) == {
         "ok",
+        "request_id",
         "query",
         "provider",
         "count",
@@ -197,7 +198,7 @@ def test_web_search_searxng_payload(monkeypatch):
 
 def test_web_search_empty_query_is_invalid():
     out = _run(server.web_search("   "))
-    assert set(out) == {"ok", "error_code", "error", "retryable"}
+    assert set(out) == {"ok", "request_id", "error_code", "error", "retryable"}
     assert out["error_code"] == errors.INVALID_ARGUMENT
 
 
@@ -218,6 +219,7 @@ def test_web_search_transport_error_payload(monkeypatch):
     out = _run(server.web_search("x", provider="duckduckgo", fallback=False))
     assert set(out) == {
         "ok",
+        "request_id",
         "query",
         "provider",
         "error_code",

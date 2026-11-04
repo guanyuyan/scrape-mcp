@@ -584,10 +584,26 @@ class Fetcher:
             l2=l2_diag,
         )
 
-    async def login(self, url: str, timeout: float | None = None, session: str = "default") -> dict:
-        """手动登录并持久化该站登录态。返回带登录结果的结构，供 MCP 工具直接透传。"""
+    async def login(
+        self,
+        url: str,
+        timeout: float | None = None,
+        session: str = "default",
+        *,
+        headless: bool = False,
+        qr_selector: str | None = None,
+        cdp_url: str | None = None,
+    ) -> dict:
+        """登录并持久化该站登录态。返回带登录结果的结构，供 MCP 工具直接透传。"""
         timeout = timeout or self._settings.login_timeout
-        return await self._get_browser().login(url, timeout, session)
+        return await self._get_browser().login(
+            url,
+            timeout,
+            session,
+            headless=headless,
+            qr_selector=qr_selector,
+            cdp_url=cdp_url,
+        )
 
     async def screenshot(self, url: str, **kwargs) -> ScreenshotOutcome:
         """渲染并截图；与 fetch 共用浏览器池、登录态与并发页配额。"""

@@ -11,6 +11,8 @@ import logging as _logging
 import sys
 from datetime import datetime, timezone
 
+from . import requestid
+
 _LOGGER_NAME = "scrape_mcp"
 _logger = _logging.getLogger(_LOGGER_NAME)
 
@@ -40,4 +42,8 @@ def configure(level: str = "WARNING") -> None:
 
 
 def log_event(event: str, *, level: int = _logging.INFO, **fields) -> None:
+    # 工具调用内统一带上 request_id，日志与载荷用同一个值，便于按 ID 串联排查
+    rid = requestid.current()
+    if rid is not None:
+        fields.setdefault("request_id", rid)
     _logger.log(level, event, extra={"fields": fields})

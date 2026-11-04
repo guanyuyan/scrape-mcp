@@ -12,9 +12,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -146,6 +149,9 @@ class BrowserRenderer:
         self._sessions = SessionStore(settings.data_dir)
         self._playwright: Any = None
         self._browser: Any = None
+        # 池里浏览器是有头还是无头：登录要求与当前模式不一致时另起临时浏览器，
+        # 避免把正在服务抓取请求的池关掉。
+        self._browser_headless: bool | None = None
         # 每站（按会话名隔离）一个 context，各带一份独立的登录态；
         # 按最近使用排序，超过 l2_max_contexts 时淘汰最久未用的那个。
         # key 带上代理：不同出口的 context 不能混用，否则请求会走错代理。
@@ -269,6 +275,15 @@ class BrowserRenderer:
             with contextlib.suppress(Exception):
                 await self._playwright.stop()
         self._playwright = self._browser = None
+        self._browser_headless = None
+
+    async def _ensure_playwright(self) -> Any:
+        """取 Playwright 驱动；延迟导入，没装 playwright 时 L1 仍然可用。"""
+        from playwright.async_api import async_playwright
+
+        if self._playwright is None:
+            self._playwright = await async_playwright().start()
+        return self._playwright
 
     async def _new_context(
         self,
@@ -278,17 +293,17 @@ class BrowserRenderer:
         headless: bool | None = None,
         proxy: str | None = None,
         mobile: bool = False,
+        browser: Any = None,
     ) -> Any:
-        # 延迟导入：没装 playwright 时 L1 仍然可用
-        from playwright.async_api import async_playwright
-
-        if self._playwright is None:
-            self._playwright = await async_playwright().start()
-        if self._browser is None:
-            self._browser = await self._launch(
-                self._playwright, headless=self._s.l2_headless if headless is None else headless
+        playwright = await self._ensure_playwright()
+        target = browser if browser is not None else self._browser
+        if target is None:
+            target = await self._launch(
+                playwright, headless=self._s.l2_headless if headless is None else headless
             )
-        version = getattr(self._browser, "version", "") or ""
+            self._browser = target
+            self._browser_headless = bool(self._s.l2_headless if headless is None else headless)
+        version = getattr(target, "version", "") or ""
         # 单请求代理优先于全局配置；两者都没有时不开代理
         server = proxy or self._s.proxy
         kwargs: dict[str, Any] = {
@@ -310,7 +325,7 @@ class BrowserRenderer:
         saved = self._sessions.load(host, session)
         if saved:
             kwargs["storage_state"] = saved
-        context = await self._browser.new_context(**kwargs)
+        context = await target.new_context(**kwargs)
         await context.add_init_script(
             _STEALTH_JS
             % {
@@ -811,9 +826,21 @@ class BrowserRenderer:
 
     # ---------- 登录（M3） ----------
 
-    async def login(self, url: str, timeout: float, session: str = "default") -> dict[str, Any]:
-        """打开带界面的浏览器手动登录，成功后可保存登录态。
+    async def login(
+        self,
+        url: str,
+        timeout: float,
+        session: str = "default",
+        *,
+        headless: bool = False,
+        qr_selector: str | None = None,
+        cdp_url: str | None = None,
+    ) -> dict[str, Any]:
+        """打开浏览器登录并把登录态落盘。
 
+        默认有头（可在窗口里手动操作）；``headless=True`` 用于无 GUI 服务器，此时
+        会把登录页（或 ``qr_selector`` 指定的二维码）截图落盘，调用方拿手机扫码/查看。
+        ``cdp_url`` 可直接连到远程浏览器（用户在那台机器上操作），无需本地 GUI。
         轮询等待"离开登录页、正文变实"，超时未登录也会把当时的 storage_state
         存下来（便于下次从这里继续）。返回结构见 login() 解析方。
         """
@@ -824,20 +851,89 @@ class BrowserRenderer:
         self._active += 1
         self._touch()
         try:
-            return await self._login_once(url, host, timeout, session, had_session, t0)
+            return await self._login_once(
+                url,
+                host,
+                timeout,
+                session,
+                had_session,
+                t0,
+                headless=headless,
+                qr_selector=qr_selector,
+                cdp_url=cdp_url,
+            )
         finally:
             self._active -= 1
 
-    async def _login_once(
-        self, url: str, host: str, timeout: float, session: str, had_session: bool, t0: float
-    ) -> dict[str, Any]:
-        # 手动登录必须能看到界面；新开一个不落缓存的 context，避免被已存登录态干扰
-        context = await self._new_context(host, session, headless=False)
-        page = await context.new_page()
+    async def _login_target(self, *, headless: bool, cdp_url: str | None) -> tuple[Any, bool]:
+        """选择登录要用的浏览器，返回 (browser, 是否临时启动需要关闭)。
+
+        池里已有同模式的浏览器就复用；模式不一致（比如抓取先以无头启动、随后要开
+        有头登录）时另起一个临时浏览器，避免关掉正在服务请求的池。
+        """
+        playwright = await self._ensure_playwright()
+        if cdp_url:
+            return await playwright.chromium.connect_over_cdp(cdp_url), False
+        if self._browser is not None and self._browser_headless == bool(headless):
+            return self._browser, False
+        return await self._launch(playwright, headless=headless), True
+
+    async def _capture_login_shot(
+        self, page: Any, host: str, session: str, qr_selector: str | None
+    ) -> tuple[str | None, str | None]:
+        """把登录页或二维码截图落到 DATA_DIR/login/；返回 (路径, 失败说明)。"""
+        root = Path(os.path.expanduser(self._s.data_dir)) / "login"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", host).strip("._-") or "unknown"
+        target = root / f"{safe}_{session}_{int(time.time() * 1000)}.png"
         try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if qr_selector:
+                with contextlib.suppress(Exception):
+                    await page.wait_for_selector(qr_selector, timeout=5000)
+                try:
+                    await page.locator(qr_selector).first.screenshot(path=str(target))
+                    return str(target), None
+                except Exception as exc:
+                    note = f"二维码选择器未命中（{qr_selector}），已回退整页截图: {exc}"
+                await page.screenshot(path=str(target), full_page=False)
+                return str(target), note
+            await page.screenshot(path=str(target), full_page=False)
+            return str(target), None
+        except Exception as exc:
+            return None, f"登录页截图失败: {type(exc).__name__}: {exc}"
+
+    async def _login_once(
+        self,
+        url: str,
+        host: str,
+        timeout: float,
+        session: str,
+        had_session: bool,
+        t0: float,
+        *,
+        headless: bool = False,
+        qr_selector: str | None = None,
+        cdp_url: str | None = None,
+    ) -> dict[str, Any]:
+        # 无界面/远程登录时用户看不到窗口：把登录页（或二维码）截图落盘，供查看或扫码
+        notes: list[str] = []
+        screenshot: str | None = None
+        browser: Any = None
+        context: Any = None
+        page: Any = None
+        owned = False
+        try:
+            browser, owned = await self._login_target(headless=headless, cdp_url=cdp_url)
+            context = await self._new_context(host, session, headless=headless, browser=browser)
+            page = await context.new_page()
             await page.goto(
                 url, wait_until="domcontentloaded", timeout=self._s.l2_navigate_timeout * 1000
             )
+
+            if headless or qr_selector:
+                screenshot, note = await self._capture_login_shot(page, host, session, qr_selector)
+                if note:
+                    notes.append(note)
 
             deadline = time.perf_counter() + timeout
             logged_in = False
@@ -849,6 +945,14 @@ class BrowserRenderer:
                 if time.perf_counter() >= deadline:
                     break
                 await page.wait_for_timeout(2000)
+
+            if not logged_in and headless:
+                # 超时前刷新一次截图：二维码过期或页面状态变化时调用方能拿到最新画面
+                refreshed, note = await self._capture_login_shot(page, host, session, qr_selector)
+                if refreshed:
+                    screenshot = refreshed
+                if note:
+                    notes.append(note)
 
             state = await context.storage_state()
             self._sessions.save(host, state, session)
@@ -868,6 +972,9 @@ class BrowserRenderer:
                 "url": page.url,
                 "logged_in": logged_in,
                 "had_session": had_session,
+                "headless": headless,
+                "screenshot": screenshot,
+                "notes": notes,
                 "elapsed_ms": _ms(t0),
             }
         except Exception as exc:
@@ -877,15 +984,22 @@ class BrowserRenderer:
                 "session": session,
                 "url": url,
                 "logged_in": False,
+                "headless": headless,
+                "screenshot": screenshot,
+                "notes": notes,
                 "error": f"{type(exc).__name__}: {exc}",
                 "elapsed_ms": _ms(t0),
             }
         finally:
-            try:
-                await page.close()
-                await context.close()
-            except Exception:
-                pass
+            if page is not None:
+                with contextlib.suppress(Exception):
+                    await page.close()
+            if context is not None:
+                with contextlib.suppress(Exception):
+                    await context.close()
+            if owned and browser is not None:
+                with contextlib.suppress(Exception):
+                    await browser.close()
 
     async def _settle(self, page: Any, status: int | None = None) -> str:
         """等 JS 渲染/挑战放行：反复取内容，一旦得到"正常页"就提前返回。

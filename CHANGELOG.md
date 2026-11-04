@@ -2,6 +2,14 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- `login` 支持无头登录：`headless=true` 时不弹窗口，把登录页截图保存到 `DATA_DIR/login/` 并在载荷返回 `screenshot` 路径；`qr_selector` 可只截二维码供手机扫码（未命中回退整页并写入 `notes`）
+- `login` 新增 `cdp_url`：连接远程浏览器（http/https/ws/wss）完成登录，适合本地无 GUI 的场景；无头登录失败时提示 `session_import` 导入 cookie
+- 可观测性：每次工具调用生成一个 12 位 `request_id`，同时写入返回载荷与 stderr JSON 日志；`web_batch` / `web_crawl` 的子任务共用外层 ID，结果缓存命中时以本次调用的 ID 为准
+- 可选 OpenTelemetry 追踪：`OTEL_ENABLED=1` + `pip install "mcp-scrape[otel]"` 后按 OTLP/HTTP 导出 `tool.<name>` / `fetch` span（含 `request_id` / `tier` / `status` / `code` / `elapsed_ms` 属性）；未安装依赖时保持关闭且不影响抓取
+
 ## [0.23.0] - 2026-11-04
 
 ### Added

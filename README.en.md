@@ -99,7 +99,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Compact output**: attribute stripping, boilerplate removal, off-site link demotion, tables to CSV (merged cells padded), fenced code blocks with language tags, `figure` images with absolute URLs plus captions. Compression typically 1%–20% (e.g. MDN 214 KB → a few hundred tokens).
 - **Honest blocking reports**: challenge pages and empty shells are never treated as content; you get `blocked` / `block_reason`.
 - **Stable error codes + diagnostics**: failures carry `error_code` and `retryable`; `debug=true` exposes tier decisions, selector hit counts and L2 interaction results.
-- **Persisted logins + named sessions**: `login` opens a visible browser and saves the session; `web_fetch` reuses it. `session="work"` isolates identities, and `session_export` / `session_import` move cookies between machines.
+- **Persisted logins + named sessions**: `login` opens a browser and saves the session; `web_fetch` reuses it. `session="work"` isolates identities, and `session_export` / `session_import` move cookies between machines. On headless servers use `headless=true` (screenshots saved for viewing or QR scanning), `qr_selector` to crop just the QR code, or `cdp_url` to drive a remote browser.
 - **Non-HTML content**: `web_fetch` reads plain text directly; DOCX/XLSX/PPTX text is extracted with the standard library (no extra dependency); with the `[pdf]` extra it extracts PDF text per page; scanned files without a text layer return `empty`, and with the `[ocr]` extra are optionally OCR'd instead of inventing content.
 - **Single-flight per URL**: concurrent requests for the same page (multiple tenants, or duplicate links inside a batch/crawl) fetch it once and share the response — less egress and fewer anti-bot triggers. Both L1 and L2 renders are coalesced. Requests with custom headers/credentials or `bypass_cache=true` may be caller-specific, so they are never merged.
 - **Two cache layers**: HTTP responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; compacted content and extraction results get their own cache so repeat calls return immediately. `bypass_cache=true` skips both layers. `web_batch` fetches a list concurrently.
@@ -309,6 +309,10 @@ curl http://127.0.0.1:8000/metrics
 
 `/metrics` adds no `prometheus_client` dependency — the text format is assembled directly. Auth matches `/stats`, but it **does not consume QPS or the daily quota**, so Prometheus can scrape it on a fixed interval; see [DEPLOYMENT.md](DEPLOYMENT.md#6-health-checks-and-observability) for a scrape config.
 
+**Request correlation**: every tool call gets a 12-character `request_id`, returned in the payload and written to the stderr JSON logs under the same field. Subtasks inside `web_batch` / `web_crawl` inherit the outer ID, so one call maps to one ID; on a result-cache hit the payload carries the ID generated for the current call rather than the original one. Quote this ID in bug reports to trace the whole chain from the logs.
+
+**Tracing (optional)**: with `SCRAPE_MCP_OTEL_ENABLED=1` and `pip install "mcp-scrape[otel]"`, each tool call produces a `tool.<name>` span and each fetch a `fetch` span (attributes `request_id` / `tier` / `status` / `code` / `elapsed_ms`), exported over OTLP/HTTP to `SCRAPE_MCP_OTEL_ENDPOINT` (defaults to `http://127.0.0.1:4318`). Off by default; without the optional dependency it logs one warning and degrades to a no-op, leaving fetching unaffected.
+
 Required: headers `MCP-Method`, `Mcp-Name`; the body's `params` must include `_meta` (`protocolVersion` + `clientCapabilities`).
 
 ## MCP client setup (Claude / Cursor / VS Code)
@@ -426,8 +430,12 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Returns `new` / `changed` / `unchanged` / `removed` counts and URL lists (up to 50 each); `first_seen` marks the first baseline
   - `check_content=true` re-fetches new/changed entries and compares body hashes (up to 20 per call), so timestamp-only changes do not count as `changed`
   - `dry_run=true` compares without writing; `reset=true` drops the old baseline; `limit` caps processed entries (hard max 5000)
-- **`login(url, timeout=180, session="default")`** → open a visible browser for a manual login and persist it
-  - Use different `session` names for multiple accounts; pass the same name to `web_fetch`
+- **`login(url, timeout=180, session="default", headless=False, qr_selector=None, cdp_url=None)`** → open a browser for a login and persist it
+  - Use a different `session` name per account; pass the same name to `web_fetch` to reuse it
+  - `headless=true`: no window on GUI-less servers; the login page is screenshotted into `DATA_DIR/login/` and the payload returns a `screenshot` path for viewing or scanning
+  - `qr_selector`: crop just the QR element for phone scanning (falls back to a full-page shot with a note when the selector misses)
+  - `cdp_url`: attach to a remote browser (e.g. Chrome on another machine) when the local host has neither GUI nor a practical way to scan
+  - Alternatively skip the browser entirely: import browser-extension cookies with `session_import`
 - **`session_list()`** → list stored sessions (`session` + `host` + `updated_at`), without cookie values
 - **`session_export(url, session="default", path=None)`** → export cookies as `{host, session, cookies}`; with `path`, also write a file
 - **`session_import(url, path, session="default", replace=False)`** → import cookies from a local file

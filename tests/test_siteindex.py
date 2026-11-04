@@ -158,6 +158,7 @@ def test_web_index_first_run_persists_baseline(monkeypatch, tmp_path):
     out = _run(server.web_index("https://a.test/"))
     assert set(out) == {
         "ok",
+        "request_id",
         "url",
         "host",
         "sitemaps",

@@ -9,6 +9,7 @@ import re
 import sys
 import time
 from contextlib import asynccontextmanager
+from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -18,7 +19,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from . import __version__, dashboard, metrics
 from .config import get_settings
 from .core import deadline as dl
-from .core import errors
+from .core import errors, requestid, tracing
 from .core.cache import ResultCache
 from .core.dataset import record_result
 from .core.fetcher import Fetcher, FetchOutcome
@@ -454,9 +455,31 @@ async def _lifespan(_app):
         if _fetcher is not None:
             await _fetcher.aclose()
             _fetcher = None
+        tracing.shutdown()
 
 
 mcp = MCPServer("scrape-mcp", lifespan=_lifespan)
+
+
+def _tool():
+    """注册 MCP 工具，并为每次调用建立 request_id 作用域。
+
+    生成的 ID 同时写进日志与返回载荷；web_batch / web_crawl 的内部子任务在同一
+    任务内 await，继承同一个作用域，因此一次调用只有一个 ID。
+    """
+
+    def decorator(fn):
+        @wraps(fn)
+        async def wrapper(*args, **kwargs):
+            with (
+                requestid.scope() as rid,
+                tracing.span(f"tool.{fn.__name__}", request_id=rid, tool=fn.__name__),
+            ):
+                return await fn(*args, **kwargs)
+
+        return mcp.tool()(wrapper)
+
+    return decorator
 
 
 @mcp.custom_route("/", methods=["GET"])
@@ -563,6 +586,10 @@ def _payload(**kwargs) -> str:
     # 失败载荷统一补 retryable，避免调用方为了一个布尔值去解析错误文本
     if kwargs.get("ok") is False and "error_code" in kwargs and "retryable" not in kwargs:
         kwargs["retryable"] = errors.is_retryable(kwargs["error_code"])
+    # 覆盖而非 setdefault：结果缓存里存的是首次请求的 ID，命中时必须以本次调用为准
+    rid = requestid.current()
+    if rid is not None:
+        kwargs["request_id"] = rid
     return json.dumps(kwargs, ensure_ascii=False, indent=None)
 
 
@@ -606,22 +633,30 @@ async def _fetch_html(
     async with _get_hostlimiter().slot(_host_of(url)):
         if dl.expired(deadline):
             return None, _deadline_payload(url, "排队等待同域配额时预算耗尽")
-        outcome: FetchOutcome = await _get_fetcher().fetch(
-            url,
-            headers=headers,
-            cookies=cookies,
-            timeout=timeout,
-            wait_for=wait_for,
-            scroll=bool(scroll),
-            click=click,
-            actions=actions,
-            bypass_cache=bypass_cache,
-            session=session,
-            deadline=deadline,
-            proxy=proxy,
-        )
+        # 每次抓取一个 span；未开启 OTEL 时 span() 是空操作，调用方无需分支
+        with tracing.span("fetch", url=url, session=session) as span:
+            outcome: FetchOutcome = await _get_fetcher().fetch(
+                url,
+                headers=headers,
+                cookies=cookies,
+                timeout=timeout,
+                wait_for=wait_for,
+                scroll=bool(scroll),
+                click=click,
+                actions=actions,
+                bypass_cache=bypass_cache,
+                session=session,
+                deadline=deadline,
+                proxy=proxy,
+            )
+            code = errors.classify_outcome(outcome)
+            if span is not None:
+                span.set_attribute("tier", outcome.tier)
+                span.set_attribute("status", int(outcome.status))
+                span.set_attribute("cached", bool(outcome.cached))
+                span.set_attribute("elapsed_ms", int(outcome.elapsed_ms))
+                span.set_attribute("code", code)
 
-    code = errors.classify_outcome(outcome)
     log_event(
         "fetch",
         url=url,
@@ -1271,7 +1306,7 @@ async def _search_once(
     return hits, {"cached": cached}
 
 
-@mcp.tool()
+@_tool()
 async def web_search(
     query: str,
     max_results: int = 10,
@@ -1444,7 +1479,7 @@ async def web_search(
     )
 
 
-@mcp.tool()
+@_tool()
 async def web_screenshot(
     url: str,
     path: str | None = None,
@@ -1703,7 +1738,7 @@ async def _sitemap_entries(
     return entries, errors_list, sitemaps
 
 
-@mcp.tool()
+@_tool()
 async def web_index(
     url: str,
     include: str | None = None,
@@ -1896,7 +1931,7 @@ async def web_index(
     )
 
 
-@mcp.tool()
+@_tool()
 async def web_map(
     url: str,
     include: str | None = None,
@@ -2087,7 +2122,7 @@ async def web_map(
     )
 
 
-@mcp.tool()
+@_tool()
 async def web_fetch(
     url: str,
     max_tokens: int = 4000,
@@ -2214,7 +2249,7 @@ async def _llm_extract(
     return result.fields, result.model
 
 
-@mcp.tool()
+@_tool()
 async def web_extract(
     url: str,
     schema: dict | None = None,
@@ -2449,7 +2484,7 @@ async def web_extract(
     return _payload(**payload)
 
 
-@mcp.tool()
+@_tool()
 async def web_batch(
     urls: list[str],
     max_tokens: int = 3000,
@@ -2674,7 +2709,7 @@ async def _crawl_job_page(url: str, request: dict) -> tuple[dict, list[str], str
         )
 
 
-@mcp.tool()
+@_tool()
 async def web_crawl(
     url: str,
     depth: int = 1,
@@ -2898,7 +2933,7 @@ async def web_crawl(
     )
 
 
-@mcp.tool()
+@_tool()
 async def web_crawl_start(
     url: str,
     depth: int = 1,
@@ -3023,7 +3058,7 @@ async def web_crawl_start(
     )
 
 
-@mcp.tool()
+@_tool()
 async def web_crawl_status(job_id: str, include_results: bool = True) -> str:
     """读取异步爬取任务的状态与部分结果；未完成的任务会自动续跑。
 
@@ -3072,7 +3107,7 @@ async def web_crawl_status(job_id: str, include_results: bool = True) -> str:
     )
 
 
-@mcp.tool()
+@_tool()
 async def web_crawl_cancel(job_id: str) -> str:
     """取消一个未完成的异步爬取任务；终态任务原样返回（幂等）。
 
@@ -3096,7 +3131,7 @@ async def web_crawl_cancel(job_id: str) -> str:
     return _payload(ok=True, job_id=job.get("job_id"), state=job.get("state"))
 
 
-@mcp.tool()
+@_tool()
 async def web_crawl_list(limit: int = 20) -> str:
     """列出最近的异步爬取任务（按更新时间倒序），不返回页面正文。
 
@@ -3147,7 +3182,7 @@ def _watch_text(html: str, url: str, selector: str | None) -> str:
     return "" if value is None else str(value)
 
 
-@mcp.tool()
+@_tool()
 async def web_watch(
     url: str,
     selector: str | None = None,
@@ -3342,7 +3377,7 @@ async def run_scheduled_task(task: dict, *, proxy: str | None = None) -> dict:
     }
 
 
-@mcp.tool()
+@_tool()
 async def web_schedule(
     action: str = "list",
     id: str | None = None,
@@ -3457,19 +3492,30 @@ async def web_schedule(
     )
 
 
-@mcp.tool()
-async def login(url: str, timeout: float = 180.0, session: str = "default") -> str:
-    """打开带界面的浏览器手动登录，并把该站登录态持久化到磁盘。
+@_tool()
+async def login(
+    url: str,
+    timeout: float = 180.0,
+    session: str = "default",
+    headless: bool = False,
+    qr_selector: str | None = None,
+    cdp_url: str | None = None,
+) -> str:
+    """打开浏览器登录，并把该站登录态持久化到磁盘。
 
-    用于 web_fetch 报告 login_required=true 的站点：浏览器会以非无头方式打开目标页，
-    请在弹出的窗口里完成登录；检测到登录成功或超时后，登录态（cookie 等）会被保存，
-    之后该站的 web_fetch 会自动带上登录态。
+    用于 web_fetch 报告 login_required=true 的站点：默认弹出可见窗口，请在里面完成登录；
+    检测到登录成功或超时后，登录态（cookie 等）会被保存，之后该站的 web_fetch 会自动带上。
 
     Args:
         url: 目标站点任一页面 URL（按域名区分登录态）。
         timeout: 等待手动登录完成的秒数，超时也会保存当前状态便于下次继续。
         session: 会话名（默认 default）。需要多账号/多身份时分别用不同名字登录，
             web_fetch 时传同一个 session 即可，互不覆盖。
+        headless: 无 GUI 服务器上设为 true：不弹窗口，把登录页截图保存到
+            ``DATA_DIR/login/``，看截图或扫码完成登录；也可改用 session_import 导入 cookie。
+        qr_selector: 登录页上二维码元素的 CSS 选择器；命中时只截二维码，便于手机扫码。
+        cdp_url: 远程浏览器 CDP 地址（http/https/ws/wss）；给出时连到该浏览器登录，
+            适合本地无 GUI 但另一台机器能开浏览器的场景。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -3479,14 +3525,53 @@ async def login(url: str, timeout: float = 180.0, session: str = "default") -> s
         )
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
+    if not isinstance(headless, bool):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="headless 必须是布尔值",
+        )
+    if qr_selector is not None and (not isinstance(qr_selector, str) or not qr_selector.strip()):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="qr_selector 必须是非空 CSS 选择器字符串",
+        )
+    if cdp_url is not None and (
+        not isinstance(cdp_url, str)
+        or not cdp_url.startswith(("http://", "https://", "ws://", "wss://"))
+    ):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_ARGUMENT,
+            error="cdp_url 需以 http:// / https:// / ws:// / wss:// 开头",
+        )
 
-    result = await _get_fetcher().login(url, timeout, session)
+    result = await _get_fetcher().login(
+        url,
+        timeout,
+        session,
+        headless=headless,
+        qr_selector=qr_selector,
+        cdp_url=cdp_url,
+    )
     result["host"] = urlparse(url).netloc.lower()
     if result.get("ok"):
         result["message"] = (
             "登录态已保存，后续 web_fetch 会自动带上"
             if result["logged_in"]
             else "未检测到登录完成，但已保存当前状态；等你登录完成后可重新调用 login 覆盖"
+        )
+        if result.get("screenshot"):
+            result["message"] += f"；登录页截图: {result['screenshot']}"
+        elif headless:
+            result["message"] += (
+                "；可传 qr_selector 只截二维码扫码，或改用 session_import 导入 cookie"
+            )
+    elif headless:
+        result["hint"] = (
+            "无界面登录失败时，可传 qr_selector 截取二维码扫码，"
+            "或用 session_import 导入本地浏览器 cookie，也可用 cdp_url 连接远程浏览器"
         )
     return _payload(**result)
 
@@ -3497,14 +3582,14 @@ def _url_host(url: str) -> str | None:
     return (urlparse(url).netloc or "").lower().split(":")[0] or None
 
 
-@mcp.tool()
+@_tool()
 async def session_list() -> str:
     """列出本地已保存的登录态（会话名 + 主机 + 更新时间），不含 cookie 内容。"""
     items = _session_store().list_sessions()
     return _payload(ok=True, total=len(items), sessions=items)
 
 
-@mcp.tool()
+@_tool()
 async def session_export(url: str, session: str = "default", path: str | None = None) -> str:
     """导出某站登录态里的 cookie，便于备份或在另一台机器上导入。
 
@@ -3549,7 +3634,7 @@ async def session_export(url: str, session: str = "default", path: str | None = 
     return _payload(**payload)
 
 
-@mcp.tool()
+@_tool()
 async def session_import(
     url: str,
     path: str,
