@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- 分布式执行（可选）：`JOB_BACKEND=redis` 把异步 crawl 任务状态与队列放到 Redis，API 实例只投递任务，`scrape-mcp worker` 消费执行，可多开横向扩容；同参数 start 仍只入队一次，取消与列表读共享状态，worker 启动会重新入队失联的 running 任务。默认 `local` 行为不变；需 `pip install "mcp-scrape[redis]"`
 - 多租户工具级权限：`HTTP_TOKENS` 每项新增可选 `tools` 白名单（省略或 `"*"` 表示全部），越权调用返回 403 `tool_forbidden` 且不执行抓取；批量请求整批拒绝，旧配置不受影响
 - 按租户用量统计：`/metrics` 新增 `scrape_mcp_tenant_tool_calls_total{tenant,tool}`，拒绝原因新增 `tool_forbidden`；`/stats` 新增 `tenants`（请求数、工具分布、拒绝原因与剩余配额）
 - `web_index` 新增 `content_diff`：对 `changed` 条目回抓正文，与 `web_watch` 共用同一份快照并返回 `changes`（逐 URL 的 `changed` / `first_seen` / `added_lines` / `removed_lines` / 截断 `diff`）；快照写回后单页 `web_watch` 可直接接着对比，`dry_run=true` 不写快照。默认关闭，原有载荷键集不变

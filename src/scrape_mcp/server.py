@@ -125,13 +125,30 @@ def _get_hostlimiter() -> HostLimiter:
 
 
 def _get_jobs() -> CrawlJobManager:
-    """异步爬取任务管理器；状态目录随每次调用的 DATA_DIR 解析（便于测试隔离）。"""
+    """异步爬取任务管理器；状态目录随每次调用的 DATA_DIR 解析（便于测试隔离）。
+
+    ``JOB_BACKEND=redis`` 时改用共享存储，本进程只投递任务，由 worker 消费；
+    默认 ``local`` 保持原有的单进程 + 本地 JSON 行为。
+    """
     global _jobs
     if _jobs is None:
-        _jobs = CrawlJobManager(
-            lambda: JobStore(Path(get_settings().data_dir) / "jobs"),
-            _crawl_job_page,
-        )
+        settings = get_settings()
+        backend = getattr(settings, "job_backend", "local")
+        if backend == "redis":
+            from .core.jobstore_redis import RedisJobStore, create_client
+
+            store = RedisJobStore(
+                create_client(settings.redis_url), settings.redis_prefix, settings.job_ttl
+            )
+            _jobs = CrawlJobManager(lambda: store, _crawl_job_page, enqueue=store.enqueue)
+        elif backend == "local":
+            # 工厂内重新读 settings：DATA_DIR 可在运行期变化（测试按用例隔离）
+            _jobs = CrawlJobManager(
+                lambda: JobStore(Path(get_settings().data_dir) / "jobs"),
+                _crawl_job_page,
+            )
+        else:
+            raise RuntimeError(f"SCRAPE_MCP_JOB_BACKEND 只支持 local / redis，当前为 {backend!r}")
     return _jobs
 
 
@@ -3861,6 +3878,38 @@ def _run_http(settings, port: int, policies: list[TokenPolicy]) -> None:  # prag
     )
 
 
+def _run_worker() -> None:  # pragma: no cover - 需要真实 Redis 实例
+    """独立 worker：从 Redis 队列取异步 crawl 任务并执行，可多进程横向扩容。"""
+    settings = get_settings()
+    if settings.job_backend != "redis":
+        raise SystemExit("worker 仅在 SCRAPE_MCP_JOB_BACKEND=redis 时可用")
+    from .core.jobstore_redis import RedisJobStore, create_client
+
+    client = create_client(settings.redis_url)
+    try:
+        client.ping()
+    except Exception as exc:
+        raise SystemExit(f"无法连接 Redis（{settings.redis_url}）：{exc}") from exc
+    store = RedisJobStore(client, settings.redis_prefix, settings.job_ttl)
+    recovered = store.recover_stale(settings.job_stale_after)
+    if recovered:
+        log_event("worker.recovered", count=recovered)
+    manager = CrawlJobManager(lambda: store, _crawl_job_page)
+
+    async def loop() -> None:
+        while True:
+            job_id = await asyncio.to_thread(store.dequeue, settings.worker_poll_timeout)
+            if not job_id:
+                continue
+            log_event("worker.job", job_id=job_id)
+            await manager.run(job_id)
+
+    try:
+        asyncio.run(loop())
+    except KeyboardInterrupt:
+        return
+
+
 def main(argv: list[str] | None = None) -> None:
     """CLI 入口。
 
@@ -3870,6 +3919,9 @@ def main(argv: list[str] | None = None) -> None:
     """
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] == "worker":
+        _run_worker()
+        return
     # 子命令（init / schema / session / recipe / dataset / schedule）走独立模块，不启动服务；
     # 其余参数保持原有零配置行为
     if argv and argv[0] in ("init", "schema", "session", "recipe", "dataset", "schedule"):
@@ -3887,13 +3939,15 @@ def main(argv: list[str] | None = None) -> None:
             "      scrape-mcp session <list|import> [...]\n"
             "      scrape-mcp recipe <list|validate> [...]\n"
             "      scrape-mcp dataset <stats|to-parquet> [...]\n"
-            "      scrape-mcp schedule <list|add|pause|resume|delete|run|daemon> [...]\n\n"
+            "      scrape-mcp schedule <list|add|pause|resume|delete|run|daemon> [...]\n"
+            "      scrape-mcp worker\n\n"
             "零配置默认作为 stdio MCP 服务运行，供 Claude/Cursor 等客户端接管。\n"
             "init 生成客户端配置（默认只预览 diff），schema 导出工具定义，\n"
             "session 查看或导入登录态（容器内无法开浏览器时用 import 导入 cookies），\n"
             "recipe 列出或校验站点 recipe（放进 RECIPES_DIR 即自动生效），\n"
             "dataset 查看/导出抓取数据集（设置 SCRAPE_MCP_DATASET 后自动累积 JSONL），\n"
-            "schedule 管理定时监控任务（daemon 按间隔执行 web_watch / web_index 并推送 webhook）。\n"
+            "schedule 管理定时监控任务（daemon 按间隔执行 web_watch / web_index 并推送 webhook），\n"
+            "worker 消费 Redis 队列中的异步 crawl 任务（仅 JOB_BACKEND=redis 时可用，可多开）。\n"
             "如需 HTTP 直连（Postman/curl），加 --transport streamable-http [--port 8000]；\n"
             "绑定非回环地址时必须设置 SCRAPE_MCP_HTTP_TOKEN。\n"
             "配置详见 .env / SCRAPE_MCP_* 环境变量。"
@@ -3912,6 +3966,9 @@ def main(argv: list[str] | None = None) -> None:
 
     transport = ("--transport" in argv and argv[argv.index("--transport") + 1]) or "stdio"
     settings = get_settings()
+    backend = getattr(settings, "job_backend", "local")
+    if backend not in ("local", "redis"):
+        raise SystemExit(f"SCRAPE_MCP_JOB_BACKEND 只支持 local / redis，当前为 {backend!r}")
     # 日志只写 stderr：stdio 模式下 stdout 是 MCP 协议通道
     configure(settings.log_level)
     # CLI 优先级高于 env/.env，便于一键切 HTTP

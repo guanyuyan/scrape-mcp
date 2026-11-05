@@ -217,6 +217,11 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `HTTP_TOKENS_FILE` | — | Path to the same JSON format, handy for keeping tokens on a volume (exclusive with `HTTP_TOKENS`) |
 | `HTTP_QPS` | `5` | Per-token request rate (token bucket, allows an equal burst); also the default for tenants that omit `qps`; `0` disables |
 | `HTTP_DAILY_QUOTA` | `10000` | Per-token daily request quota (UTC day, resets at midnight); also the default for tenants that omit `daily_quota`; `0` disables |
+| `JOB_BACKEND` | `local` | Async crawl backend: `local` (JSON on disk) or `redis` (shared state + queue, requires `mcp-scrape[redis]`) |
+| `REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis connection URL when `JOB_BACKEND=redis` |
+| `REDIS_PREFIX` | `scrape_mcp` | Redis key prefix, so several environments can share one instance |
+| `JOB_TTL` | `604800` | How long job state stays in Redis (seconds); `0` disables expiry |
+| `JOB_STALE_AFTER` | `600` | On worker start, `running` jobs untouched for this many seconds are requeued |
 
 When `PROXY_POOL` is set it takes precedence over `PROXY`: exits are assigned round-robin, and a host keeps the same IP for `PROXY_POOL_STICKY_TTL` so sessions and risk scoring stay stable. An exit that fails `PROXY_POOL_FAIL_THRESHOLD` times in a row (transport error, or still blocked/rate-limited after the whole chain) is cooled down for `PROXY_POOL_COOLDOWN` seconds; if every exit is cooling down, the earliest one is used instead of failing the request. A per-call `proxy` argument always wins and is not counted by the pool.
 
@@ -711,6 +716,25 @@ scrape-mcp schedule daemon --once # run currently due tasks only (cron-friendly)
 - To reuse system cron, put `schedule daemon --once` in crontab instead of keeping a process alive.
 - Task state lives in `DATA_DIR/schedule/tasks.json`; snapshots stay in `DATA_DIR/watch/` and `DATA_DIR/index/`, so deleting a task never loses them.
 
+## Distributed execution (optional)
+
+The default stays single-process with local JSON. To scale out, put async crawl jobs on a Redis queue: API instances only enqueue, `scrape-mcp worker` processes execute, and job state is shared across all instances.
+
+```bash
+pip install 'mcp-scrape[redis]'
+export SCRAPE_MCP_JOB_BACKEND=redis
+export SCRAPE_MCP_REDIS_URL=redis://127.0.0.1:6379/0
+
+scrape-mcp --transport streamable-http --port 8000   # API instances, run as many as you need
+scrape-mcp worker                                    # worker instances, run as many as you need
+```
+
+- Job state lives in `<PREFIX>:job:<id>` (`JOB_TTL` keeps it for 7 days by default) and the pending queue is `<PREFIX>:jobs:queue`; `web_crawl_list` reads `<PREFIX>:jobs:index` ordered by update time.
+- Repeated `web_crawl_start` with the same arguments is still idempotent and only enqueues once; `status` / `cancel` / `list` read the same shared state. A cancel written by an API instance is seen by the worker before the next page and stops the job.
+- On startup a worker requeues `running` jobs untouched for more than `JOB_STALE_AFTER` seconds, so a crashed process needs no manual cleanup; a healthy job refreshes its timestamp on every page and is never stolen.
+- A missing optional dependency or unreachable Redis fails fast with a clear message; `JOB_BACKEND=local` behaves exactly as before.
+- Note: only job state and the queue are shared today. HTTP token QPS / daily quota counters still live in each process, so adjust thresholds when running multiple instances.
+
 ## Python SDK
 
 Use the same implementation without an MCP client (identical arguments, payloads and error codes):
@@ -899,6 +923,7 @@ src/scrape_mcp
 │   ├── cache.py       # HTTP response cache + content/extraction result cache
 │   ├── stats.py       # In-process counters (source for /stats)
 │   ├── jobs.py        # Async crawl jobs (state persistence, progress, resume, cancel)
+│   ├── jobstore_redis.py  # Optional Redis backend (shared job state + queue for workers)
 │   ├── watch.py       # Change detection (body snapshot + diff summary)
 │   ├── schedule.py    # Scheduled tasks (state, due calculation, pause/resume)
 │   ├── errors.py      # Stable error codes

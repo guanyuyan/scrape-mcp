@@ -140,6 +140,20 @@ class Settings(BaseSettings):
     # login 工具默认打开带界面的窗口供手动登录；确认后可按需切回无头
     login_timeout: float = 180.0
 
+    # ---- P2 分布式执行（可选）----
+    # 异步 crawl 任务后端：local（默认，JSON 落 DATA_DIR）/ redis（任务状态与队列跨进程共享，
+    # 需安装可选依赖 mcp-scrape[redis] 并运行 scrape-mcp worker）
+    job_backend: str = "local"
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    # Redis 键前缀，便于多套环境共用实例
+    redis_prefix: str = "scrape_mcp"
+    # 任务状态在 Redis 中的保留时间（秒）；0 表示不设过期
+    job_ttl: float = 7 * 86400
+    # worker 拉队列的阻塞等待上限（秒）
+    worker_poll_timeout: float = 1.0
+    # worker 重启后，running 状态超过该时长（秒）的任务视为已失联并重新入队
+    job_stale_after: float = 600.0
+
     # ---- 搜索 ----
     # web_search 后端：duckduckgo（HTML 端点，无需 API key）/ searxng（自托管 JSON API）/
     # brave / tavily（商业 API，需要 key）

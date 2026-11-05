@@ -24,7 +24,15 @@ _JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _TERMINAL = ("done", "failed", "cancelled")
 
 PageFetcher = Callable[[str, dict[str, Any]], Awaitable[tuple[dict, list[str], str | None]]]
-StoreFactory = Callable[[], "JobStore"]
+# 本地 JobStore 与 RedisJobStore 同形；后者在 core/jobstore_redis.py 中按需引入
+StoreFactory = Callable[[], Any]
+# 分布式模式下的入队函数；为 None 表示本进程直接跑协程（默认本地模式）
+Enqueue = Callable[[str], None]
+
+
+def valid_job_id(job_id: str) -> bool:
+    """任务 ID 只允许字母数字与下划线/连字符，避免被拼进路径或 Redis 键。"""
+    return bool(_JOB_ID_RE.match(job_id or ""))
 
 
 def job_id_for(request: dict[str, Any]) -> str:
@@ -40,7 +48,7 @@ class JobStore:
         self._path = Path(os.path.expanduser(str(root))).resolve()
 
     def _file(self, job_id: str) -> Path:
-        if not _JOB_ID_RE.match(job_id or ""):
+        if not valid_job_id(job_id):
             raise ValueError(f"非法任务 ID: {job_id}")
         return self._path / f"{job_id}.json"
 
@@ -88,15 +96,26 @@ class JobStore:
 
 
 class CrawlJobManager:
-    """在后台协程里推进任务；进程重启后由 status 重新挂起未完成的任务。"""
+    """在后台协程里推进任务；进程重启后由 status 重新挂起未完成的任务。
 
-    def __init__(self, store_factory: StoreFactory, fetch_page: PageFetcher) -> None:
+    传入 ``enqueue`` 时切换为生产端模式：任务只落库并投递到队列，由独立的
+    ``scrape-mcp worker`` 进程消费，本进程不再起协程（供多实例横向扩容）。
+    """
+
+    def __init__(
+        self,
+        store_factory: StoreFactory,
+        fetch_page: PageFetcher,
+        *,
+        enqueue: Enqueue | None = None,
+    ) -> None:
         self._store_factory = store_factory
         self._fetch_page = fetch_page
+        self._enqueue = enqueue
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._cancelled: set[str] = set()
 
-    def _store(self) -> JobStore:
+    def _store(self) -> Any:
         return self._store_factory()
 
     # ---------- 对外操作 ----------
@@ -129,15 +148,22 @@ class CrawlJobManager:
         if isinstance(deadline_ms, int) and deadline_ms > 0:
             job["deadline_epoch"] = now + deadline_ms / 1000
         store.save(job)
-        self._ensure_task(job_id, job)
+        if self._enqueue is not None:
+            self._enqueue(job_id)
+        else:
+            self._ensure_task(job_id, job)
         return job, False
 
     def status(self, job_id: str) -> dict[str, Any] | None:
-        """读取状态；未完成但本进程没有协程时自动续跑（进程重启恢复）。"""
+        """读取状态；本地模式下未完成且无协程时自动续跑（进程重启恢复）。
+
+        分布式模式下不本地续跑：任务已交给 worker，API 进程只读状态，
+        否则多个 API 实例会各自跑一遍同一任务。
+        """
         job = self._store().load(job_id)
         if job is None:
             return None
-        if job.get("state") in ("queued", "running"):
+        if self._enqueue is None and job.get("state") in ("queued", "running"):
             self._ensure_task(job_id, job)
         return job
 
@@ -184,12 +210,13 @@ class CrawlJobManager:
         task = self._tasks.get(job_id)
         if task is not None and not task.done():
             return
-        self._tasks[job_id] = asyncio.create_task(self._run(job_id))
+        self._tasks[job_id] = asyncio.create_task(self.run(job_id))
 
-    async def _run(self, job_id: str) -> None:
+    async def run(self, job_id: str) -> None:
+        """推进一个任务到终态；worker 也可直接调用（不经过本地协程表）。"""
         store = self._store()
         job = store.load(job_id)
-        if job is None:
+        if job is None or job.get("state") in _TERMINAL:
             return
         request = job.get("request") or {}
         paginate = bool(request.get("next_selector"))
@@ -206,6 +233,10 @@ class CrawlJobManager:
         visited: set[str] = set(job.get("visited") or [])
         try:
             while job.get("queue") and len(job.get("results") or []) < cap:
+                # 分布式模式下取消由另一个进程写入，必须每页都看共享状态
+                fresh = store.load(job_id)
+                if fresh is not None and fresh.get("state") == "cancelled":
+                    return
                 if job_id in self._cancelled or self._deadline_hit(job):
                     break
                 item = job["queue"].pop(0)

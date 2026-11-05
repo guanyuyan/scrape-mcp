@@ -223,6 +223,11 @@ cp .env.example .env    # 生成配置模板
 | `HTTP_TOKENS_FILE` | — | 同格式 JSON 文件路径；适合把令牌放卷上保管（与 `HTTP_TOKENS` 互斥） |
 | `HTTP_QPS` | `5` | 每秒请求上限（令牌桶，允许同量突发）；多令牌时作为省略 `qps` 的租户默认值；`0` 不限 |
 | `HTTP_DAILY_QUOTA` | `10000` | 每日请求配额（UTC 自然日，跨日清零）；多令牌时作为省略 `daily_quota` 的租户默认值；`0` 不限 |
+| `JOB_BACKEND` | `local` | 异步 crawl 任务后端：`local`（本地 JSON）或 `redis`（共享状态 + 队列，需 `mcp-scrape[redis]`） |
+| `REDIS_URL` | `redis://127.0.0.1:6379/0` | `JOB_BACKEND=redis` 时的连接地址 |
+| `REDIS_PREFIX` | `scrape_mcp` | Redis 键前缀，便于多套环境共用实例 |
+| `JOB_TTL` | `604800` | 任务状态在 Redis 中的保留秒数；`0` 不设过期 |
+| `JOB_STALE_AFTER` | `600` | worker 重启后，running 超过该秒数未更新才视为失联并重新入队 |
 
 代理池非空时优先于 `PROXY`：出口按轮询分配，同一主机在 `PROXY_POOL_STICKY_TTL` 内固定走同一个 IP（登录态与风控都更稳）；同一出口连续失败（传输异常，或整条链路走完仍被限流/风控拦截）达 `PROXY_POOL_FAIL_THRESHOLD` 次后进入 `PROXY_POOL_COOLDOWN` 秒冷却，冷却期内不再分配；整池都在冷却时回退到最早解冻的那个，而不是直接报错。单请求 `proxy` 参数优先级最高，且不参与池的失败计数。
 
@@ -721,6 +726,25 @@ scrape-mcp schedule daemon --once # 只跑当前到期任务（适合系统 cron
 - 想复用系统 cron 时，把 `schedule daemon --once` 放进 crontab 即可，不必常驻进程。
 - 任务状态在 `DATA_DIR/schedule/tasks.json`；页面快照仍在 `DATA_DIR/watch/`、`DATA_DIR/index/`，删除任务不会丢快照。
 
+## 分布式执行（可选）
+
+默认仍是单进程 + 本地 JSON。需要多实例横向扩容时，把异步 crawl 任务放进 Redis 队列：API 进程只投递任务，`scrape-mcp worker` 进程消费并推进，状态对所有实例共享。
+
+```bash
+pip install 'mcp-scrape[redis]'
+export SCRAPE_MCP_JOB_BACKEND=redis
+export SCRAPE_MCP_REDIS_URL=redis://127.0.0.1:6379/0
+
+scrape-mcp --transport streamable-http --port 8000   # API 实例，可起多个
+scrape-mcp worker                                    # 执行实例，可起多个
+```
+
+- 任务状态存 `<PREFIX>:job:<id>`（`JOB_TTL` 默认保留 7 天），待执行队列为 `<PREFIX>:jobs:queue`；`web_crawl_list` 通过 `<PREFIX>:jobs:index` 按更新时间倒序读取。
+- 同参数重复 `web_crawl_start` 仍然幂等，只入队一次；`status` / `cancel` / `list` 读同一份共享状态。取消由 API 进程写入，worker 在下一页开始前读到后停止。
+- worker 启动时会把 `running` 且超过 `JOB_STALE_AFTER` 秒未更新的任务重新入队，进程崩溃后不必手动清理；正常推进的任务每页都会刷新时间戳，不会被误抢。
+- 未安装可选依赖或连不上 Redis 时，启动会给出明确错误；`JOB_BACKEND=local` 的行为与之前完全一致。
+- 注意：当前共享的只有任务状态与队列。HTTP 令牌的 QPS / 日配额计数仍在各进程内存中，多实例部署时需按实例数调整阈值。
+
 ## Python SDK
 
 不接 MCP 也能直接用同一套实现（参数、返回值、错误码与工具完全一致）：
@@ -958,6 +982,7 @@ src/scrape_mcp
 │   ├── cache.py       # HTTP 响应缓存 + 正文/抽取结果缓存
 │   ├── stats.py       # 进程内计数（/stats 端点数据源）
 │   ├── jobs.py        # 异步爬取任务（状态落盘、进度、恢复与取消）
+│   ├── jobstore_redis.py  # 可选 Redis 后端（共享任务状态与队列，供 worker 横向扩容）
 │   ├── watch.py       # 变更检测（正文快照 + diff 摘要）
 │   ├── schedule.py    # 定时任务（状态落盘、到期计算、启停）
 │   ├── errors.py      # 统一错误码
