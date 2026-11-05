@@ -18,13 +18,21 @@ from .core.stats import get_stats
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 # HTTP 层拒绝原因：unauthorized（无/错令牌）、forbidden（无令牌时的非回环来源）、
-# rate_limited（QPS 超限）、quota_exceeded（日配额耗尽）
-_REJECTION_REASONS = ("unauthorized", "forbidden", "rate_limited", "quota_exceeded")
+# tool_forbidden（工具不在租户白名单）、rate_limited（QPS 超限）、quota_exceeded（日配额耗尽）
+_REJECTION_REASONS = (
+    "unauthorized",
+    "forbidden",
+    "tool_forbidden",
+    "rate_limited",
+    "quota_exceeded",
+)
 _rejections: Counter[str] = Counter()
 
-# 多令牌时按租户统计：只记计入配额的已通过请求，以及带租户归属的 429
+# 多令牌时按租户统计：只记计入配额的已通过请求，以及带租户归属的 429 / 403
 _tenant_requests: Counter[str] = Counter()
 _tenant_rejections: Counter[tuple[str, str]] = Counter()
+# 通过权限与配额的 tools/call 按 (租户, 工具) 计数，用于按租户看工具分布
+_tenant_tool_calls: Counter[tuple[str, str]] = Counter()
 
 # 抓取耗时直方图（秒）：桶边界与 `/stats` 的毫秒分桶一致，累计值在渲染时求和
 _LATENCY_BUCKETS: tuple[float, ...] = (0.1, 0.3, 1.0, 3.0, 10.0)
@@ -66,8 +74,42 @@ def record_tenant_request(tenant: str) -> None:
 
 
 def record_tenant_rejection(tenant: str, reason: str) -> None:
-    """记一次带租户归属的拒绝（目前只有 429 配额类）。"""
+    """记一次带租户归属的拒绝（429 配额类与 403 工具白名单）。"""
     _tenant_rejections[(tenant, reason or "unknown")] += 1
+
+
+def record_tenant_tool(tenant: str, tool: str) -> None:
+    """记一次已通过权限与配额的 tools/call，用于按租户统计工具用量。"""
+    _tenant_tool_calls[(tenant, tool or "unknown")] += 1
+
+
+def tenant_snapshot() -> dict[str, dict[str, object]]:
+    """按租户汇总的用量：请求数、工具分布、拒绝原因与当日剩余配额（`/stats` 用）。"""
+    names = (
+        set(_tenant_requests)
+        | {tenant for tenant, _ in _tenant_rejections}
+        | {tenant for tenant, _ in _tenant_tool_calls}
+    )
+    quotas = _tenant_quota_provider() if _tenant_quota_provider is not None else {}
+    snapshot: dict[str, dict[str, object]] = {}
+    for name in sorted(names):
+        tools = {
+            tool: count for (tenant, tool), count in _tenant_tool_calls.items() if tenant == name
+        }
+        reasons = {
+            reason: count
+            for (tenant, reason), count in _tenant_rejections.items()
+            if tenant == name
+        }
+        item: dict[str, object] = {
+            "requests": int(_tenant_requests[name]),
+            "tool_calls": dict(sorted(tools.items())),
+            "rejections": dict(sorted(reasons.items())),
+        }
+        if name in quotas:
+            item["quota_remaining"] = int(quotas[name])
+        snapshot[name] = item
+    return snapshot
 
 
 def reset() -> None:
@@ -76,6 +118,7 @@ def reset() -> None:
     _rejections.clear()
     _tenant_requests.clear()
     _tenant_rejections.clear()
+    _tenant_tool_calls.clear()
     _latency_buckets.clear()
     _latency_sum_ms.clear()
     _latency_count.clear()
@@ -226,7 +269,8 @@ def render(l2: dict[str, int] | None = None, proxy: dict[str, int] | None = None
         lines,
         "scrape_mcp_http_rejections_total",
         "counter",
-        "鉴权与限流拒绝次数（unauthorized / forbidden / rate_limited / quota_exceeded）",
+        "鉴权与限流拒绝次数（unauthorized / forbidden / tool_forbidden / rate_limited /"
+        " quota_exceeded）",
         dict.fromkeys(_REJECTION_REASONS, 0) | dict(_rejections),
         "reason",
     )
@@ -240,7 +284,8 @@ def render(l2: dict[str, int] | None = None, proxy: dict[str, int] | None = None
     )
     lines.extend(
         [
-            "# HELP scrape_mcp_tenant_rejections_total 按租户统计的 429 拒绝次数",
+            "# HELP scrape_mcp_tenant_rejections_total 按租户统计的拒绝次数"
+            "（429 限流/配额与 403 工具白名单）",
             "# TYPE scrape_mcp_tenant_rejections_total counter",
         ]
     )
@@ -248,6 +293,17 @@ def render(l2: dict[str, int] | None = None, proxy: dict[str, int] | None = None
         lines.append(
             f'scrape_mcp_tenant_rejections_total{{tenant="{_escape(tenant)}",'
             f'reason="{_escape(reason)}"}} {value}'
+        )
+    lines.extend(
+        [
+            "# HELP scrape_mcp_tenant_tool_calls_total 按租户与工具统计的已执行调用次数",
+            "# TYPE scrape_mcp_tenant_tool_calls_total counter",
+        ]
+    )
+    for (tenant, tool), value in sorted(_tenant_tool_calls.items()):
+        lines.append(
+            f'scrape_mcp_tenant_tool_calls_total{{tenant="{_escape(tenant)}",'
+            f'tool="{_escape(tool)}"}} {value}'
         )
 
     quotas = _tenant_quota_provider() if _tenant_quota_provider is not None else {}

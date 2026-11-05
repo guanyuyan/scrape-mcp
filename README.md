@@ -219,7 +219,7 @@ cp .env.example .env    # 生成配置模板
 | `DENIED_HOSTS` | — | 主机黑名单（逗号分隔），优先于白名单 |
 | `MAX_QPS` | `10` | 全网抓取限流（每秒请求数）；`0` 不限速 |
 | `HTTP_TOKEN` | — | HTTP 模式访问令牌；设置后除 `/healthz` 与看板空壳 `/` 外都需 Bearer，绑定非回环地址时必填（与多令牌互斥） |
-| `HTTP_TOKENS` | — | 多令牌 JSON：`[{"name","token","qps","daily_quota"}]`，每个租户独立配额；与 `HTTP_TOKEN` 互斥 |
+| `HTTP_TOKENS` | — | 多令牌 JSON：`[{"name","token","qps","daily_quota","tools"}]`，每个租户独立配额与可选工具白名单；与 `HTTP_TOKEN` 互斥 |
 | `HTTP_TOKENS_FILE` | — | 同格式 JSON 文件路径；适合把令牌放卷上保管（与 `HTTP_TOKENS` 互斥） |
 | `HTTP_QPS` | `5` | 每秒请求上限（令牌桶，允许同量突发）；多令牌时作为省略 `qps` 的租户默认值；`0` 不限 |
 | `HTTP_DAILY_QUOTA` | `10000` | 每日请求配额（UTC 自然日，跨日清零）；多令牌时作为省略 `daily_quota` 的租户默认值；`0` 不限 |
@@ -254,14 +254,15 @@ curl -H "Authorization: Bearer $env:SCRAPE_MCP_HTTP_TOKEN" http://127.0.0.1:8000
 ```json
 [
   {"name": "team-a", "token": "<随机串>", "qps": 2, "daily_quota": 2000},
-  {"name": "ci", "token": "<随机串>"}
+  {"name": "ci", "token": "<随机串>", "tools": ["web_fetch", "web_search", "web_extract"]}
 ]
 ```
 
 - `qps` / `daily_quota` 省略时继承全局 `HTTP_QPS` / `HTTP_DAILY_QUOTA`，写 `0` 表示该租户不限
-- 租户名与令牌都必须唯一；配置非法（JSON 错误、缺 `name`/`token`、重复）会在启动时报错退出
+- `tools` 可选：只允许调用列出的工具，省略或写 `"*"` 表示全部放行；调用白名单外的工具返回 403（`error=tool_forbidden`，并带 `tool` 字段），不会执行任何抓取；批量请求中只要有一个工具越权就整批拒绝
+- 租户名与令牌都必须唯一；配置非法（JSON 错误、缺 `name`/`token`、重复、`tools` 非法）会在启动时报错退出
 - 与单个 `HTTP_TOKEN`、以及 `HTTP_TOKENS` 与 `HTTP_TOKENS_FILE` 之间均互斥，同时设置会拒绝启动
-- 每个租户在 `/metrics` 有独立的 `scrape_mcp_tenant_requests_total{tenant}` 与 `scrape_mcp_tenant_rejections_total{tenant,reason}`；429 响应不区分租户，不泄露其它调用方信息
+- 每个租户在 `/metrics` 有独立的 `scrape_mcp_tenant_requests_total{tenant}`、`scrape_mcp_tenant_rejections_total{tenant,reason}` 与 `scrape_mcp_tenant_tool_calls_total{tenant,tool}`；429/403 响应不区分其它租户，不泄露其它调用方信息
 
 看板：`GET /` 是内置运行看板（单文件 HTML，无外部依赖、无 CDN），打开即见请求量、L1/L2 分布、耗时 p50/p95/p99 与分桶、结果码、正文类型，以及 L2 页位与代理池占用，每 5 秒自动刷新。
 
@@ -290,6 +291,8 @@ curl http://127.0.0.1:8000/stats
 
 `by_tier` 是实际生效的层级分布，`by_code` 复用工具返回的错误码（成功为 `ok`），`cache_hit_rate` 是结果缓存命中数 ÷ 总请求数。统计只记计数与字节数，不记 URL、不记页面内容，进程重启后归零。
 
+多令牌模式下 `/stats` 还带 `tenants`：按租户的 `requests`、`tool_calls`（工具分布）、`rejections`（拒绝原因）与 `quota_remaining`（仅设置了日配额的租户）；未配置令牌时为空对象。
+
 指标：`GET /metrics` 输出 Prometheus 文本格式（`version=0.0.4`），访问限制与 `/stats` 完全相同，同样不含 URL 与页面内容：
 
 ```bash
@@ -309,9 +312,10 @@ curl http://127.0.0.1:8000/metrics
 | `scrape_mcp_fetch_duration_seconds` | histogram | 抓取耗时分布（按层级，单位秒；桶 `0.1`/`0.3`/`1`/`3`/`10`/`+Inf`），可直接算 p95 与平均耗时 |
 | `scrape_mcp_result_cache_hits_total` / `scrape_mcp_http_cache_hits_total` | counter | 两层缓存命中次数 |
 | `scrape_mcp_tokens_returned_total` / `scrape_mcp_bytes_in_total` | counter | 返回 token 与入站字节累计 |
-| `scrape_mcp_http_rejections_total{reason}` | counter | HTTP 拒绝次数：`unauthorized` / `forbidden` / `rate_limited` / `quota_exceeded` |
+| `scrape_mcp_http_rejections_total{reason}` | counter | HTTP 拒绝次数：`unauthorized` / `forbidden` / `tool_forbidden` / `rate_limited` / `quota_exceeded` |
 | `scrape_mcp_tenant_requests_total{tenant}` | counter | 按租户统计的已通过请求数（只含计入配额的请求，`/healthz`、`/metrics` 不计） |
-| `scrape_mcp_tenant_rejections_total{tenant,reason}` | counter | 按租户统计的 429 拒绝（`rate_limited` / `quota_exceeded`） |
+| `scrape_mcp_tenant_rejections_total{tenant,reason}` | counter | 按租户统计的拒绝：429 限流/配额与 403 工具白名单（`rate_limited` / `quota_exceeded` / `tool_forbidden`） |
+| `scrape_mcp_tenant_tool_calls_total{tenant,tool}` | counter | 按租户与工具统计的已执行调用次数（通过权限与配额的 `tools/call`） |
 | `scrape_mcp_tenant_quota_remaining{tenant}` | gauge | 租户当日剩余配额（只输出设置了 `daily_quota` 的租户，可用来做余量告警） |
 | `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_queued_pages` / `scrape_mcp_l2_contexts` | gauge | 当前在途 L2 渲染页数 / 排队等待页位的请求数 / 常驻浏览器上下文数 |
 | `scrape_mcp_l2_browser_running` / `scrape_mcp_l2_max_pages` / `scrape_mcp_l2_max_contexts` | gauge | 浏览器是否运行、并发页与常驻 context 上限 |

@@ -561,7 +561,10 @@ async def stats_endpoint(request) -> JSONResponse:
     denied = _loopback_only(request)
     if denied is not None:
         return denied
-    return JSONResponse(get_stats().snapshot())
+    snapshot = get_stats().snapshot()
+    # 多令牌模式下附带按租户的请求数、工具分布与拒绝原因；未配置令牌时为空对象
+    snapshot["tenants"] = metrics.tenant_snapshot()
+    return JSONResponse(snapshot)
 
 
 def _l2_snapshot() -> dict[str, int]:

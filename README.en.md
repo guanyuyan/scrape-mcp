@@ -213,7 +213,7 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `DENIED_HOSTS` | — | Comma-separated denylist, takes precedence over the allowlist |
 | `MAX_QPS` | `10` | Global request rate limit (requests/second); `0` disables |
 | `HTTP_TOKEN` | — | HTTP access token; when set, all endpoints except `/healthz` and the dashboard shell `/` require Bearer auth, and it is mandatory for non-loopback binds (mutually exclusive with multi-token) |
-| `HTTP_TOKENS` | — | Multi-token JSON: `[{"name","token","qps","daily_quota"}]`, each tenant gets its own quota; exclusive with `HTTP_TOKEN` |
+| `HTTP_TOKENS` | — | Multi-token JSON: `[{"name","token","qps","daily_quota","tools"}]`, each tenant gets its own quota and optional tool whitelist; exclusive with `HTTP_TOKEN` |
 | `HTTP_TOKENS_FILE` | — | Path to the same JSON format, handy for keeping tokens on a volume (exclusive with `HTTP_TOKENS`) |
 | `HTTP_QPS` | `5` | Per-token request rate (token bucket, allows an equal burst); also the default for tenants that omit `qps`; `0` disables |
 | `HTTP_DAILY_QUOTA` | `10000` | Per-token daily request quota (UTC day, resets at midnight); also the default for tenants that omit `daily_quota`; `0` disables |
@@ -248,14 +248,15 @@ Without a token the server only binds to `127.0.0.1` / `localhost` / `::1`; bind
 ```json
 [
   {"name": "team-a", "token": "<random>", "qps": 2, "daily_quota": 2000},
-  {"name": "ci", "token": "<random>"}
+  {"name": "ci", "token": "<random>", "tools": ["web_fetch", "web_search", "web_extract"]}
 ]
 ```
 
 - Omitted `qps` / `daily_quota` inherit `HTTP_QPS` / `HTTP_DAILY_QUOTA`; `0` means unlimited for that tenant
-- Tenant names and tokens must be unique; invalid config (bad JSON, missing `name`/`token`, duplicates) aborts startup
+- `tools` is optional: it restricts the tenant to the listed tools; omit it or use `"*"` to allow everything. Calls outside the whitelist get 403 (`error=tool_forbidden` with a `tool` field) and nothing is fetched; a batch is rejected as a whole if any tool in it is not allowed
+- Tenant names and tokens must be unique; invalid config (bad JSON, missing `name`/`token`, duplicates, malformed `tools`) aborts startup
 - Mutually exclusive with a single `HTTP_TOKEN`, and `HTTP_TOKENS` vs `HTTP_TOKENS_FILE` are exclusive too
-- Each tenant shows up in `/metrics` as `scrape_mcp_tenant_requests_total{tenant}` and `scrape_mcp_tenant_rejections_total{tenant,reason}`; 429 bodies reveal nothing about other callers
+- Each tenant shows up in `/metrics` as `scrape_mcp_tenant_requests_total{tenant}`, `scrape_mcp_tenant_rejections_total{tenant,reason}` and `scrape_mcp_tenant_tool_calls_total{tenant,tool}`; 429/403 bodies reveal nothing about other callers
 
 Dashboard: `GET /` serves a built-in runtime dashboard (single-file HTML, no external assets or CDN) showing request volume, L1/L2 split, latency p50/p95/p99 plus buckets, result codes, content kinds, L2 page slots and proxy-pool health, refreshed every 5 seconds.
 
@@ -284,6 +285,8 @@ curl http://127.0.0.1:8000/stats
 
 `by_tier` is the tier that actually ran, `by_code` reuses the tool error codes (`ok` on success), and `cache_hit_rate` is result-cache hits over total requests. Only counters and byte sizes are kept — no URLs, no page content — and everything resets on restart.
 
+In multi-token mode `/stats` also includes `tenants`: per-tenant `requests`, `tool_calls` (tool distribution), `rejections` (reasons) and `quota_remaining` (only tenants with a daily quota). Without tokens it is an empty object.
+
 Metrics: `GET /metrics` serves the Prometheus text format (`version=0.0.4`). Access rules are identical to `/stats`, and it also keeps no URLs or page content:
 
 ```bash
@@ -303,9 +306,10 @@ curl http://127.0.0.1:8000/metrics
 | `scrape_mcp_fetch_duration_seconds` | histogram | Fetch duration by tier in seconds (buckets `0.1`/`0.3`/`1`/`3`/`10`/`+Inf`), enough for p95 and averages |
 | `scrape_mcp_result_cache_hits_total` / `scrape_mcp_http_cache_hits_total` | counter | Hits for each cache layer |
 | `scrape_mcp_tokens_returned_total` / `scrape_mcp_bytes_in_total` | counter | Tokens returned and inbound bytes |
-| `scrape_mcp_http_rejections_total{reason}` | counter | HTTP rejections: `unauthorized` / `forbidden` / `rate_limited` / `quota_exceeded` |
+| `scrape_mcp_http_rejections_total{reason}` | counter | HTTP rejections: `unauthorized` / `forbidden` / `tool_forbidden` / `rate_limited` / `quota_exceeded` |
 | `scrape_mcp_tenant_requests_total{tenant}` | counter | Accepted requests per tenant (quota-consuming only; `/healthz` and `/metrics` excluded) |
-| `scrape_mcp_tenant_rejections_total{tenant,reason}` | counter | 429 rejections per tenant (`rate_limited` / `quota_exceeded`) |
+| `scrape_mcp_tenant_rejections_total{tenant,reason}` | counter | Rejections per tenant: 429 rate/quota and 403 tool whitelist (`rate_limited` / `quota_exceeded` / `tool_forbidden`) |
+| `scrape_mcp_tenant_tool_calls_total{tenant,tool}` | counter | Executed calls per tenant and tool (only `tools/call` that passed permission and quota) |
 | `scrape_mcp_tenant_quota_remaining{tenant}` | gauge | Remaining daily quota per tenant (only tenants with `daily_quota` set; usable for low-quota alerts) |
 | `scrape_mcp_l2_active_pages` / `scrape_mcp_l2_queued_pages` / `scrape_mcp_l2_contexts` | gauge | In-flight L2 renders / requests queued for a page slot / resident browser contexts |
 | `scrape_mcp_l2_browser_running` / `scrape_mcp_l2_max_pages` / `scrape_mcp_l2_max_contexts` | gauge | Whether the browser runs, plus page and context limits |

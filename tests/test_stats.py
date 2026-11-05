@@ -158,7 +158,9 @@ def test_stats_endpoint_serves_loopback():
         "tokens_returned",
         "bytes_in",
         "latency_ms",
+        "tenants",
     }
+    assert body["tenants"] == {}
 
 
 def test_stats_endpoint_accepts_ipv6_loopback():

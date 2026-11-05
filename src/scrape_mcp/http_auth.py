@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from starlette.datastructures import Headers
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import metrics
 
@@ -33,12 +33,35 @@ class TokenConfigError(ValueError):
 
 @dataclass(frozen=True)
 class TokenPolicy:
-    """一个调用方（租户）：令牌 + 独立配额。"""
+    """一个调用方（租户）：令牌 + 独立配额 + 可选的工具白名单。"""
 
     name: str
     token: str
     qps: float = 0.0
     daily_quota: int = 0
+    # 允许调用的工具名；空元组表示不限制（默认全放行）
+    tools: tuple[str, ...] = ()
+
+    def allows(self, tool: str) -> bool:
+        """是否允许调用该工具；未配置白名单时一律允许。"""
+        return not self.tools or tool in self.tools
+
+
+def _tools_of(entry: dict, name: str) -> tuple[str, ...]:
+    """解析租户的工具白名单；省略或 ``"*"`` 表示全部工具。"""
+    raw = entry.get("tools")
+    if raw is None or raw == "*":
+        return ()
+    if not isinstance(raw, list):
+        raise TokenConfigError(f'租户 {name} 的 tools 必须是工具名数组或 "*"')
+    names = [item.strip() for item in raw if isinstance(item, str)]
+    if len(names) != len(raw) or any(not item for item in names):
+        raise TokenConfigError(f"租户 {name} 的 tools 含非法条目；每项必须是非空工具名")
+    if "*" in names:
+        return ()
+    if not names:
+        raise TokenConfigError(f"租户 {name} 的 tools 为空；不限制工具时请省略该字段")
+    return tuple(dict.fromkeys(names))
 
 
 def _entry_policy(entry: object, index: int, default_qps: float, default_daily: int) -> TokenPolicy:
@@ -63,7 +86,9 @@ def _entry_policy(entry: object, index: int, default_qps: float, default_daily: 
     except (TypeError, ValueError) as exc:
         raise TokenConfigError(f"租户 {name} 的 qps / daily_quota 必须是数字") from exc
 
-    return TokenPolicy(name=name, token=token, qps=qps, daily_quota=daily)
+    return TokenPolicy(
+        name=name, token=token, qps=qps, daily_quota=daily, tools=_tools_of(entry, name)
+    )
 
 
 def parse_token_policies(
@@ -213,10 +238,19 @@ class QuotaLimiter:
 
 
 async def _send_error(
-    send: Send, status: int, error: str, retry_after: float | None = None
+    send: Send,
+    status: int,
+    error: str,
+    retry_after: float | None = None,
+    extra: dict[str, object] | None = None,
 ) -> None:
-    """统一的无凭证/越权/超限响应：不返回内部路径、版本或统计信息。"""
+    """统一的无凭证/越权/超限响应：不返回内部路径、版本或统计信息。
+
+    ``extra`` 只用于调用方自己的上下文（如被拒绝的工具名），不泄露其它租户信息。
+    """
     payload: dict[str, object] = {"ok": False, "error": error}
+    if extra:
+        payload.update(extra)
     if retry_after is not None:
         payload["retry_after_s"] = round(retry_after, 1)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -231,6 +265,45 @@ async def _send_error(
         headers.append((b"retry-after", str(math.ceil(retry_after)).encode("ascii")))
     await send({"type": "http.response.start", "status": status, "headers": headers})
     await send({"type": "http.response.body", "body": body})
+
+
+async def _replay_body(receive: Receive) -> tuple[bytes, Receive]:
+    """读取并缓存请求体，返回可重放的 receive，避免把下游 MCP 的 body 读空。"""
+    chunks: list[bytes] = []
+    buffered: list[Message] = []
+    while True:
+        message = await receive()
+        buffered.append(message)
+        chunks.append(message.get("body", b""))
+        if not message.get("more_body", False):
+            break
+
+    async def replayed() -> Message:
+        if buffered:
+            return buffered.pop(0)
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return b"".join(chunks), replayed
+
+
+def _called_tools(body: bytes) -> list[str]:
+    """从 JSON-RPC 请求体取出 ``tools/call`` 的工具名（批量请求按出现顺序返回）。"""
+    if not body:
+        return []
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return []
+    items = data if isinstance(data, list) else [data]
+    names: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("method") != "tools/call":
+            continue
+        params = item.get("params")
+        name = params.get("name") if isinstance(params, dict) else None
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
 
 
 class BearerAuthMiddleware:
@@ -294,6 +367,19 @@ class BearerAuthMiddleware:
                 await _send_error(send, 401, "unauthorized")
                 return
 
+            # MCP 工具调用在 POST body 里；读出后重放，按租户白名单做工具级权限判断
+            tools: list[str] = []
+            if scope.get("method") == "POST":
+                body, receive = await _replay_body(receive)
+                tools = _called_tools(body)
+
+            denied = next((tool for tool in tools if not policy.allows(tool)), None)
+            if denied is not None:
+                metrics.record_rejection("tool_forbidden")
+                metrics.record_tenant_rejection(policy.name, "tool_forbidden")
+                await _send_error(send, 403, "tool_forbidden", extra={"tool": denied})
+                return
+
             if path not in QUOTA_EXEMPT_PATHS:
                 rejected = self._limiters[policy.name].hit()
                 if rejected is not None:
@@ -303,6 +389,8 @@ class BearerAuthMiddleware:
                     await _send_error(send, 429, error, retry_after=retry_after)
                     return
                 metrics.record_tenant_request(policy.name)
+                for tool in tools:
+                    metrics.record_tenant_tool(policy.name, tool)
 
             scope.setdefault("state", {})["scrape_mcp_authenticated"] = True
             scope.setdefault("state", {})["scrape_mcp_tenant"] = policy.name
