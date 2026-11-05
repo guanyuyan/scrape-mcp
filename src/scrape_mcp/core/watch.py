@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import json
-import os
 import time
 from pathlib import Path
 from typing import Any
+
+from .objectstore import LocalSnapshotBackend, SnapshotBackend
 
 # 快照保留的正文上限：仅用于生成 diff，超长页面截断，避免把 DATA_DIR 撑大
 MAX_SNAPSHOT_CHARS = 200_000
@@ -61,26 +61,17 @@ def diff_summary(previous: str, current: str) -> dict[str, Any]:
 
 
 class WatchStore:
-    """每个 URL（+ selector）一份快照，落在 ``DATA_DIR/watch`` 下，不随缓存过期。"""
+    """每个 URL（+ selector）一份快照，不随缓存过期。
 
-    def __init__(self, root: str | Path) -> None:
-        self._path = Path(os.path.expanduser(str(root))).resolve() / "watch"
+    默认落在 ``DATA_DIR/watch``；传入 ``backend`` 可换成 S3 兼容对象存储，
+    写入时统一补 ``saved_at``，读写失败都不影响抓取本身。
+    """
+
+    def __init__(self, root: str | Path, backend: SnapshotBackend | None = None) -> None:
+        self._backend = backend or LocalSnapshotBackend(root)
 
     def load(self, key: str) -> dict[str, Any] | None:
-        try:
-            with (self._path / f"{key}.json").open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return None
-        return data if isinstance(data, dict) else None
+        return self._backend.load(key)
 
     def save(self, key: str, data: dict[str, Any]) -> None:
-        # 与缓存一致：快照写失败不影响本次结果
-        try:
-            record = {"saved_at": time.time(), **data}
-            fp = self._path / f"{key}.json"
-            fp.parent.mkdir(parents=True, exist_ok=True)
-            with fp.open("w", encoding="utf-8") as f:
-                json.dump(record, f, ensure_ascii=False)
-        except (OSError, TypeError):
-            pass
+        self._backend.save(key, {"saved_at": time.time(), **data})

@@ -125,6 +125,8 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 pip install mcp-scrape                          # core: L1 fetching + compaction + extraction
 pip install "mcp-scrape[pdf]"                   # optional: let web_fetch read PDFs
 pip install "mcp-scrape[ocr]"                   # optional: OCR for scanned PDFs (needs system tesseract + language packs)
+pip install "mcp-scrape[langchain]"             # optional: LangChain tool adapter
+pip install "mcp-scrape[llamaindex]"            # optional: LlamaIndex Reader adapter
 ```
 
 ```bash
@@ -178,6 +180,8 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `L2_MAX_PAGES` | `3` | Max pages open at once; extra calls queue |
 | `L2_MAX_CONTEXTS` | `8` | Max resident contexts (per host + session); least recently used is evicted |
 | `L2_IDLE_TIMEOUT` | `120` | Idle seconds before the browser is closed; `0` keeps it for the process lifetime |
+| `REMOTE_BROWSER_CDP_URL` | empty | CDP endpoint of a remote browser pool (http/https/ws/wss); empty means local launch |
+| `REMOTE_BROWSER_FALLBACK` | `true` | Fall back to local browser channels when the remote connection fails; `false` fails fast |
 | `L2_TIMEZONE` | `Asia/Shanghai` | Timezone used for stealth alignment |
 | `DATA_DIR` | `~/.scrape_mcp` | Where sessions and cache live |
 | `RECIPES_DIR` | `<DATA_DIR>/recipes` | Site recipe directory; empty means default |
@@ -222,6 +226,15 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `REDIS_PREFIX` | `scrape_mcp` | Redis key prefix, so several environments can share one instance |
 | `JOB_TTL` | `604800` | How long job state stays in Redis (seconds); `0` disables expiry |
 | `JOB_STALE_AFTER` | `600` | On worker start, `running` jobs untouched for this many seconds are requeued |
+| `SNAPSHOT_BACKEND` | `local` | Snapshot backend for `web_watch` / `web_index(content_diff)`: `local` or `s3` (requires `mcp-scrape[s3]`) |
+| `S3_BUCKET` | empty | Bucket name when `SNAPSHOT_BACKEND=s3`; required |
+| `S3_ENDPOINT_URL` | empty | S3-compatible endpoint (MinIO / R2 / OSS); empty means AWS default |
+| `S3_REGION` | empty | Region name; usually optional for self-hosted endpoints |
+| `S3_PREFIX` | `scrape_mcp` | Object key prefix, so several environments can share one bucket |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | empty | Empty means the boto3 default credential chain (env vars / IAM role) |
+| `S3_PATH_STYLE` | `false` | Set to `true` for path-style addressing (usually needed by MinIO) |
+| `DATASET_BACKEND` | `local` | Dataset backend: `local` uses the `DATASET` path, `s3` stores one object per record and needs no path |
+| `S3_JOB_ARTIFACTS` | `false` | Archive finished async crawl jobs to `<S3_PREFIX>/jobs/<id>.json` |
 
 When `PROXY_POOL` is set it takes precedence over `PROXY`: exits are assigned round-robin, and a host keeps the same IP for `PROXY_POOL_STICKY_TTL` so sessions and risk scoring stay stable. An exit that fails `PROXY_POOL_FAIL_THRESHOLD` times in a row (transport error, or still blocked/rate-limited after the whole chain) is cooled down for `PROXY_POOL_COOLDOWN` seconds; if every exit is cooling down, the earliest one is used instead of failing the request. A per-call `proxy` argument always wins and is not counted by the pool.
 
@@ -735,6 +748,85 @@ scrape-mcp worker                                    # worker instances, run as 
 - A missing optional dependency or unreachable Redis fails fast with a clear message; `JOB_BACKEND=local` behaves exactly as before.
 - Note: only job state and the queue are shared today. HTTP token QPS / daily quota counters still live in each process, so adjust thresholds when running multiple instances.
 
+## Remote browser pool (optional)
+
+L2 rendering can connect to an external CDP service (Browserless, a self-hosted Playwright cluster, or a cloud browser pool) instead of launching Chromium locally:
+
+```bash
+export SCRAPE_MCP_REMOTE_BROWSER_CDP_URL=http://127.0.0.1:3000   # Browserless example endpoint
+# If the service needs auth, put the token in the URL query string, e.g. ...?token=xxx
+```
+
+- When the connection succeeds no local browser is started; idle reaping still disconnects the remote connection after `L2_IDLE_TIMEOUT`.
+- A failed connection falls back to local channels by default; with `REMOTE_BROWSER_FALLBACK=false` it fails fast so a cloud outage never silently switches to the local exit.
+- Only the L2 browser source changes; L1 fetching and the `login` `cdp_url` argument are unaffected.
+- Remote mode attaches to an existing server-side browser, so `L2_CHANNEL` / `L2_HEADLESS` launch options do not apply; the URL scheme is validated at startup.
+
+## Object-storage snapshots (optional)
+
+Snapshots still default to `DATA_DIR/watch`. With `SNAPSHOT_BACKEND=s3`, `web_watch` and `web_index(content_diff)` share the same snapshot store backed by an S3-compatible bucket, so multiple instances share the baseline.
+
+```bash
+pip install 'mcp-scrape[s3]'
+export SCRAPE_MCP_SNAPSHOT_BACKEND=s3
+export SCRAPE_MCP_S3_BUCKET=scrape-snapshots
+export SCRAPE_MCP_S3_ENDPOINT_URL=http://127.0.0.1:9000   # MinIO example
+export SCRAPE_MCP_S3_ACCESS_KEY_ID=...
+export SCRAPE_MCP_S3_SECRET_ACCESS_KEY=...
+export SCRAPE_MCP_S3_PATH_STYLE=true
+```
+
+- Object keys are `<S3_PREFIX>/watch/<hash>.json`, with the same payload as local snapshots (including `saved_at`).
+- Snapshots are a side path: a failed upload or read is treated as "no snapshot" and never breaks the fetch; the first write establishes the baseline.
+- `local` remains the default; `SNAPSHOT_BACKEND=s3` fails fast at startup when `S3_BUCKET` is empty or boto3 is missing.
+- Leave credentials empty to use the boto3 default chain (env vars / IAM role), which also suits keyless deployments.
+
+## Dataset and job artifacts (optional)
+
+These reuse the same `S3_*` settings and add two more side paths:
+
+- **Dataset**: with `DATASET_BACKEND=s3` no `DATASET` path is needed; every successful result becomes one object at `<S3_PREFIX>/dataset/<UTC date>/<uuid>.json`, so concurrent instances never overwrite each other. `scrape-mcp dataset stats` aggregates straight from S3; `dataset to-parquet` requires `-o/--out` for a local output path.
+- **Job artifacts**: with `S3_JOB_ARTIFACTS=1`, a finished async crawl (done / failed / cancelled) archives its full job JSON to `<S3_PREFIX>/jobs/<job_id>.json` for auditing and offline analysis.
+- Both are side paths: an upload failure never affects the fetch result or job state; enabling either (or S3 snapshots) validates `S3_BUCKET` and the boto3 dependency at startup.
+
+## Ecosystem integrations (LangChain / LlamaIndex)
+
+The adapters are thin wrappers over `scrape_mcp.sdk`, so arguments, JSON payloads and error codes match the MCP tools exactly. The core package does not depend on either framework; you only need the optional extra you use.
+
+### LangChain
+
+```bash
+pip install 'mcp-scrape[langchain]'
+```
+
+```python
+from scrape_mcp.integrations.langchain import build_tools
+
+tools = build_tools()  # scrape_web_fetch / scrape_web_extract / scrape_web_search
+# Pass them to create_tool_calling_agent(...) or any tool-calling agent
+```
+
+Tools return JSON strings; `scrape_web_extract` still exposes its selector as `schema` to the model.
+
+### LlamaIndex
+
+```bash
+pip install 'mcp-scrape[llamaindex]'
+```
+
+```python
+from scrape_mcp.integrations.llamaindex import build_reader
+
+reader = build_reader()
+docs = reader.load_data(["https://example.com", "https://docs.python.org/3/"])  # sync
+# Inside an event loop use: docs = await reader.aload_data([...])
+```
+
+- `load_data()` uses `asyncio.run` when no loop is running; inside a coroutine it tells you to `await reader.aload_data(...)` instead.
+- Failed pages are skipped; successful `content` becomes `Document.text`, and `url/title/status_code/content_type` go into `metadata`.
+- Other options (such as `max_tokens`) are passed straight to `web_fetch`.
+- The adapters share the process-wide fetcher; call `await scrape_mcp.sdk.aclose()` before exiting to release the browser.
+
 ## Python SDK
 
 Use the same implementation without an MCP client (identical arguments, payloads and error codes):
@@ -910,6 +1002,7 @@ src/scrape_mcp
 ├── http_auth.py       # HTTP Bearer middleware + non-loopback bind guard
 ├── cli.py             # Subcommands: init (client config) / schema (export tool definitions) / schedule (task daemon)
 ├── sdk.py             # Python SDK wrappers (fetch/extract/crawl/crawl_*/site_map/batch/watch/aclose)
+├── integrations/      # LangChain / LlamaIndex adapters (optional dependencies)
 ├── config.py          # Environment configuration
 ├── metrics.py         # Prometheus text metrics (source for /metrics)
 ├── tokenizer.py       # tiktoken counting + budget truncation
@@ -925,6 +1018,7 @@ src/scrape_mcp
 │   ├── jobs.py        # Async crawl jobs (state persistence, progress, resume, cancel)
 │   ├── jobstore_redis.py  # Optional Redis backend (shared job state + queue for workers)
 │   ├── watch.py       # Change detection (body snapshot + diff summary)
+│   ├── objectstore.py  # Snapshot backends (local / S3-compatible)
 │   ├── schedule.py    # Scheduled tasks (state, due calculation, pause/resume)
 │   ├── errors.py      # Stable error codes
 │   └── hostlimit.py   # Per-host concurrency gate

@@ -78,6 +78,71 @@ def test_record_write_failure_does_not_raise(tmp_path, monkeypatch):
     dataset.record_result(_payload(), tool="fetch")
 
 
+class _MemStore:
+    """内存版 S3 对象存储，够测试 dataset 的写读路径。"""
+
+    def __init__(self) -> None:
+        self.items: dict[str, dict] = {}
+
+    def put_json(self, key: str, data: dict) -> None:
+        self.items[key] = data
+
+    def get_json(self, key: str) -> dict | None:
+        return self.items.get(key)
+
+    def list_keys(self) -> list[str]:
+        return sorted(self.items)
+
+
+def test_record_result_writes_one_object_per_record(monkeypatch):
+    store = _MemStore()
+    settings = SimpleNamespace(dataset="", dataset_backend="s3")
+    monkeypatch.setattr(dataset, "get_settings", lambda: settings)
+    monkeypatch.setattr(dataset, "build_s3_object_store", lambda namespace: store)
+
+    dataset.record_result(_payload(), tool="fetch")
+    dataset.record_result(_payload(url="https://b.test/y"), tool="extract")
+
+    keys = list(store.items)
+    assert len(keys) == 2
+    assert all(key.endswith(".json") and key.count("/") == 1 for key in keys)
+    assert sorted(item["tool"] for item in store.items.values()) == ["extract", "fetch"]
+
+
+def test_record_result_s3_skips_failed_payload(monkeypatch):
+    store = _MemStore()
+    settings = SimpleNamespace(dataset="", dataset_backend="s3")
+    monkeypatch.setattr(dataset, "get_settings", lambda: settings)
+    monkeypatch.setattr(dataset, "build_s3_object_store", lambda namespace: store)
+
+    dataset.record_result(_payload(ok=False, error_code="blocked"), tool="fetch")
+
+    assert store.items == {}
+
+
+def test_load_s3_records_sorts_and_counts_broken(monkeypatch):
+    store = _MemStore()
+    store.items = {
+        "2026-11-05/a.json": {"tool": "fetch", "ts": "2026-11-05T01:00:00+00:00"},
+        "2026-11-05/b.json": {"tool": "extract", "ts": "2026-11-05T00:00:00+00:00"},
+    }
+
+    class BrokenStore(_MemStore):
+        def get_json(self, key: str) -> dict | None:
+            return None if key.endswith("c.json") else self.items[key]
+
+        def list_keys(self) -> list[str]:
+            return ["2026-11-05/a.json", "2026-11-05/b.json", "2026-11-05/c.json"]
+
+    broken = BrokenStore()
+    broken.items = store.items
+    monkeypatch.setattr(dataset, "build_s3_object_store", lambda namespace: broken)
+    records, bad = dataset.load_s3_records()
+
+    assert [r["tool"] for r in records] == ["extract", "fetch"]
+    assert bad == 1
+
+
 def test_build_record_carries_extract_data():
     record = build_record(_payload(data={"title": "t"}), tool="extract")
     assert record["data"] == {"title": "t"}

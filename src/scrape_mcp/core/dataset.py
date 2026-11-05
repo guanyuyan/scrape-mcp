@@ -13,11 +13,13 @@ import importlib.util
 import json
 import logging
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..config import get_settings
+from .objectstore import build_s3_object_store
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +69,33 @@ def build_record(payload: dict[str, Any], *, tool: str) -> dict[str, Any]:
     return record
 
 
-def record_result(payload: dict[str, Any], *, tool: str = "fetch") -> None:
-    """把一次成功结果追加到数据集；未配置或结果失败时什么都不做。
+def dataset_backend() -> str:
+    """数据集后端：local（DATASET 指定 JSONL 文件）/ s3（每条记录一个对象）。"""
+    return str(getattr(get_settings(), "dataset_backend", "local")).strip().lower()
 
-    写盘失败只记日志：导出是旁路能力，不能因为磁盘问题让抓取本身失败。
+
+def _save_s3_record(record: dict[str, Any]) -> None:
+    """每条记录写一个对象，避免多实例对同一个 JSONL 做读改写造成覆盖。"""
+    try:
+        store = build_s3_object_store("dataset")
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        store.put_json(f"{day}/{uuid.uuid4().hex}.json", record)
+    except Exception as exc:
+        logger.warning("写入 S3 数据集失败：%s", exc)
+
+
+def record_result(payload: dict[str, Any], *, tool: str = "fetch") -> None:
+    """把一次成功结果写入数据集；未配置或结果失败时什么都不做。
+
+    写盘/上传失败只记日志：导出是旁路能力，不能因为存储问题让抓取本身失败。
     """
+    if not payload.get("ok"):
+        return
+    if dataset_backend() == "s3":
+        _save_s3_record(build_record(payload, tool=tool))
+        return
     path = dataset_path()
-    if path is None or not payload.get("ok"):
+    if path is None:
         return
     line = json.dumps(build_record(payload, tool=tool), ensure_ascii=False)
     try:
@@ -82,6 +104,24 @@ def record_result(payload: dict[str, Any], *, tool: str = "fetch") -> None:
             handle.write(line + "\n")
     except OSError as exc:
         logger.warning("写入数据集失败（%s）：%s", path, exc)
+
+
+def load_s3_records() -> tuple[list[dict[str, Any]], int]:
+    """读回 S3 数据集：返回 (按时间排序的记录, 损坏对象数)。"""
+    try:
+        store = build_s3_object_store("dataset")
+    except Exception as exc:
+        raise DatasetError(f"无法连接 S3 数据集：{exc}") from exc
+    records: list[dict[str, Any]] = []
+    bad = 0
+    for key in store.list_keys():
+        item = store.get_json(key)
+        if item is None:
+            bad += 1
+            continue
+        records.append(item)
+    records.sort(key=lambda item: str(item.get("ts") or ""))
+    return records, bad
 
 
 def load_records(path: Path) -> tuple[list[dict[str, Any]], int]:

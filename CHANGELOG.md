@@ -5,6 +5,10 @@
 ## [Unreleased]
 
 ### Added
+- 远程浏览器池客户端（可选）：`REMOTE_BROWSER_CDP_URL` 指向 Browserless / 自建 Playwright 集群等 CDP 服务，L2 渲染直接复用远端浏览器；连接失败可回退本地（`REMOTE_BROWSER_FALLBACK=true`）或快速失败；启动校验 URL 协议
+- 生态集成（可选）：新增 `scrape_mcp.integrations.langchain`（`build_tools()` 返回 `scrape_web_fetch` / `scrape_web_extract` / `scrape_web_search` 三个 StructuredTool）与 `scrape_mcp.integrations.llamaindex`（`build_reader()` 返回同步/异步 Reader，失败页自动跳过）；两者复用 Python SDK 的载荷与错误码，核心包不引入框架依赖，需 `mcp-scrape[langchain]` / `mcp-scrape[llamaindex]`
+- 数据集与任务产物对象存储（可选）：`DATASET_BACKEND=s3` 每条成功结果写一个对象、多实例不互相覆盖，`dataset stats` 直接从 S3 汇总；`S3_JOB_ARTIFACTS=1` 把异步 crawl 终态任务 JSON 归档到 `<S3_PREFIX>/jobs/<id>.json`；默认 local 行为不变，失败不影响抓取
+- 快照对象存储（可选）：`SNAPSHOT_BACKEND=s3` 把 `web_watch` / `web_index(content_diff)` 的快照放到 S3 兼容存储（MinIO / R2 / OSS / AWS），多实例共享基线；默认 `local` 不变，快照读写失败不影响抓取；需 `pip install "mcp-scrape[s3]"`
 - 分布式执行（可选）：`JOB_BACKEND=redis` 把异步 crawl 任务状态与队列放到 Redis，API 实例只投递任务，`scrape-mcp worker` 消费执行，可多开横向扩容；同参数 start 仍只入队一次，取消与列表读共享状态，worker 启动会重新入队失联的 running 任务。默认 `local` 行为不变；需 `pip install "mcp-scrape[redis]"`
 - 多租户工具级权限：`HTTP_TOKENS` 每项新增可选 `tools` 白名单（省略或 `"*"` 表示全部），越权调用返回 403 `tool_forbidden` 且不执行抓取；批量请求整批拒绝，旧配置不受影响
 - 按租户用量统计：`/metrics` 新增 `scrape_mcp_tenant_tool_calls_total{tenant,tool}`，拒绝原因新增 `tool_forbidden`；`/stats` 新增 `tenants`（请求数、工具分布、拒绝原因与剩余配额）

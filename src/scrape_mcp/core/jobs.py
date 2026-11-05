@@ -108,12 +108,21 @@ class CrawlJobManager:
         fetch_page: PageFetcher,
         *,
         enqueue: Enqueue | None = None,
+        on_finish: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._store_factory = store_factory
         self._fetch_page = fetch_page
         self._enqueue = enqueue
+        self._on_finish = on_finish
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._cancelled: set[str] = set()
+
+    def _notify_finish(self, job: dict[str, Any]) -> None:
+        """任务进入终态后的旁路回调（如归档到对象存储），失败不影响任务结果。"""
+        if self._on_finish is None:
+            return
+        with contextlib.suppress(Exception):
+            self._on_finish(job)
 
     def _store(self) -> Any:
         return self._store_factory()
@@ -179,6 +188,7 @@ class CrawlJobManager:
         job["finished_at"] = time.time()
         job["updated_at"] = job["finished_at"]
         store.save(job)
+        self._notify_finish(job)
         self._cancelled.add(job_id)
         task = self._tasks.get(job_id)
         if task is not None and not task.done():
@@ -277,6 +287,7 @@ class CrawlJobManager:
             job["finished_at"] = time.time()
             job["updated_at"] = job["finished_at"]
             store.save(job)
+            self._notify_finish(job)
             return
 
         # 最后再读一次，避免把外部（另一个请求）刚写入的 cancelled 覆盖成 done
@@ -289,6 +300,7 @@ class CrawlJobManager:
         if self._deadline_hit(fresh):
             fresh["deadline_exceeded"] = True
         store.save(fresh)
+        self._notify_finish(fresh)
 
     @staticmethod
     def _deadline_hit(job: dict[str, Any]) -> bool:

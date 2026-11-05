@@ -27,6 +27,7 @@ from .core.hostlimit import HostLimiter
 from .core.http_client import HttpResponse
 from .core.jobs import CrawlJobManager, JobStore
 from .core.logging import configure, log_event
+from .core.objectstore import build_s3_object_store, build_snapshot_backend
 from .core.proxy import normalize_region, split_pool, valid_proxy
 from .core.ratelimit import RateLimiter
 from .core.recipes import Recipe, get_recipe_store
@@ -134,18 +135,22 @@ def _get_jobs() -> CrawlJobManager:
     if _jobs is None:
         settings = get_settings()
         backend = getattr(settings, "job_backend", "local")
+        sink = _job_artifact_sink if getattr(settings, "s3_job_artifacts", False) else None
         if backend == "redis":
             from .core.jobstore_redis import RedisJobStore, create_client
 
             store = RedisJobStore(
                 create_client(settings.redis_url), settings.redis_prefix, settings.job_ttl
             )
-            _jobs = CrawlJobManager(lambda: store, _crawl_job_page, enqueue=store.enqueue)
+            _jobs = CrawlJobManager(
+                lambda: store, _crawl_job_page, enqueue=store.enqueue, on_finish=sink
+            )
         elif backend == "local":
             # 工厂内重新读 settings：DATA_DIR 可在运行期变化（测试按用例隔离）
             _jobs = CrawlJobManager(
                 lambda: JobStore(Path(get_settings().data_dir) / "jobs"),
                 _crawl_job_page,
+                on_finish=sink,
             )
         else:
             raise RuntimeError(f"SCRAPE_MCP_JOB_BACKEND 只支持 local / redis，当前为 {backend!r}")
@@ -274,6 +279,19 @@ def _region_arg(region: str | None, *, session: str = "default") -> tuple[str | 
             "retryable": False,
         }
     return text, None
+
+
+def _watch_store() -> WatchStore:
+    """变更检测快照：默认落 DATA_DIR，SNAPSHOT_BACKEND=s3 时走对象存储。"""
+    settings = get_settings()
+    root = Path(settings.data_dir)
+    return WatchStore(root, build_snapshot_backend(root))
+
+
+def _job_artifact_sink(job: dict) -> None:
+    """把进入终态的 crawl 任务归档到对象存储（S3_JOB_ARTIFACTS=1 时启用）。"""
+    store = build_s3_object_store("jobs")
+    store.put_json(f"{job.get('job_id')}.json", job)
 
 
 def _denied_payload(url: str, code: str, message: str) -> dict:
@@ -1932,7 +1950,7 @@ async def web_index(
     content_unchanged: set[str] = set()
     changes: list[dict] = []
     # content_diff 与 web_watch 共用同一份快照，两个入口看到的变化口径一致
-    watch_store = WatchStore(Path(get_settings().data_dir)) if content_diff else None
+    watch_store = _watch_store() if content_diff else None
     if check_content or content_diff:
         # 新建条目也顺手记哈希，下次才有基线可比；总量仍受 MAX_CONTENT_CHECKS 约束
         targets = (new + changed_candidates) if check_content else changed_candidates
@@ -3396,7 +3414,7 @@ async def web_watch(
 
     text = _watch_text(outcome.html, url, selector)[:MAX_SNAPSHOT_CHARS]
     digest = content_hash(text)
-    store = WatchStore(Path(get_settings().data_dir))
+    store = _watch_store()
     key = watch_key(url, selector)
     previous = None if reset else store.load(key)
     changed = previous is None or previous.get("hash") != digest
@@ -3894,7 +3912,8 @@ def _run_worker() -> None:  # pragma: no cover - 需要真实 Redis 实例
     recovered = store.recover_stale(settings.job_stale_after)
     if recovered:
         log_event("worker.recovered", count=recovered)
-    manager = CrawlJobManager(lambda: store, _crawl_job_page)
+    sink = _job_artifact_sink if getattr(settings, "s3_job_artifacts", False) else None
+    manager = CrawlJobManager(lambda: store, _crawl_job_page, on_finish=sink)
 
     async def loop() -> None:
         while True:
@@ -3966,9 +3985,37 @@ def main(argv: list[str] | None = None) -> None:
 
     transport = ("--transport" in argv and argv[argv.index("--transport") + 1]) or "stdio"
     settings = get_settings()
+    remote_browser = getattr(settings, "remote_browser_cdp_url", "").strip()
+    if remote_browser and not remote_browser.startswith(("http://", "https://", "ws://", "wss://")):
+        raise SystemExit(
+            "SCRAPE_MCP_REMOTE_BROWSER_CDP_URL 需以 http:// / https:// / ws:// / wss:// 开头"
+        )
     backend = getattr(settings, "job_backend", "local")
     if backend not in ("local", "redis"):
         raise SystemExit(f"SCRAPE_MCP_JOB_BACKEND 只支持 local / redis，当前为 {backend!r}")
+    snapshot_backend = getattr(settings, "snapshot_backend", "local")
+    if snapshot_backend not in ("local", "s3"):
+        raise SystemExit(
+            f"SCRAPE_MCP_SNAPSHOT_BACKEND 只支持 local / s3，当前为 {snapshot_backend!r}"
+        )
+    dataset_backend = getattr(settings, "dataset_backend", "local")
+    if dataset_backend not in ("local", "s3"):
+        raise SystemExit(
+            f"SCRAPE_MCP_DATASET_BACKEND 只支持 local / s3，当前为 {dataset_backend!r}"
+        )
+    if (
+        snapshot_backend == "s3"
+        or dataset_backend == "s3"
+        or getattr(settings, "s3_job_artifacts", False)
+    ):
+        if not getattr(settings, "s3_bucket", ""):
+            raise SystemExit("使用 S3 对象存储时必须设置 SCRAPE_MCP_S3_BUCKET")
+        try:
+            import boto3  # noqa: F401 - 仅检查可选依赖是否装了
+        except ImportError:
+            raise SystemExit(
+                "使用 S3 对象存储需要可选依赖，请先 pip install 'mcp-scrape[s3]'"
+            ) from None
     # 日志只写 stderr：stdio 模式下 stdout 是 MCP 协议通道
     configure(settings.log_level)
     # CLI 优先级高于 env/.env，便于一键切 HTTP

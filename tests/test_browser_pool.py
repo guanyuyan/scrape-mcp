@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+import pytest
+
 from scrape_mcp.config import Settings
 from scrape_mcp.core import browser as b
 
@@ -199,6 +201,78 @@ def test_idle_timeout_zero_keeps_browser(tmp_path):
     assert asyncio.run(renderer._reap_if_idle()) is False
     assert renderer._browser is browser
     assert renderer._reaper is None
+
+
+class _FakeChromium:
+    def __init__(self, *, remote_ok: bool = True) -> None:
+        self.remote_ok = remote_ok
+        self.connect_calls: list[str] = []
+        self.launch_calls: list[dict] = []
+
+    async def connect_over_cdp(self, url: str):
+        self.connect_calls.append(url)
+        if self.remote_ok:
+            return _Resource("remote-browser")
+        raise RuntimeError("cdp down")
+
+    async def launch(self, **kwargs):
+        self.launch_calls.append(kwargs)
+        return _Resource("local-browser")
+
+
+class _FakePlaywright:
+    def __init__(self, chromium: _FakeChromium) -> None:
+        self.chromium = chromium
+
+
+def test_remote_browser_pool_connects_without_local_launch(tmp_path):
+    renderer = _renderer(tmp_path, remote_browser_cdp_url="http://pool.test:3000")
+    chromium = _FakeChromium()
+
+    browser = asyncio.run(renderer._launch(_FakePlaywright(chromium)))
+
+    assert browser.name == "remote-browser"
+    assert chromium.connect_calls == ["http://pool.test:3000"]
+    assert chromium.launch_calls == []
+
+
+def test_remote_browser_pool_falls_back_to_local(tmp_path):
+    renderer = _renderer(
+        tmp_path,
+        remote_browser_cdp_url="ws://pool.test/devtools/browser/abc",
+        remote_browser_fallback=True,
+    )
+    chromium = _FakeChromium(remote_ok=False)
+
+    browser = asyncio.run(renderer._launch(_FakePlaywright(chromium)))
+
+    assert browser.name == "local-browser"
+    assert chromium.connect_calls == ["ws://pool.test/devtools/browser/abc"]
+    assert chromium.launch_calls
+
+
+def test_remote_browser_pool_rejects_fallback_when_disabled(tmp_path):
+    renderer = _renderer(
+        tmp_path,
+        remote_browser_cdp_url="http://pool.test:3000",
+        remote_browser_fallback=False,
+    )
+    chromium = _FakeChromium(remote_ok=False)
+
+    with pytest.raises(RuntimeError, match="连接远程浏览器失败"):
+        asyncio.run(renderer._launch(_FakePlaywright(chromium)))
+
+    assert chromium.launch_calls == []
+
+
+def test_empty_remote_url_keeps_local_launch(tmp_path):
+    renderer = _renderer(tmp_path)
+    chromium = _FakeChromium()
+
+    browser = asyncio.run(renderer._launch(_FakePlaywright(chromium)))
+
+    assert browser.name == "local-browser"
+    assert chromium.connect_calls == []
 
 
 def test_aclose_stops_reaper_and_releases(tmp_path):

@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     l2_max_contexts: int = 8
     # 浏览器空闲多久后回收（秒）：关掉 context 与浏览器进程，下次用到再启动；0=常驻到进程退出
     l2_idle_timeout: float = 120.0
+    # 远程浏览器池：CDP 端点（Browserless / 自建 Playwright 服务）；留空则本地启动。
+    # 只影响 L2 渲染的浏览器来源，L1 抓取与登录的 cdp_url 参数不受影响
+    remote_browser_cdp_url: str = ""
+    # 远程连接失败时是否回退本地浏览器渠道；False 则直接报错（适合强制走云端池）
+    remote_browser_fallback: bool = True
 
     # ---- M3 登录态持久化 ----
     # 登录态文件（Playwright storage_state）落盘目录，按站点域名各存一份
@@ -153,6 +158,27 @@ class Settings(BaseSettings):
     worker_poll_timeout: float = 1.0
     # worker 重启后，running 状态超过该时长（秒）的任务视为已失联并重新入队
     job_stale_after: float = 600.0
+
+    # ---- P2 对象存储（可选）----
+    # 快照后端：local（默认，落 DATA_DIR/watch）/ s3（S3 兼容对象存储，需 mcp-scrape[s3]）。
+    # 影响 web_watch 与 web_index(content_diff) 的正文快照
+    snapshot_backend: str = "local"
+    s3_bucket: str = ""
+    # 兼容 MinIO / R2 / OSS 等自建或第三方端点；留空用 AWS 默认端点
+    s3_endpoint_url: str = ""
+    s3_region: str = ""
+    # 对象键前缀，便于多套环境共用同一个 bucket
+    s3_prefix: str = "scrape_mcp"
+    # 留空时走 boto3 默认凭据链（环境变量 / IAM 角色）
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    # MinIO 等通常需要 path-style 寻址
+    s3_path_style: bool = False
+    # 数据集后端：local（DATASET 指向 JSONL 文件）/ s3（每条记录一个对象，
+    # 键为 <S3_PREFIX>/dataset/<日期>/<uuid>.json，多实例不会互相覆盖）
+    dataset_backend: str = "local"
+    # 异步 crawl 任务进入终态后，把任务 JSON 归档到 <S3_PREFIX>/jobs/<id>.json
+    s3_job_artifacts: bool = False
 
     # ---- 搜索 ----
     # web_search 后端：duckduckgo（HTML 端点，无需 API key）/ searxng（自托管 JSON API）/

@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -473,17 +474,29 @@ def _cmd_dataset(argv: list[str]) -> int:
     parquet.add_argument("-o", "--out", help="输出 .parquet 路径；缺省与源文件同名")
     args = parser.parse_args(argv)
 
-    from .core.dataset import DatasetError, dataset_path, load_records, summarize, to_parquet
+    from .core.dataset import (
+        DatasetError,
+        dataset_backend,
+        dataset_path,
+        load_records,
+        load_s3_records,
+        summarize,
+        to_parquet,
+    )
 
+    # 没传路径且后端为 s3 时，从对象存储读；传了路径就按本地文件处理
+    use_s3 = not args.path and dataset_backend() == "s3"
     source = Path(args.path).expanduser() if args.path else dataset_path()
-    if source is None:
+    if not use_s3 and source is None:
         print(
-            "[错误] 未指定数据集：传路径，或设置 SCRAPE_MCP_DATASET=<path>.jsonl", file=sys.stderr
+            "[错误] 未指定数据集：传路径，或设置 SCRAPE_MCP_DATASET=<path.jsonl> / "
+            "SCRAPE_MCP_DATASET_BACKEND=s3",
+            file=sys.stderr,
         )
         return 2
     try:
         if args.action == "stats":
-            records, bad = load_records(source)
+            records, bad = load_s3_records() if use_s3 else load_records(source)
             info = summarize(records)
             tools = " / ".join(f"{name} {count}" for name, count in info["by_tool"].items())
             print(f"[完成] {info['records']} 条记录（{tools or '空'}）")
@@ -494,6 +507,19 @@ def _cmd_dataset(argv: list[str]) -> int:
                 print(f"  跳过 {bad} 行损坏记录")
             return 0
         target = Path(args.out).expanduser() if args.out else None
+        if use_s3:
+            if target is None:
+                print("[错误] S3 数据集导出 Parquet 需要 -o/--out 指定输出路径", file=sys.stderr)
+                return 2
+            records, _bad = load_s3_records()
+            with tempfile.TemporaryDirectory() as tmp:
+                staged = Path(tmp) / "dataset.jsonl"
+                with staged.open("w", encoding="utf-8") as handle:
+                    for item in records:
+                        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+                out = to_parquet(staged, target)
+            print(f"[完成] {len(records)} 条记录 → {out}")
+            return 0
         out = to_parquet(source, target)
         records, _bad = load_records(source)
         print(f"[完成] {len(records)} 条记录 → {out}")

@@ -169,6 +169,46 @@ def test_cancel_from_another_process_is_seen_by_run():
     assert store.load(job["job_id"])["results"] == []
 
 
+def test_on_finish_called_once_for_done_job():
+    store = _store()
+    job = _job()
+    store.save(job)
+    finished: list[dict] = []
+    manager = CrawlJobManager(lambda: store, _fetch, on_finish=finished.append)
+
+    asyncio.run(manager.run(job["job_id"]))
+
+    assert len(finished) == 1
+    assert finished[0]["state"] == "done"
+
+
+def test_on_finish_errors_do_not_fail_job():
+    store = _store()
+    job = _job()
+    store.save(job)
+
+    def boom(_job: dict) -> None:
+        raise RuntimeError("upload failed")
+
+    manager = CrawlJobManager(lambda: store, _fetch, on_finish=boom)
+
+    asyncio.run(manager.run(job["job_id"]))
+
+    assert store.load(job["job_id"])["state"] == "done"
+
+
+def test_on_finish_called_on_cancel():
+    store = _store()
+    job = _job()
+    store.save(job)
+    finished: list[dict] = []
+    manager = CrawlJobManager(lambda: store, _fetch, on_finish=finished.append)
+
+    manager.cancel(job["job_id"])
+
+    assert finished[0]["state"] == "cancelled"
+
+
 def test_recover_stale_running_jobs_only():
     store = _store()
     now = time.time()

@@ -343,6 +343,13 @@ class BrowserRenderer:
         return int(time.time() * mul) % 251
 
     async def _launch(self, playwright: Any, *, headless: bool | None = None) -> Any:
+        remote = (getattr(self._s, "remote_browser_cdp_url", "") or "").strip()
+        if remote:
+            try:
+                return await playwright.chromium.connect_over_cdp(remote)
+            except Exception as exc:
+                if not getattr(self._s, "remote_browser_fallback", True):
+                    raise RuntimeError(f"连接远程浏览器失败: {exc}") from exc
         last_exc: Exception | None = None
         for kwargs in self._launch_kwargs(headless=headless):
             try:

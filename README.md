@@ -129,6 +129,8 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 pip install mcp-scrape                          # 核心：L1 抓取 + 精简 + 抽取
 pip install "mcp-scrape[pdf]"                   # 可选：让 web_fetch 直接读 PDF
 pip install "mcp-scrape[ocr]"                   # 可选：扫描 PDF 的 OCR（另需系统 tesseract 与语言包）
+pip install "mcp-scrape[langchain]"             # 可选：LangChain 工具适配
+pip install "mcp-scrape[llamaindex]"            # 可选：LlamaIndex Reader 适配
 ```
 
 ```bash
@@ -184,6 +186,8 @@ cp .env.example .env    # 生成配置模板
 | `L2_MAX_PAGES` | `3` | L2 同时打开的页面上限，超出排队 |
 | `L2_MAX_CONTEXTS` | `8` | L2 常驻 context 上限（按 host + session 复用），超出淘汰最久未用 |
 | `L2_IDLE_TIMEOUT` | `120` | L2 浏览器空闲回收阈值（秒），`0` 常驻到进程退出 |
+| `REMOTE_BROWSER_CDP_URL` | 空 | 远程浏览器池的 CDP 端点（http/https/ws/wss）；留空本地启动 |
+| `REMOTE_BROWSER_FALLBACK` | `true` | 远程连接失败时是否回退本地浏览器渠道；`false` 直接报错 |
 | `L2_TIMEZONE` | `Asia/Shanghai` | 隐身加固时区 |
 | `DATA_DIR` | `~/.scrape_mcp` | 登录态/缓存放盘目录 |
 | `RECIPES_DIR` | `<DATA_DIR>/recipes` | 站点 recipe 目录；留空用默认路径 |
@@ -228,6 +232,15 @@ cp .env.example .env    # 生成配置模板
 | `REDIS_PREFIX` | `scrape_mcp` | Redis 键前缀，便于多套环境共用实例 |
 | `JOB_TTL` | `604800` | 任务状态在 Redis 中的保留秒数；`0` 不设过期 |
 | `JOB_STALE_AFTER` | `600` | worker 重启后，running 超过该秒数未更新才视为失联并重新入队 |
+| `SNAPSHOT_BACKEND` | `local` | `web_watch` / `web_index(content_diff)` 快照后端：`local` 或 `s3`（需 `mcp-scrape[s3]`） |
+| `S3_BUCKET` | 空 | `SNAPSHOT_BACKEND=s3` 时的桶名，必填 |
+| `S3_ENDPOINT_URL` | 空 | S3 兼容端点（MinIO / R2 / OSS）；留空用 AWS 默认 |
+| `S3_REGION` | 空 | 区域名；自建端点通常可留空 |
+| `S3_PREFIX` | `scrape_mcp` | 对象键前缀，便于多套环境共用同一个桶 |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | 空 | 留空时走 boto3 默认凭据链（环境变量 / IAM 角色） |
+| `S3_PATH_STYLE` | `false` | MinIO 等通常需要设为 `true`（path-style 寻址） |
+| `DATASET_BACKEND` | `local` | 数据集后端：`local` 用 `DATASET` 路径，`s3` 每条记录一个对象且无需路径 |
+| `S3_JOB_ARTIFACTS` | `false` | 异步 crawl 进入终态后把任务 JSON 归档到 `<S3_PREFIX>/jobs/<id>.json` |
 
 代理池非空时优先于 `PROXY`：出口按轮询分配，同一主机在 `PROXY_POOL_STICKY_TTL` 内固定走同一个 IP（登录态与风控都更稳）；同一出口连续失败（传输异常，或整条链路走完仍被限流/风控拦截）达 `PROXY_POOL_FAIL_THRESHOLD` 次后进入 `PROXY_POOL_COOLDOWN` 秒冷却，冷却期内不再分配；整池都在冷却时回退到最早解冻的那个，而不是直接报错。单请求 `proxy` 参数优先级最高，且不参与池的失败计数。
 
@@ -745,6 +758,85 @@ scrape-mcp worker                                    # 执行实例，可起多�
 - 未安装可选依赖或连不上 Redis 时，启动会给出明确错误；`JOB_BACKEND=local` 的行为与之前完全一致。
 - 注意：当前共享的只有任务状态与队列。HTTP 令牌的 QPS / 日配额计数仍在各进程内存中，多实例部署时需按实例数调整阈值。
 
+## 远程浏览器池（可选）
+
+L2 渲染可以不自启 Chromium，而是连接外部 CDP 服务（Browserless、自建 Playwright 集群，或云厂商的浏览器池）：
+
+```bash
+export SCRAPE_MCP_REMOTE_BROWSER_CDP_URL=http://127.0.0.1:3000   # Browserless 示例端点
+# 服务需要鉴权时，把 token 拼进 URL 查询串，如 ...?token=xxx
+```
+
+- 连接成功时不再本地启动浏览器；空闲回收仍按 `L2_IDLE_TIMEOUT` 断开远程连接。
+- 连接失败默认回退本地渠道；`REMOTE_BROWSER_FALLBACK=false` 时直接报错，避免云端池不可用时悄悄换成本地出口。
+- 只改变 L2 的浏览器来源，L1 抓取与 `login` 的 `cdp_url` 参数不受影响。
+- 远程模式连接的是服务端已有浏览器，`L2_CHANNEL` / `L2_HEADLESS` 等本地启动参数不生效；启动时会校验 URL 协议。
+
+## 快照对象存储（可选）
+
+默认快照仍写 `DATA_DIR/watch`。设置 `SNAPSHOT_BACKEND=s3` 后，`web_watch` 与 `web_index(content_diff)` 共用同一份快照，落到 S3 兼容存储，多个实例共享基线。
+
+```bash
+pip install 'mcp-scrape[s3]'
+export SCRAPE_MCP_SNAPSHOT_BACKEND=s3
+export SCRAPE_MCP_S3_BUCKET=scrape-snapshots
+export SCRAPE_MCP_S3_ENDPOINT_URL=http://127.0.0.1:9000   # MinIO 示例
+export SCRAPE_MCP_S3_ACCESS_KEY_ID=...
+export SCRAPE_MCP_S3_SECRET_ACCESS_KEY=...
+export SCRAPE_MCP_S3_PATH_STYLE=true
+```
+
+- 对象键为 `<S3_PREFIX>/watch/<hash>.json`，内容与本地快照一致（含 `saved_at`）。
+- 快照是旁路：上传或读取失败都按“没有快照”处理，不影响本次抓取；首次写入即建立基线。
+- 默认仍是 `local`；`SNAPSHOT_BACKEND=s3` 未设置 `S3_BUCKET` 或未安装 boto3 时启动直接报错。
+- 凭据留空时走 boto3 默认链（环境变量 / IAM 角色），也适合用预签名或实例角色免密部署。
+
+## 数据集与任务产物归档（可选）
+
+同样复用上面的 `S3_*` 配置，另有两处旁路：
+
+- **数据集**：`DATASET_BACKEND=s3` 时不需要设置 `DATASET` 路径，每条成功结果写成一个对象 `<S3_PREFIX>/dataset/<UTC 日期>/<uuid>.json`，多实例并发不会互相覆盖。`scrape-mcp dataset stats` 直接从 S3 汇总；`dataset to-parquet` 需用 `-o/--out` 指定本地输出路径。
+- **任务产物**：`S3_JOB_ARTIFACTS=1` 时，异步 crawl 进入终态（done / failed / cancelled）会把完整任务 JSON 归档到 `<S3_PREFIX>/jobs/<job_id>.json`，便于审计与离线分析。
+- 两处都是旁路：上传失败不影响抓取结果或任务状态；任一启用（或快照用 s3）都会在启动时检查 `S3_BUCKET` 与 boto3 依赖。
+
+## 生态集成（LangChain / LlamaIndex）
+
+适配器是薄封装：内部调用 `scrape_mcp.sdk`，参数、JSON 载荷与错误码和 MCP 工具完全一致。核心包不依赖这两个框架，只有显式安装可选依赖后才可用。
+
+### LangChain
+
+```bash
+pip install 'mcp-scrape[langchain]'
+```
+
+```python
+from scrape_mcp.integrations.langchain import build_tools
+
+tools = build_tools()  # scrape_web_fetch / scrape_web_extract / scrape_web_search
+# 交给 create_tool_calling_agent(...) 或任意支持 tool calling 的 Agent
+```
+
+工具返回 JSON 字符串；`scrape_web_extract` 的字段选择器在模型侧仍叫 `schema`。
+
+### LlamaIndex
+
+```bash
+pip install 'mcp-scrape[llamaindex]'
+```
+
+```python
+from scrape_mcp.integrations.llamaindex import build_reader
+
+reader = build_reader()
+docs = reader.load_data(["https://example.com", "https://docs.python.org/3/"])  # 同步
+# 已在事件循环内时改用：docs = await reader.aload_data([...])
+```
+
+- `load_data()` 在没有运行事件循环时内部用 `asyncio.run`；在协程里会提示改用 `await reader.aload_data(...)`。
+- 失败页直接跳过；成功的 `content` 成为 `Document.text`，`url/title/status_code/content_type` 进 `metadata`。
+- 其余参数（如 `max_tokens`）原样透传给 `web_fetch`。
+- 适配器复用进程内的同一个抓取器；脚本退出前可 `await scrape_mcp.sdk.aclose()` 释放浏览器。
+
 ## Python SDK
 
 不接 MCP 也能直接用同一套实现（参数、返回值、错误码与工具完全一致）：
@@ -969,6 +1061,7 @@ src/scrape_mcp
 ├── http_auth.py       # HTTP Bearer 鉴权中间件 + 非回环绑定校验
 ├── cli.py             # 子命令：init（客户端配置）/ schema（导出工具定义）/ schedule（定时任务 daemon）
 ├── sdk.py             # Python SDK 薄封装（fetch/extract/crawl/crawl_*/site_map/batch/watch/aclose）
+├── integrations/      # LangChain / LlamaIndex 适配（可选依赖）
 ├── config.py          # 环境变量配置
 ├── metrics.py         # Prometheus 文本格式指标（/metrics 端点）
 ├── tokenizer.py       # tiktoken 计数 + 预算截断
@@ -984,6 +1077,7 @@ src/scrape_mcp
 │   ├── jobs.py        # 异步爬取任务（状态落盘、进度、恢复与取消）
 │   ├── jobstore_redis.py  # 可选 Redis 后端（共享任务状态与队列，供 worker 横向扩容）
 │   ├── watch.py       # 变更检测（正文快照 + diff 摘要）
+│   ├── objectstore.py  # 快照存储后端（本地 / S3 兼容）
 │   ├── schedule.py    # 定时任务（状态落盘、到期计算、启停）
 │   ├── errors.py      # 统一错误码
 │   └── hostlimit.py   # 同域并发闸门
