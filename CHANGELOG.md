@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-05
+
 ### Added
 - 远程浏览器池客户端（可选）：`REMOTE_BROWSER_CDP_URL` 指向 Browserless / 自建 Playwright 集群等 CDP 服务，L2 渲染直接复用远端浏览器；连接失败可回退本地（`REMOTE_BROWSER_FALLBACK=true`）或快速失败；启动校验 URL 协议
 - 生态集成（可选）：新增 `scrape_mcp.integrations.langchain`（`build_tools()` 返回 `scrape_web_fetch` / `scrape_web_extract` / `scrape_web_search` 三个 StructuredTool）与 `scrape_mcp.integrations.llamaindex`（`build_reader()` 返回同步/异步 Reader，失败页自动跳过）；两者复用 Python SDK 的载荷与错误码，核心包不引入框架依赖，需 `mcp-scrape[langchain]` / `mcp-scrape[llamaindex]`
