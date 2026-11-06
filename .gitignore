@@ -13,3 +13,5 @@ htmlcov/
 *.log
 .env
 /docs/
+bench-results.json
+bench-sites.json

@@ -40,6 +40,27 @@ jobs:
         # 社区配方集坏掉（选择器语法、schema、host 重复）就当场失败，别等用户复制回去才炸
         run: python -m scrape_mcp.server recipe validate examples/recipes --strict
 
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Core-path budget
+        # 下限取参考机的 35%，只拦数量级退化，不做跨机器绝对耗时比较
+        run: python benchmarks/bench_core.py --check --json bench-results.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-bench-results
+          path: bench-results.json
+          if-no-files-found: ignore
+
   audit:
     runs-on: ubuntu-latest
     steps:

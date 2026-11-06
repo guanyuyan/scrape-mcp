@@ -993,7 +993,7 @@ Also see `examples/example_client.py` (MCP client call example) and `examples/re
 
 ## Benchmarks
 
-Two benchmarks with different purposes: `bench.py` measures the latency win from caching, `bench_sites.py` measures whether real sites return the right, complete content.
+Three benchmarks with different purposes: `bench.py` measures the latency win from caching, `bench_sites.py` measures whether real sites return the right, complete content, and `benchmarks/bench_core.py` guards local hot-path throughput against regressions.
 
 ### Cache and latency
 
@@ -1047,6 +1047,27 @@ CI nightly subset (2026-10-28, 14 sites): 14/14 passed, 13/13 content fetched, 1
 
 `--reference trafilatura` only counts plain body text; this tool keeps headings, lists and links, so token counts are not directly equivalent — treat them as an order-of-magnitude check.
 
+### Core-path throughput (CI gate)
+
+`benchmarks/bench_core.py` measures network-free hot paths on a seeded synthetic page (~370 KB HTML). CI runs it on every push / PR and fails when any metric drops below its ops/sec floor in [benchmarks/core_baseline.json](benchmarks/core_baseline.json):
+
+```bash
+python benchmarks/bench_core.py            # print the table
+python benchmarks/bench_core.py --check    # regression gate (CI usage)
+python benchmarks/bench_core.py --json out.json
+python benchmarks/bench_core.py --update-baseline   # re-record floors after a full run (review first)
+```
+
+| Metric | Path | Reference machine |
+| --- | --- | ---: |
+| `compact_html` | HTML → Markdown (parse + density pick + render) | ~18 ops/s (~56 ms/call) |
+| `chunk_markdown` | Markdown → RAG chunks (heading path + window + token count) | ~18 ops/s (~56 ms/call) |
+| `build_record` | Tool result → dataset record (in memory) | ~440k ops/s |
+| `record_result` | Record → JSONL append (lock + disk) | ~600 ops/s (~1.7 ms/call) |
+| `recipe_validate` | Validate the 8 example recipes | ~115 ops/s |
+
+The reference machine is Windows 11 / Python 3.13. Floors are 35% of the measured value (`build_record`, a microsecond-level in-memory op, uses 10% because it is noisier): they only catch order-of-magnitude regressions (such as an accidental O(n²)) and never compare absolute timings across machines, so a CI runner that is twice as slow will still pass.
+
 ## Docker
 
 ```bash
@@ -1076,7 +1097,9 @@ Or simply run `docker compose up -d --build` with `SCRAPE_MCP_HTTP_TOKEN` set in
 ```
 benchmarks/
 ├── sites.json         # Real-site quality corpus (tiers, expected outcome, completeness checks)
-└── baseline.json      # Nightly-subset baseline for trend checks (updated monthly)
+├── baseline.json      # Nightly-subset baseline for trend checks (updated monthly)
+├── bench_core.py      # Local hot-path throughput benchmark (seeded corpus, CI gate)
+└── core_baseline.json # Core-path ops/sec floors (reference machine × 35%)
 src/scrape_mcp
 ├── server.py          # MCP entry + tools (web_fetch/web_extract/web_batch/web_crawl/web_map/web_crawl_*/web_schedule/login/session_*)
 ├── http_auth.py       # HTTP Bearer middleware + non-loopback bind guard

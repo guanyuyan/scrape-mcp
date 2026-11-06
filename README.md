@@ -1012,7 +1012,7 @@ python examples/03_crawl_docs.py --max-pages 5 --out docs.md
 
 ## 基准
 
-两类基准，口径不同：`bench.py` 看缓存带来的延迟收益，`bench_sites.py` 看真实站点上取到的内容对不对、全不全。
+三类基准，口径不同：`bench.py` 看缓存带来的延迟收益，`bench_sites.py` 看真实站点上取到的内容对不对、全不全，`benchmarks/bench_core.py` 看本地热路径吞吐有没有退化。
 
 ### 缓存与延迟
 
@@ -1106,6 +1106,27 @@ CI 夜间子集（2026-10-28，14 站）：通过 14/14，取正文 13/13，拦�
 
 `--reference trafilatura` 的对照只统计纯正文；本工具输出保留标题、列表与链接结构，token 数不是等价口径，只看量级即可。
 
+### 核心路径吞吐（CI 门禁）
+
+`benchmarks/bench_core.py` 用固定种子的合成页面（约 370 KB HTML）测不依赖网络的本地热路径，CI 每次 push / PR 都跑一遍，低于 [benchmarks/core_baseline.json](benchmarks/core_baseline.json) 的 ops/sec 下限即失败：
+
+```bash
+python benchmarks/bench_core.py            # 打印表格
+python benchmarks/bench_core.py --check    # 回归门禁（CI 用法）
+python benchmarks/bench_core.py --json out.json
+python benchmarks/bench_core.py --update-baseline   # 全量测量后重建下限（需人工确认）
+```
+
+| 指标 | 路径 | 参考机实测 |
+| --- | --- | ---: |
+| `compact_html` | HTML → Markdown（解析 + 密度选正文 + 渲染） | ~18 ops/s（~56 ms/次） |
+| `chunk_markdown` | Markdown → RAG 分块（标题路径 + 窗口 + token 计数） | ~18 ops/s（~56 ms/次） |
+| `build_record` | 工具结果 → 数据集记录（纯内存） | ~44 万 ops/s |
+| `record_result` | 记录 → JSONL 追加写（含锁与磁盘） | ~600 ops/s（~1.7 ms/次） |
+| `recipe_validate` | 示例配方校验（8 份） | ~115 ops/s |
+
+参考机为 Windows 11 / Python 3.13；下限取实测的 35%（`build_record` 这种微秒级纯内存操作取 1/10，抖动更大），只拦数量级退化（例如误引入 O(n²)），不做跨机器绝对耗时比较，因此 CI 机器慢一倍也不会误报。
+
 ## Docker
 
 ```bash
@@ -1135,7 +1156,9 @@ curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 ```
 benchmarks/
 ├── sites.json         # 真实站点质量基准站点集（分层、期望结果、完整性检查项）
-└── baseline.json      # 夜间子集基线（趋势参照，每月更新）
+├── baseline.json      # 夜间子集基线（趋势参照，每月更新）
+├── bench_core.py      # 本地热路径吞吐基准（固定语料，CI 门禁）
+└── core_baseline.json # 核心路径 ops/sec 下限（参考机实测 × 35%，微秒级指标取 1/10）
 src/scrape_mcp
 ├── server.py          # MCP 入口 + 工具（web_fetch/web_extract/web_batch/web_crawl/web_map/web_crawl_*/web_schedule/login/session_*）
 ├── http_auth.py       # HTTP Bearer 鉴权中间件 + 非回环绑定校验

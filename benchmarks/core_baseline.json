@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "note": "ops/sec 下限；跨机器只比下限，不比绝对耗时。数值 = 参考机实测 × ratio（build_record 取 1/10）。",
+  "ratio": 0.35,
+  "measured_on": "Windows-11-10.0.22000-SP0",
+  "python": "3.13.2",
+  "floors": {
+    "compact_html": 5.8,
+    "chunk_markdown": 5.7,
+    "build_record": 43072.8,
+    "record_result": 222.8,
+    "recipe_validate": 36.7
+  }
+}
