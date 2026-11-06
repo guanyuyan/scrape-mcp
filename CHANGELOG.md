@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.27.0] - 2026-11-06
 
 ### Added
 - 云端 broker 多实例共享状态：设置 `CLOUD_BROKER_REDIS_URL` 后租约、轮询游标与日配额存入 Redis（键前缀复用 `REDIS_PREFIX`），多实例看到同一批租约；写路径按「租户 + 类型」加短锁，避免并发上限与配额被同时击穿。留空保持进程内状态，需 `mcp-scrape[redis]`，启动时检查连接
