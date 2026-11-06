@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.31.0] - 2026-11-06
 
 ### Added
 - 新增核心路径性能基线 `benchmarks/bench_core.py`：固定种子合成语料测 HTML→Markdown、Markdown 分块、记录构建、JSONL 落盘与配方校验的本地吞吐；`--check` 按 `benchmarks/core_baseline.json` 的 ops/sec 下限拦截数量级退化（下限取参考机实测的 35%，跨机器只比下限）
