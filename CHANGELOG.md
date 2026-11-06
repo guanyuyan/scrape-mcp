@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.29.0] - 2026-11-06
 
 ### Added
 - 社区 recipe 共享：`scrape-mcp recipe export` 把本地 recipe 打包成带 schema 版本的 bundle（`--dir` / 指定 host / `-o` 写文件，缺省输出到 stdout，坏配方只警告并跳过）
