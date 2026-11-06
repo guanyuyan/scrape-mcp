@@ -42,6 +42,8 @@ CLOUD_DISABLED = "cloud_disabled"
 CLOUD_UNAVAILABLE = "cloud_unavailable"
 CLOUD_LEASE_LIMIT = "cloud_lease_limit"
 CLOUD_QUOTA_EXCEEDED = "cloud_quota_exceeded"
+CLOUD_BAD_REQUEST = "cloud_bad_request"
+CLOUD_LEASE_NOT_FOUND = "cloud_lease_not_found"
 
 # 默认租户名：未配置令牌的纯本机模式没有租户身份，按同一个本地租户计数
 LOCAL_TENANT = "local"
@@ -165,10 +167,10 @@ class BrokerError(Exception):
 
 
 class LeaseBroker:
-    """租约分配器：轮询上游、并发上限、TTL 回收与按日配额。
+    """租约分配器：轮询上游、并发上限、TTL 回收、按地区筛选与按日配额。
 
-    所有操作都在事件循环内同步完成，单进程内不需要额外加锁；
-    多实例部署时应由反向代理把同一租户固定到同一个实例（本模块不共享状态）。
+    默认状态在进程内；注入 ``RedisLeaseStore``（配置 ``CLOUD_BROKER_REDIS_URL``）
+    后多实例共享租约、轮询游标与配额。
     """
 
     def __init__(
@@ -215,14 +217,56 @@ class LeaseBroker:
             return self.proxy
         raise ValueError(f"未知租约类型: {kind}")
 
-    def acquire(self, kind: str, tenant: str, *, reuse: bool = False) -> Lease:
+    def _region_pool(self, kind: str, region: str) -> list[Upstream]:
+        """按地区筛选上游；region 为空时返回完整池。"""
+        pool = self._pool(kind)
+        if not region:
+            return pool
+        return [upstream for upstream in pool if upstream.region == region]
+
+    def _resolve_region(self, kind: str, region: str | None) -> str:
+        if not region:
+            return ""
+        if kind != "proxy":
+            raise BrokerError(
+                400,
+                CLOUD_BAD_REQUEST,
+                f"{_KIND_LABELS[kind]}租约不支持 region；地区标签仅用于代理上游",
+            )
+        normalized = normalize_region(region)
+        if not normalized:
+            raise BrokerError(
+                400,
+                CLOUD_BAD_REQUEST,
+                f"地区标签不合法: {region}；只允许字母、数字、下划线、短横线（1-32 位）",
+            )
+        return normalized
+
+    def acquire(
+        self,
+        kind: str,
+        tenant: str,
+        *,
+        reuse: bool = False,
+        region: str | None = None,
+    ) -> Lease:
         """申请或复用租约。
 
         ``reuse=True``（GET）时先返回当前未过期租约；没有可用租约才发放新的，
         并照常占用配额。``reuse=False``（POST）总是申请新租约。
+        ``region`` 仅代理租约支持：只从该地区标签的上游里挑选，轮询游标按
+        「类型 + 地区」独立计数。写路径在共享存储下持有按「租户 + 类型」的
+        短锁，保证并发上限与配额在多实例间不会被同时击穿。
         """
-        pool = self._pool(kind)
+        target_region = self._resolve_region(kind, region)
+        pool = self._region_pool(kind, target_region)
         if not pool:
+            if target_region:
+                raise BrokerError(
+                    503,
+                    CLOUD_UNAVAILABLE,
+                    f"地区 {target_region} 暂无可用{_KIND_LABELS[kind]}上游",
+                )
             raise BrokerError(
                 503,
                 CLOUD_UNAVAILABLE,
@@ -248,7 +292,8 @@ class LeaseBroker:
 
             self._store.reserve_daily(tenant, kind, now, self.daily_limit)
 
-            index = self._store.next_index(kind) % len(pool)
+            cursor = f"{kind}:{target_region}" if target_region else kind
+            index = self._store.next_index(cursor) % len(pool)
             upstream = pool[index]
 
             lease = Lease(
@@ -262,6 +307,22 @@ class LeaseBroker:
             )
             self._store.save(lease, now)
             return lease
+
+    def list_leases(self, tenant: str, kind: str) -> list[Lease]:
+        """本租户某类型的活跃租约，按到期时间升序。"""
+        now = self.now()
+        leases = self._store.list_active(tenant, kind, now)
+        return sorted(leases, key=lambda lease: lease.expires_at)
+
+    def release(self, kind: str, tenant: str, lease_id: str) -> bool:
+        """提前归还租约；只允许释放自己的租约，已过期/不存在返回 False。
+
+        配额按「发放次数」计，提前释放不会退回当日配额。
+        """
+        if kind not in KINDS:
+            raise ValueError(f"未知租约类型: {kind}")
+        with self._store.lock(tenant, kind):
+            return self._store.remove(tenant, kind, lease_id, self.now())
 
     def usage(self, tenant: str) -> dict[str, object]:
         """本租户用量：只含自己的租约与配额，不泄露其它租户明细。"""

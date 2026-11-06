@@ -20,6 +20,8 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from . import __version__, dashboard, metrics
 from .cloud.broker import (
     CLOUD_DISABLED,
+    CLOUD_LEASE_NOT_FOUND,
+    KINDS,
     LOCAL_TENANT,
     BrokerError,
     CloudConfigError,
@@ -711,8 +713,9 @@ async def _cloud_lease(request, kind: str) -> JSONResponse:
 
     tenant = _cloud_tenant(request)
     rid = requestid.new_id()
+    region = request.query_params.get("region")
     try:
-        lease = broker.acquire(kind, tenant, reuse=request.method == "GET")
+        lease = broker.acquire(kind, tenant, reuse=request.method == "GET", region=region)
     except BrokerError as exc:
         payload: dict[str, object] = {
             "ok": False,
@@ -740,6 +743,50 @@ async def _cloud_usage(request) -> JSONResponse:
     return _cloud_response({"ok": True, **broker.usage(tenant), "request_id": requestid.new_id()})
 
 
+async def _cloud_leases(request) -> JSONResponse:
+    """列出本租户全部活跃租约（浏览器 + 代理），按到期时间升序。"""
+    broker = get_cloud_broker()
+    if broker is None:
+        return _cloud_disabled()
+    tenant = _cloud_tenant(request)
+    now = broker.now()
+    leases = [lease for kind in KINDS for lease in broker.list_leases(tenant, kind)]
+    leases.sort(key=lambda lease: lease.expires_at)
+    return _cloud_response(
+        {
+            "ok": True,
+            "tenant": tenant,
+            "count": len(leases),
+            "leases": [lease.payload(now) for lease in leases],
+            "request_id": requestid.new_id(),
+        }
+    )
+
+
+async def _cloud_release(request, kind: str) -> JSONResponse:
+    """提前归还租约；只允许释放自己的租约，释放后并发名额立即释放。"""
+    broker = get_cloud_broker()
+    if broker is None:
+        return _cloud_disabled()
+    tenant = _cloud_tenant(request)
+    rid = requestid.new_id()
+    lease_id = request.path_params.get("lease_id", "")
+    if not broker.release(kind, tenant, lease_id):
+        payload = {
+            "ok": False,
+            "error_code": CLOUD_LEASE_NOT_FOUND,
+            "error": f"租约 {lease_id} 不存在、已过期或不属于当前租户",
+            "retryable": False,
+            "request_id": rid,
+        }
+        log_event(
+            "cloud.release_missing", kind=kind, tenant=tenant, lease_id=lease_id, request_id=rid
+        )
+        return _cloud_response(payload, 404)
+    log_event("cloud.release", kind=kind, tenant=tenant, lease_id=lease_id, request_id=rid)
+    return _cloud_response({"ok": True, "released": True, "lease_id": lease_id, "request_id": rid})
+
+
 @mcp.custom_route("/cloud/browser/lease", methods=["GET", "POST"])
 async def cloud_browser_lease(request) -> JSONResponse:
     """浏览器上游租约：POST 申请新租约，GET 复用未过期租约。"""
@@ -748,8 +795,26 @@ async def cloud_browser_lease(request) -> JSONResponse:
 
 @mcp.custom_route("/cloud/proxy/lease", methods=["GET", "POST"])
 async def cloud_proxy_lease(request) -> JSONResponse:
-    """代理上游租约：POST 申请新租约，GET 复用未过期租约。"""
+    """代理上游租约：POST 申请新租约，GET 复用未过期租约；可带 ?region=us。"""
     return await _cloud_lease(request, "proxy")
+
+
+@mcp.custom_route("/cloud/browser/lease/{lease_id}", methods=["DELETE"])
+async def cloud_browser_release(request) -> JSONResponse:
+    """提前归还浏览器租约。"""
+    return await _cloud_release(request, "browser")
+
+
+@mcp.custom_route("/cloud/proxy/lease/{lease_id}", methods=["DELETE"])
+async def cloud_proxy_release(request) -> JSONResponse:
+    """提前归还代理租约。"""
+    return await _cloud_release(request, "proxy")
+
+
+@mcp.custom_route("/cloud/leases", methods=["GET"])
+async def cloud_leases(request) -> JSONResponse:
+    """列出当前租户的活跃租约。"""
+    return await _cloud_leases(request)
 
 
 @mcp.custom_route("/cloud/usage", methods=["GET"])

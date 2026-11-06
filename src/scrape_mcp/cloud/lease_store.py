@@ -21,7 +21,6 @@ from .broker import (
     _KIND_LABELS,
     CLOUD_QUOTA_EXCEEDED,
     CLOUD_UNAVAILABLE,
-    KINDS,
     BrokerError,
     Lease,
 )
@@ -68,7 +67,8 @@ class LocalLeaseStore:
 
     def __init__(self) -> None:
         self._leases: dict[str, Lease] = {}
-        self._next: dict[str, int] = dict.fromkeys(KINDS, 0)
+        # 轮询游标：kind 或 "kind:region"，按需创建
+        self._next: dict[str, int] = {}
         # (租户, 类型) -> (UTC 日序号, 当日已发放数)
         self._daily: dict[tuple[str, str], tuple[int, int]] = {}
 
@@ -105,13 +105,25 @@ class LocalLeaseStore:
             )
         self._daily[(tenant, kind)] = (day, used + 1)
 
-    def next_index(self, kind: str) -> int:
-        index = self._next[kind]
-        self._next[kind] = index + 1
+    def next_index(self, cursor: str) -> int:
+        index = self._next.get(cursor, 0)
+        self._next[cursor] = index + 1
         return index
 
     def save(self, lease: Lease, now: float) -> None:
         self._leases[lease.lease_id] = lease
+
+    def remove(self, tenant: str, kind: str, lease_id: str, now: float) -> bool:
+        """删除属于该租户的租约；已过期或不属于该租户都返回 False。"""
+        lease = self._leases.get(lease_id)
+        if lease is None:
+            return False
+        if lease.tenant != tenant or lease.kind != kind or lease.expires_at <= now:
+            if lease.expires_at <= now:
+                self._leases.pop(lease_id, None)
+            return False
+        del self._leases[lease_id]
+        return True
 
     @contextlib.contextmanager
     def lock(self, tenant: str, kind: str):
@@ -162,8 +174,8 @@ class RedisLeaseStore:
     def _daily_key(self, tenant: str, kind: str, day: int) -> str:
         return f"{self._base}:daily:{self._tenant_part(tenant)}:{kind}:{day}"
 
-    def _rr_key(self, kind: str) -> str:
-        return f"{self._base}:rr:{kind}"
+    def _rr_key(self, cursor: str) -> str:
+        return f"{self._base}:rr:{cursor}"
 
     def _lock_key(self, tenant: str, kind: str) -> str:
         return f"{self._base}:lock:{self._tenant_part(tenant)}:{kind}"
@@ -223,8 +235,8 @@ class RedisLeaseStore:
         self._client.expire(key, int(86400.0 - now % 86400) + 3600)
 
     @_redis_guard
-    def next_index(self, kind: str) -> int:
-        return int(self._client.incr(self._rr_key(kind))) - 1
+    def next_index(self, cursor: str) -> int:
+        return int(self._client.incr(self._rr_key(cursor))) - 1
 
     @_redis_guard
     def save(self, lease: Lease, now: float) -> None:
@@ -238,6 +250,30 @@ class RedisLeaseStore:
         self._client.sadd(set_key, lease.lease_id)
         # 集合里可能残留已过期 ID，给集合一个宽限 TTL 由读取时清理兜底
         self._client.expire(set_key, ttl + 86400)
+
+    @_redis_guard
+    def remove(self, tenant: str, kind: str, lease_id: str, now: float) -> bool:
+        """只删除属于该租户、未过期的租约；其余情况清理索引后返回 False。"""
+        lease_key = self._lease_key(tenant, kind, lease_id)
+        set_key = self._set_key(tenant, kind)
+        raw = self._client.get(lease_key)
+        if not raw:
+            self._client.srem(set_key, lease_id)
+            return False
+        try:
+            lease = Lease(**json.loads(raw))
+        except (TypeError, ValueError, KeyError):
+            self._client.delete(lease_key)
+            self._client.srem(set_key, lease_id)
+            return False
+        if lease.tenant != tenant or lease.kind != kind or lease.expires_at <= now:
+            if lease.expires_at <= now:
+                self._client.delete(lease_key)
+                self._client.srem(set_key, lease_id)
+            return False
+        deleted = self._client.delete(lease_key)
+        self._client.srem(set_key, lease_id)
+        return bool(deleted)
 
     @contextlib.contextmanager
     def lock(self, tenant: str, kind: str):

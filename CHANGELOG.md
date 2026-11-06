@@ -2,6 +2,12 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- 云端租约 API 增强：代理租约支持 `?region=us` 按地区筛选（轮询游标按类型 + 地区独立）；`DELETE /cloud/<kind>/lease/<lease_id>` 提前归还租约，立即空出并发名额；`GET /cloud/leases` 列出本租户活跃租约
+- 新增错误码 `cloud_bad_request`（400，非法 region 或浏览器租约带 region）与 `cloud_lease_not_found`（404，租约不存在/已过期/不属于当前租户）
+
 ## [0.27.0] - 2026-11-06
 
 ### Added

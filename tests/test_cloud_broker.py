@@ -9,8 +9,10 @@ import pytest
 
 import scrape_mcp.server as server
 from scrape_mcp.cloud.broker import (
+    CLOUD_BAD_REQUEST,
     CLOUD_DISABLED,
     CLOUD_LEASE_LIMIT,
+    CLOUD_LEASE_NOT_FOUND,
     CLOUD_QUOTA_EXCEEDED,
     CLOUD_UNAVAILABLE,
     BrokerError,
@@ -35,10 +37,19 @@ class _Clock:
 
 
 class _Request:
-    """路由处理器只用到 method 与 scope state，无需完整 Starlette Request。"""
+    """路由处理器只用到 method、query、path 参数与 scope state。"""
 
-    def __init__(self, method: str = "GET", tenant: str | None = None) -> None:
+    def __init__(
+        self,
+        method: str = "GET",
+        tenant: str | None = None,
+        *,
+        query: dict[str, str] | None = None,
+        path_params: dict[str, str] | None = None,
+    ) -> None:
         self.method = method
+        self.query_params = query or {}
+        self.path_params = path_params or {}
         self.scope = {
             "type": "http",
             "state": {} if tenant is None else {"scrape_mcp_tenant": tenant},
@@ -128,6 +139,62 @@ def test_proxy_lease_carries_region():
     assert lease.payload(broker.now())["region"] == "us"
 
 
+def test_proxy_region_selection_has_independent_cursor():
+    broker = _broker(
+        proxy_upstreams="http://p1:8080|us,http://p2:8080|hk,http://p3:8080|us",
+        max_leases_per_tenant=0,
+    )
+
+    us_first = broker.acquire("proxy", "team-a", region="us")
+    us_second = broker.acquire("proxy", "team-a", region="us")
+    hk_first = broker.acquire("proxy", "team-a", region="hk")
+    us_third = broker.acquire("proxy", "team-a", region="us")
+
+    assert [us_first.url, us_second.url] == ["http://p1:8080", "http://p3:8080"]
+    assert hk_first.url == "http://p2:8080"
+    # us 的轮询游标独立于 hk：第三次又回到池首
+    assert us_third.url == "http://p1:8080"
+
+
+def test_proxy_region_is_normalized():
+    broker = _broker(proxy_upstreams="http://p1:8080|us")
+
+    lease = broker.acquire("proxy", "team-a", region="US")
+
+    assert lease.region == "us"
+
+
+def test_unknown_region_returns_503():
+    broker = _broker(proxy_upstreams="http://p1:8080|us")
+
+    with pytest.raises(BrokerError) as exc:
+        broker.acquire("proxy", "team-a", region="eu")
+
+    assert exc.value.status == 503
+    assert exc.value.code == CLOUD_UNAVAILABLE
+
+
+@pytest.mark.parametrize("region", ["bad region!", "x" * 40])
+def test_invalid_region_returns_400(region):
+    broker = _broker(proxy_upstreams="http://p1:8080|us")
+
+    with pytest.raises(BrokerError) as exc:
+        broker.acquire("proxy", "team-a", region=region)
+
+    assert exc.value.status == 400
+    assert exc.value.code == CLOUD_BAD_REQUEST
+
+
+def test_browser_region_is_rejected():
+    broker = _broker(browser_upstreams="http://b1:3000")
+
+    with pytest.raises(BrokerError) as exc:
+        broker.acquire("browser", "team-a", region="us")
+
+    assert exc.value.status == 400
+    assert exc.value.code == CLOUD_BAD_REQUEST
+
+
 def test_get_reuses_active_lease_but_post_creates_new_one():
     broker = _broker(browser_upstreams="http://b1:3000", max_leases_per_tenant=2)
 
@@ -193,6 +260,62 @@ def test_daily_quota_does_not_count_other_kind():
     broker.acquire("proxy", "team-a")
 
 
+# ---- 释放与列举 ----
+
+
+def test_release_frees_slot_and_is_idempotent():
+    broker = _broker(browser_upstreams="http://b1:3000", max_leases_per_tenant=1)
+    lease = broker.acquire("browser", "team-a")
+
+    assert broker.release("browser", "team-a", lease.lease_id) is True
+    assert broker.usage("team-a")["browser"]["active"] == 0
+    assert broker.release("browser", "team-a", lease.lease_id) is False
+
+    broker.acquire("browser", "team-a")  # 名额已空出，可以立即再申请
+
+
+def test_release_rejects_other_tenant():
+    broker = _broker(browser_upstreams="http://b1:3000")
+    lease = broker.acquire("browser", "team-a")
+
+    assert broker.release("browser", "team-b", lease.lease_id) is False
+    assert broker.usage("team-a")["browser"]["active"] == 1
+
+
+def test_release_expired_lease_returns_false():
+    clock = _Clock()
+    broker = _broker(browser_upstreams="http://b1:3000", clock=clock)
+    lease = broker.acquire("browser", "team-a")
+
+    clock.wall += broker.ttl + 1
+
+    assert broker.release("browser", "team-a", lease.lease_id) is False
+    assert broker.usage("team-a")["browser"]["active"] == 0
+
+
+def test_list_leases_is_scoped_by_tenant_and_sorted():
+    clock = _Clock()
+    broker = _broker(
+        browser_upstreams="http://b1:3000",
+        proxy_upstreams="http://p1:8080|us",
+        max_leases_per_tenant=2,
+        clock=clock,
+    )
+    browser_lease = broker.acquire("browser", "team-a")
+    clock.wall += 10
+    proxy_lease = broker.acquire("proxy", "team-a")
+    broker.acquire("browser", "team-b")
+
+    leases = broker.list_leases("team-a", "browser") + broker.list_leases("team-a", "proxy")
+    leases.sort(key=lambda lease: lease.expires_at)
+
+    assert [lease.lease_id for lease in leases] == [
+        browser_lease.lease_id,
+        proxy_lease.lease_id,
+    ]
+    assert all(lease.tenant == "team-a" for lease in leases)
+
+
 # ---- 用量 ----
 
 
@@ -237,6 +360,15 @@ def test_routes_return_404_when_disabled(monkeypatch):
 
     status, body = _call(server._cloud_usage(_Request()))
     assert status == 404
+
+    status, body = _call(server._cloud_leases(_Request()))
+    assert status == 404
+
+    status, body = _call(
+        server._cloud_release(_Request("DELETE", path_params={"lease_id": "x"}), "browser")
+    )
+    assert status == 404
+    assert body["error_code"] == CLOUD_DISABLED
 
 
 def test_route_returns_503_without_upstream(monkeypatch):
@@ -295,6 +427,84 @@ def test_usage_route_returns_own_counts(monkeypatch):
     assert body["tenant"] == "team-a"
     assert body["browser"]["active"] == 1
     assert body["browser"]["daily_remaining"] == 1
+
+
+def test_route_region_selects_upstream(monkeypatch):
+    broker = _broker(proxy_upstreams="http://p1:8080|us,http://p2:8080|hk")
+    monkeypatch.setattr(server, "get_cloud_broker", lambda: broker)
+
+    status, body = _call(
+        server._cloud_lease(_Request("POST", "team-a", query={"region": "us"}), "proxy")
+    )
+
+    assert status == 200
+    assert body["url"] == "http://p1:8080"
+    assert body["region"] == "us"
+
+
+def test_route_invalid_region_returns_400(monkeypatch):
+    broker = _broker(proxy_upstreams="http://p1:8080|us")
+    monkeypatch.setattr(server, "get_cloud_broker", lambda: broker)
+
+    status, body = _call(
+        server._cloud_lease(_Request("POST", "team-a", query={"region": "bad region!"}), "proxy")
+    )
+
+    assert status == 400
+    assert body["error_code"] == CLOUD_BAD_REQUEST
+    assert body["retryable"] is False
+
+
+def test_route_release_returns_lease_to_pool(monkeypatch):
+    broker = _broker(browser_upstreams="http://b1:3000", max_leases_per_tenant=1)
+    monkeypatch.setattr(server, "get_cloud_broker", lambda: broker)
+    _, lease = _call(server._cloud_lease(_Request("POST", "team-a"), "browser"))
+
+    status, body = _call(
+        server._cloud_release(
+            _Request("DELETE", "team-a", path_params={"lease_id": lease["lease_id"]}),
+            "browser",
+        )
+    )
+
+    assert status == 200
+    assert body["ok"] is True
+    assert body["released"] is True
+
+    _, usage = _call(server._cloud_usage(_Request("GET", "team-a")))
+    assert usage["browser"]["active"] == 0
+
+    status, body = _call(
+        server._cloud_release(
+            _Request("DELETE", "team-a", path_params={"lease_id": lease["lease_id"]}),
+            "browser",
+        )
+    )
+    assert status == 404
+    assert body["error_code"] == CLOUD_LEASE_NOT_FOUND
+    assert body["retryable"] is False
+
+
+def test_route_list_leases_is_scoped(monkeypatch):
+    broker = _broker(
+        browser_upstreams="http://b1:3000",
+        proxy_upstreams="http://p1:8080|us",
+        max_leases_per_tenant=2,
+    )
+    monkeypatch.setattr(server, "get_cloud_broker", lambda: broker)
+    _, browser_lease = _call(server._cloud_lease(_Request("POST", "team-a"), "browser"))
+    _, proxy_lease = _call(server._cloud_lease(_Request("POST", "team-a"), "proxy"))
+    _call(server._cloud_lease(_Request("POST", "team-b"), "browser"))
+
+    status, body = _call(server._cloud_leases(_Request("GET", "team-a")))
+
+    assert status == 200
+    assert body["count"] == 2
+    assert {item["lease_id"] for item in body["leases"]} == {
+        browser_lease["lease_id"],
+        proxy_lease["lease_id"],
+    }
+    assert all(item["kind"] in {"browser", "proxy"} for item in body["leases"])
 
 
 def test_cloud_routes_require_bearer_token():

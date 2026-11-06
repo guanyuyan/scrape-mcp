@@ -801,10 +801,22 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/usage
 # {"ok":true,"tenant":"team-a","lease_ttl_s":300,
 #  "browser":{"active":1,"limit":2,"daily_used":1,"daily_limit":100,"daily_remaining":99,"upstreams":2},
 #  "proxy":{...},"request_id":"..."}
+
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8000/cloud/proxy/lease?region=us"   # 只从 us 上游分配
+
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/leases
+# {"ok":true,"tenant":"team-a","count":2,"leases":[...],"request_id":"..."}
+
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8000/cloud/proxy/lease/<lease_id>"  # 提前归还
 ```
 
 - `POST /cloud/<kind>/lease` 申请新租约；`GET` 复用当前未过期租约（没有才发放，复用不消耗日配额）。`kind` 为 `browser` 或 `proxy`
+- 代理租约可带 `?region=us`，只从对应地区标签的上游分配，轮询游标按「类型 + 地区」独立；未知地区返回 503 `cloud_unavailable`，浏览器带 `region` 或标签格式非法返回 400 `cloud_bad_request`
 - 上游按轮询分配；租约到期自动回收。浏览器上游是 CDP 端点，代理上游条目可带 `|region` 标签
+- `DELETE /cloud/<kind>/lease/<lease_id>` 提前归还租约：立即空出并发名额，但不退回当日配额；不存在、已过期或不属于当前租户返回 404 `cloud_lease_not_found`
+- `GET /cloud/leases` 列出本租户全部活跃租约（浏览器 + 代理，按到期时间升序）
 - 单租户并发租约达到 `CLOUD_MAX_LEASES_PER_TENANT` 时返回 429 `cloud_lease_limit`，带 `Retry-After` 与 `retry_after_s`
 - 日租约配额（`CLOUD_DAILY_LEASES`，UTC 零点重置，浏览器/代理分别计数，与 `HTTP_DAILY_QUOTA` 独立）超限返回 429 `cloud_quota_exceeded`
 - `/cloud/*` 未启用返回 404 `cloud_disabled`；启用但某类上游为空返回 503 `cloud_unavailable`；租户身份来自 Bearer 中间件，未配置令牌的纯本机模式记为 `local`

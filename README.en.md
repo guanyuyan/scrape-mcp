@@ -791,10 +791,22 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/usage
 # {"ok":true,"tenant":"team-a","lease_ttl_s":300,
 #  "browser":{"active":1,"limit":2,"daily_used":1,"daily_limit":100,"daily_remaining":99,"upstreams":2},
 #  "proxy":{...},"request_id":"..."}
+
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8000/cloud/proxy/lease?region=us"   # only us upstreams
+
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/leases
+# {"ok":true,"tenant":"team-a","count":2,"leases":[...],"request_id":"..."}
+
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8000/cloud/proxy/lease/<lease_id>"  # release early
 ```
 
 - `POST /cloud/<kind>/lease` requests a new lease; `GET` reuses the current unexpired lease (and only allocates when none exists; reuse does not consume daily quota). `kind` is `browser` or `proxy`
+- Proxy leases accept `?region=us` and only allocate from upstreams with that region label; the round-robin cursor is tracked per kind + region. An unknown region returns 503 `cloud_unavailable`, while a region on browser leases or a malformed label returns 400 `cloud_bad_request`
 - Upstreams are assigned round-robin; expired leases are reclaimed automatically. Browser upstreams are CDP endpoints, while proxy items may carry a `|region` label
+- `DELETE /cloud/<kind>/lease/<lease_id>` releases a lease early: the concurrency slot frees immediately, but the daily quota is not refunded. Missing, expired or other tenants' leases return 404 `cloud_lease_not_found`
+- `GET /cloud/leases` lists all active leases for the current tenant (browser + proxy, ordered by expiry)
 - Reaching `CLOUD_MAX_LEASES_PER_TENANT` returns 429 `cloud_lease_limit` with `Retry-After` and `retry_after_s`
 - Exceeding the daily lease quota (`CLOUD_DAILY_LEASES`, reset at UTC midnight, counted separately for browser/proxy and independent of `HTTP_DAILY_QUOTA`) returns 429 `cloud_quota_exceeded`
 - `/cloud/*` returns 404 `cloud_disabled` when the broker is off, and 503 `cloud_unavailable` when the requested upstream pool is empty; the tenant identity comes from the Bearer middleware, and the token-less local mode is recorded as `local`

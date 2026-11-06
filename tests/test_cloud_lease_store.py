@@ -127,6 +127,20 @@ def test_daily_quota_is_shared_across_instances():
     assert exc.value.code == CLOUD_QUOTA_EXCEEDED
 
 
+def test_release_is_visible_across_instances():
+    redis, clock = FakeRedis(), _Clock()
+    a, b = _brokers(redis, clock, max_leases_per_tenant=1)
+    lease = a.acquire("browser", "team-a")
+
+    assert b.release("browser", "team-a", lease.lease_id) is True
+    assert b.usage("team-a")["browser"]["active"] == 0
+
+    # 名额已释放，另一实例可以立即再申请
+    new_lease = b.acquire("browser", "team-a")
+    assert new_lease.lease_id != lease.lease_id
+    assert b.release("browser", "team-a", lease.lease_id) is False
+
+
 def test_round_robin_cursor_is_shared():
     redis, clock = FakeRedis(), _Clock()
     a, b = _brokers(
