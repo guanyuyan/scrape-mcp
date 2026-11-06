@@ -227,6 +227,7 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `CLOUD_LEASE_TTL` | `300` | Lease lifetime in seconds; expired leases are reclaimed automatically |
 | `CLOUD_MAX_LEASES_PER_TENANT` | `2` | Concurrent leases per tenant (browser/proxy counted separately); `0` disables the cap |
 | `CLOUD_DAILY_LEASES` | `0` | Daily lease quota per tenant (UTC day, browser/proxy counted separately and independent of the HTTP quota); `0` disables |
+| `CLOUD_BROKER_REDIS_URL` | — | Store lease state in Redis so instances share leases, the round-robin cursor and quotas; empty keeps state in-process. Reuses `REDIS_PREFIX` as the key prefix and requires `mcp-scrape[redis]` |
 | `JOB_BACKEND` | `local` | Async crawl backend: `local` (JSON on disk) or `redis` (shared state + queue, requires `mcp-scrape[redis]`) |
 | `REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis connection URL when `JOB_BACKEND=redis` |
 | `REDIS_PREFIX` | `scrape_mcp` | Redis key prefix, so several environments can share one instance |
@@ -798,7 +799,7 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/usage
 - Exceeding the daily lease quota (`CLOUD_DAILY_LEASES`, reset at UTC midnight, counted separately for browser/proxy and independent of `HTTP_DAILY_QUOTA`) returns 429 `cloud_quota_exceeded`
 - `/cloud/*` returns 404 `cloud_disabled` when the broker is off, and 503 `cloud_unavailable` when the requested upstream pool is empty; the tenant identity comes from the Bearer middleware, and the token-less local mode is recorded as `local`
 - Upstream URLs are validated at startup (browser: `http/https/ws/wss`; proxy: `http/https/socks4/socks5` with a valid region label); invalid config aborts startup
-- Lease and quota state lives in-process: for multi-instance deployments, pin the same tenant to the same instance (state is not shared across instances yet)
+- Lease and quota state is in-process by default; set `CLOUD_BROKER_REDIS_URL` to move it to Redis, where instances share the round-robin cursor, concurrency caps and daily quotas. Writers take a short per-tenant/per-kind lock so limits cannot be breached concurrently; requires `pip install "mcp-scrape[redis]"` and the connection is checked at startup
 
 ## Object-storage snapshots (optional)
 

@@ -233,6 +233,7 @@ cp .env.example .env    # 生成配置模板
 | `CLOUD_LEASE_TTL` | `300` | 租约有效期（秒），到期自动回收 |
 | `CLOUD_MAX_LEASES_PER_TENANT` | `2` | 单租户同时持有的租约上限（浏览器/代理分别计算）；`0` 不限 |
 | `CLOUD_DAILY_LEASES` | `0` | 单租户每日租约配额（UTC 自然日，浏览器/代理分别计算，与 HTTP 日配额独立）；`0` 不限 |
+| `CLOUD_BROKER_REDIS_URL` | — | 租约状态改存 Redis，多实例共享租约、轮询游标与配额；留空为进程内状态。键前缀复用 `REDIS_PREFIX`，需 `mcp-scrape[redis]` |
 | `JOB_BACKEND` | `local` | 异步 crawl 任务后端：`local`（本地 JSON）或 `redis`（共享状态 + 队列，需 `mcp-scrape[redis]`） |
 | `REDIS_URL` | `redis://127.0.0.1:6379/0` | `JOB_BACKEND=redis` 时的连接地址 |
 | `REDIS_PREFIX` | `scrape_mcp` | Redis 键前缀，便于多套环境共用实例 |
@@ -808,7 +809,7 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/usage
 - 日租约配额（`CLOUD_DAILY_LEASES`，UTC 零点重置，浏览器/代理分别计数，与 `HTTP_DAILY_QUOTA` 独立）超限返回 429 `cloud_quota_exceeded`
 - `/cloud/*` 未启用返回 404 `cloud_disabled`；启用但某类上游为空返回 503 `cloud_unavailable`；租户身份来自 Bearer 中间件，未配置令牌的纯本机模式记为 `local`
 - 上游地址在启动时校验（浏览器 `http/https/ws/wss`，代理 `http/https/socks4/socks5` 且地区标签合法），非法配置直接拒绝启动
-- 租约与配额状态保存在进程内：多实例部署时需由反向代理把同一租户固定到同一实例，当前不跨实例共享
+- 租约与配额默认保存在进程内；设置 `CLOUD_BROKER_REDIS_URL` 后改存 Redis，多实例共享轮询游标、并发上限与日配额，写路径按「租户 + 类型」加短锁避免同时击穿；需 `pip install "mcp-scrape[redis]"`，启动时会检查连接
 
 ## 快照对象存储（可选）
 

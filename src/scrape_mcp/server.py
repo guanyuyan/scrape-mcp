@@ -3996,9 +3996,11 @@ def _run_http(settings, port: int, policies: list[TokenPolicy]) -> None:  # prag
 
     if settings.cloud_broker_enabled:
         try:
-            get_cloud_broker()
-        except CloudConfigError as exc:
-            raise SystemExit(f"云端 broker 配置不合法: {exc}") from exc
+            broker = get_cloud_broker()
+            if broker is not None:
+                broker.ping()
+        except (CloudConfigError, BrokerError, RuntimeError) as exc:
+            raise SystemExit(f"云端 broker 初始化失败: {exc}") from exc
 
     app = mcp.streamable_http_app(
         json_response=settings.http_json,

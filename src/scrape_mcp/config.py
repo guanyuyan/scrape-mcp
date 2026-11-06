@@ -195,6 +195,9 @@ class Settings(BaseSettings):
     cloud_max_leases_per_tenant: int = 2
     # 单租户每日租约配额（UTC 自然日，浏览器/代理分别计算，与 HTTP 日配额独立）；0 不限
     cloud_daily_leases: int = 0
+    # 租约状态存 Redis 以便多实例共享；留空表示进程内状态（单实例默认）。
+    # 复用 SCRAPE_MCP_REDIS_PREFIX 作为键前缀；需安装 mcp-scrape[redis]
+    cloud_broker_redis_url: str = ""
 
     # ---- 搜索 ----
     # web_search 后端：duckduckgo（HTML 端点，无需 API key）/ searxng（自托管 JSON API）/

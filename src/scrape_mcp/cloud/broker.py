@@ -19,9 +19,13 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from ..core.proxy import normalize_region, valid_proxy
+
+if TYPE_CHECKING:  # 避免与 lease_store 循环导入；运行时按需加载本地实现
+    from .lease_store import LeaseStore
 
 # 浏览器上游是 CDP 端点：Browserless 常见 http/ws，自建集群两种都支持
 BROWSER_SCHEMES = frozenset({"http", "https", "ws", "wss"})
@@ -176,6 +180,7 @@ class LeaseBroker:
         max_leases_per_tenant: int = 2,
         daily_leases: int = 0,
         clock=time.time,
+        store: LeaseStore | None = None,
     ) -> None:
         self.browser = parse_browser_upstreams(browser_upstreams)
         self.proxy = parse_proxy_upstreams(proxy_upstreams)
@@ -184,14 +189,21 @@ class LeaseBroker:
         self.max_per_tenant = max(int(max_leases_per_tenant or 0), 0)
         self.daily_limit = max(int(daily_leases or 0), 0)
         self._clock = clock
-        self._leases: dict[str, Lease] = {}
-        self._next: dict[str, int] = dict.fromkeys(KINDS, 0)
-        # (租户, 类型) -> (UTC 日序号, 当日已发放数)
-        self._daily: dict[tuple[str, str], tuple[int, int]] = {}
+        # 默认进程内状态；配置 CLOUD_BROKER_REDIS_URL 后换成多实例共享实现
+        self.shared = store is not None
+        if store is None:
+            from .lease_store import LocalLeaseStore
+
+            store = LocalLeaseStore()
+        self._store = store
 
     def now(self) -> float:
         """当前时间（秒）；测试可注入时钟。"""
         return float(self._clock())
+
+    def ping(self) -> None:
+        """检查共享存储连通性；启动阶段调用，本地存储恒可用。"""
+        self._store.ping()
 
     def upstream_count(self, kind: str) -> int:
         return len(self._pool(kind))
@@ -203,55 +215,12 @@ class LeaseBroker:
             return self.proxy
         raise ValueError(f"未知租约类型: {kind}")
 
-    def _purge(self, now: float) -> None:
-        """回收已过期租约；租约数量很小，线性清理足够。"""
-        expired = [key for key, lease in self._leases.items() if lease.expires_at <= now]
-        for key in expired:
-            del self._leases[key]
-
-    def _active(self, tenant: str, kind: str) -> list[Lease]:
-        return [
-            lease
-            for lease in self._leases.values()
-            if lease.tenant == tenant and lease.kind == kind
-        ]
-
-    def _consume_daily(self, tenant: str, kind: str, now: float) -> None:
-        """占一个当日名额；超限抛 429，跨 UTC 自然日自动归零。"""
-        if not self.daily_limit:
-            return
-        day = int(now // 86400)
-        old_day, used = self._daily.get((tenant, kind), (day, 0))
-        if old_day != day:
-            used = 0
-        if used >= self.daily_limit:
-            raise BrokerError(
-                429,
-                CLOUD_QUOTA_EXCEEDED,
-                f"租户 {tenant} 的{_KIND_LABELS[kind]}租约已达当日配额 "
-                f"({self.daily_limit})；UTC 零点后重置",
-                retry_after=max(1.0, 86400.0 - now % 86400),
-            )
-        self._daily[(tenant, kind)] = (day, used + 1)
-
-    def _daily_used(self, tenant: str, kind: str, now: float) -> int:
-        day = int(now // 86400)
-        old_day, used = self._daily.get((tenant, kind), (day, 0))
-        return used if old_day == day else 0
-
     def acquire(self, kind: str, tenant: str, *, reuse: bool = False) -> Lease:
         """申请或复用租约。
 
         ``reuse=True``（GET）时先返回当前未过期租约；没有可用租约才发放新的，
         并照常占用配额。``reuse=False``（POST）总是申请新租约。
         """
-        now = self.now()
-        self._purge(now)
-
-        active = self._active(tenant, kind)
-        if reuse and active:
-            return min(active, key=lambda lease: lease.expires_at)
-
         pool = self._pool(kind)
         if not pool:
             raise BrokerError(
@@ -261,44 +230,49 @@ class LeaseBroker:
                 f"SCRAPE_MCP_CLOUD_{kind.upper()}_UPSTREAMS",
             )
 
-        if self.max_per_tenant and len(active) >= self.max_per_tenant:
-            earliest = min(lease.expires_at for lease in active)
-            raise BrokerError(
-                429,
-                CLOUD_LEASE_LIMIT,
-                f"租户 {tenant} 同时持有的{_KIND_LABELS[kind]}租约已达上限 "
-                f"({self.max_per_tenant})；请等待现有租约到期或复用 GET 端点",
-                retry_after=max(0.5, earliest - now),
+        with self._store.lock(tenant, kind):
+            now = self.now()
+            active = self._store.list_active(tenant, kind, now)
+            if reuse and active:
+                return min(active, key=lambda lease: lease.expires_at)
+
+            if self.max_per_tenant and len(active) >= self.max_per_tenant:
+                earliest = min(lease.expires_at for lease in active)
+                raise BrokerError(
+                    429,
+                    CLOUD_LEASE_LIMIT,
+                    f"租户 {tenant} 同时持有的{_KIND_LABELS[kind]}租约已达上限 "
+                    f"({self.max_per_tenant})；请等待现有租约到期或复用 GET 端点",
+                    retry_after=max(0.5, earliest - now),
+                )
+
+            self._store.reserve_daily(tenant, kind, now, self.daily_limit)
+
+            index = self._store.next_index(kind) % len(pool)
+            upstream = pool[index]
+
+            lease = Lease(
+                lease_id=uuid.uuid4().hex[:16],
+                kind=kind,
+                tenant=tenant,
+                url=upstream.url,
+                region=upstream.region,
+                issued_at=now,
+                expires_at=now + self.ttl,
             )
-
-        self._consume_daily(tenant, kind, now)
-
-        index = self._next[kind] % len(pool)
-        self._next[kind] = index + 1
-        upstream = pool[index]
-
-        lease = Lease(
-            lease_id=uuid.uuid4().hex[:16],
-            kind=kind,
-            tenant=tenant,
-            url=upstream.url,
-            region=upstream.region,
-            issued_at=now,
-            expires_at=now + self.ttl,
-        )
-        self._leases[lease.lease_id] = lease
-        return lease
+            self._store.save(lease, now)
+            return lease
 
     def usage(self, tenant: str) -> dict[str, object]:
         """本租户用量：只含自己的租约与配额，不泄露其它租户明细。"""
         now = self.now()
-        self._purge(now)
 
         blocks: dict[str, object] = {}
         for kind in KINDS:
-            used = self._daily_used(tenant, kind, now)
+            active = self._store.list_active(tenant, kind, now)
+            used = self._store.daily_used(tenant, kind, now)
             blocks[kind] = {
-                "active": len(self._active(tenant, kind)),
+                "active": len(active),
                 "limit": self.max_per_tenant,
                 "daily_used": used,
                 "daily_limit": self.daily_limit,
@@ -314,12 +288,23 @@ class LeaseBroker:
         }
 
 
-def build_broker(settings) -> LeaseBroker:
-    """按配置构建 broker；上游非法时抛 ``CloudConfigError``（启动即失败）。"""
+def build_broker(settings, store: LeaseStore | None = None) -> LeaseBroker:
+    """按配置构建 broker；上游非法时抛 ``CloudConfigError``（启动即失败）。
+
+    ``CLOUD_BROKER_REDIS_URL`` 非空时返回共享状态实现，多实例看到同一批租约；
+    否则沿用进程内状态，行为与单实例部署一致。
+    """
+    if store is None and getattr(settings, "cloud_broker_redis_url", ""):
+        from .lease_store import RedisLeaseStore, create_client
+
+        store = RedisLeaseStore(
+            create_client(settings.cloud_broker_redis_url), settings.redis_prefix
+        )
     return LeaseBroker(
         browser_upstreams=settings.cloud_browser_upstreams,
         proxy_upstreams=settings.cloud_proxy_upstreams,
         lease_ttl=settings.cloud_lease_ttl,
         max_leases_per_tenant=settings.cloud_max_leases_per_tenant,
         daily_leases=settings.cloud_daily_leases,
+        store=store,
     )
