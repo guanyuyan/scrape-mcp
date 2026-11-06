@@ -724,6 +724,21 @@ Limits:
 - A failed write only logs a warning — export is a side path and never breaks the scrape
 - The file keeps growing; rotate it yourself (`scrapes-2026-10-29.jsonl`) for long-running deployments
 
+### Writing to a vector store
+
+Scrape output can go straight into RAG: the sample script chunks JSONL and writes to Chroma or Qdrant, keeping `url` / `title` / `tool` / `ts` / `status` as metadata so a hit links back to the source page.
+
+```bash
+pip install "mcp-scrape[vector]"                  # chromadb + qdrant-client
+python examples/06_vector_store.py D:\data\scrapes.jsonl --dry-run
+python examples/06_vector_store.py D:\data\scrapes.jsonl --backend chroma --persist-dir .chroma
+python examples/06_vector_store.py D:\data --backend qdrant --qdrant-url http://localhost:6333
+```
+
+- Chunks are ~900 chars with 120 chars of overlap; IDs derive from `url + ts + chunk index`, so re-imports do not duplicate points
+- `--embedder auto` uses `all-MiniLM-L6-v2` when `sentence-transformers` is installed, otherwise falls back to a dependency-free hash embedding — enough to validate the pipeline, not for real semantic quality
+- Tune `--collection` / `--batch` / `--limit`; `--dry-run` prints record/page/chunk counts and vector dimension without touching any backend
+
 ## Scheduled monitoring
 
 Let a local daemon run `web_watch` / `web_index` on a schedule and push a webhook when something changes. Tasks stay on your machine — no hosted service:
@@ -966,6 +981,7 @@ asyncio.run(main())
 | [03_crawl_docs.py](examples/03_crawl_docs.py) | Follow "next page" and merge into one markdown file | `--selector` `--max-pages` `--out` |
 | [04_pdf_to_text.py](examples/04_pdf_to_text.py) | Read a PDF as text (needs `mcp-scrape[pdf]`) | `--out` `--max-tokens` |
 | [05_batch_check.py](examples/05_batch_check.py) | Batch health check; prints tier/status/tokens/error code, non-zero exit on failure | URLs as positional args |
+| [06_vector_store.py](examples/06_vector_store.py) | Chunk dataset JSONL into Chroma/Qdrant (needs `mcp-scrape[vector]`) | `--backend` `--dry-run` `--collection` |
 
 ```bash
 python examples/01_fetch_article.py https://ruanyifeng.com/blog/ --max-tokens 1200

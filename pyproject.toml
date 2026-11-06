@@ -34,6 +34,8 @@ pdf = ["pypdf>=6.21.2"]
 ocr = ["pymupdf>=1.24", "pytesseract>=0.3", "pillow>=10"]
 # 数据集导出成 Parquet（JSONL 累积本身不需要额外依赖）
 dataset = ["pyarrow>=14"]
+# 示例 06 写入向量库用到的客户端；只装需要的那个即可
+vector = ["chromadb>=0.5.0", "qdrant-client>=1.9.0"]
 # OpenTelemetry 追踪（OTEL_ENABLED=1 时必须安装；未安装时自动退化为空操作）
 otel = ["opentelemetry-sdk>=1.25", "opentelemetry-exporter-otlp-proto-http>=1.25"]
 # 分布式任务后端（JOB_BACKEND=redis 时必须安装，另起 scrape-mcp worker 消费队列）

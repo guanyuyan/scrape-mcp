@@ -734,6 +734,21 @@ scrape-mcp dataset to-parquet                   # 生成同目录 .parquet（需
 - 写盘失败只记 warning，不影响抓取本身；导出是旁路能力
 - 文件是持续追加，长期运行请自行按天轮转（如 `scrapes-2026-10-29.jsonl`）
 
+### 写入向量库
+
+抓取产物可以直接进 RAG：示例脚本把 JSONL 切块后写入 Chroma 或 Qdrant，metadata 带 `url` / `title` / `tool` / `ts` / `status`，检索命中后能回链原文。
+
+```bash
+pip install "mcp-scrape[vector]"                  # chromadb + qdrant-client
+python examples/06_vector_store.py D:\data\scrapes.jsonl --dry-run
+python examples/06_vector_store.py D:\data\scrapes.jsonl --backend chroma --persist-dir .chroma
+python examples/06_vector_store.py D:\data --backend qdrant --qdrant-url http://localhost:6333
+```
+
+- 每块约 900 字符、相邻块重叠 120 字符；ID 由 `url + ts + 块序号` 稳定生成，重复导入不会产生重复点
+- `--embedder auto`：装了 `sentence-transformers` 就用 `all-MiniLM-L6-v2`，否则退化为无依赖的 hash 向量；后者只够验证链路，别当语义检索质量用
+- `--collection` / `--batch` / `--limit` 可调；`--dry-run` 只打印记录数、页面数、块数与向量维度，不连后端
+
 ## 定时监控
 
 把 `web_watch` / `web_index` 交给本机 daemon 定时执行，变化后推送 webhook。任务只存在本地，不引入常驻云服务：
@@ -985,6 +1000,7 @@ asyncio.run(main())
 | [03_crawl_docs.py](examples/03_crawl_docs.py) | 按"下一页"翻页并合并成一份 markdown | `--selector` `--max-pages` `--out` |
 | [04_pdf_to_text.py](examples/04_pdf_to_text.py) | PDF 直接读成文本（需 `mcp-scrape[pdf]`） | `--out` `--max-tokens` |
 | [05_batch_check.py](examples/05_batch_check.py) | 批量巡检，输出层级/状态/token/错误码，失败即非零退出 | 位置参数传 URL |
+| [06_vector_store.py](examples/06_vector_store.py) | dataset JSONL 切块写入 Chroma/Qdrant（需 `mcp-scrape[vector]`） | `--backend` `--dry-run` `--collection` |
 
 ```bash
 python examples/01_fetch_article.py https://ruanyifeng.com/blog/ --max-tokens 1200
