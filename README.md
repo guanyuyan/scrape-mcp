@@ -1100,6 +1100,7 @@ curl http://127.0.0.1:8002/healthz     # {"ok":true,"version":"…"}
 - 镜像多阶段构建，运行阶段以非 root（uid 10001）启动；`/data` 卷保存登录态与两层缓存
 - 容器绑定 `0.0.0.0`，没有令牌会拒绝启动；`/healthz` 免鉴权，供 HEALTHCHECK 使用
 - 反向代理、容量规划、升级与威胁模型见 [DEPLOYMENT.md](DEPLOYMENT.md)
+- 多实例 + Redis 共享云端租约的参考编排见 [deploy/cloud](deploy/cloud/)（nginx + 两个实例 + Redis），完整步骤见 DEPLOYMENT.md
 
 ## 目录结构
 

@@ -1041,6 +1041,7 @@ Or simply run `docker compose up -d --build` with `SCRAPE_MCP_HTTP_TOKEN` set in
 - Multi-stage image; the runtime stage runs as non-root (uid 10001), and the `/data` volume keeps sessions plus both cache layers
 - The container binds `0.0.0.0`, so the token must be supplied with `-e SCRAPE_MCP_HTTP_TOKEN=...`; `/healthz` stays unauthenticated for the HEALTHCHECK
 - Reverse proxy, capacity planning, upgrades and the threat model live in [DEPLOYMENT.md](DEPLOYMENT.md) (Chinese)
+- A reference multi-instance setup with Redis-shared cloud leases is in [deploy/cloud](deploy/cloud/) (nginx + two instances + Redis); see DEPLOYMENT.md for the full walkthrough
 
 ## Project layout
 

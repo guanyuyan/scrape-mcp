@@ -2,6 +2,12 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- 部署参考 `deploy/cloud/`：nginx + 两个 scrape-mcp 实例 + Redis 的 docker-compose 编排，多实例共享租约/轮询游标/日配额；含 nginx 配置与 `.env.example`，DEPLOYMENT.md 补充验证步骤与扩容说明
+- Dockerfile 新增 `INSTALL_REDIS` 构建参数，启用后镜像包含 `redis` 客户端（云端 broker 多实例与 `JOB_BACKEND=redis` 需要）
+
 ## [0.28.0] - 2026-11-06
 
 ### Added

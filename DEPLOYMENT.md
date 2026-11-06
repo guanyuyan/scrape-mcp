@@ -33,6 +33,36 @@ curl http://127.0.0.1:8002/healthz
 
 客户端接入地址：`http://127.0.0.1:8002/mcp`（streamable-http），请求头带 `Authorization: Bearer <令牌>`。
 
+## 2.1 多实例部署（云端控制面 broker）
+
+单实例只够跑控制面演示；要让多个实例共享租约、轮询游标与日配额，用 `deploy/cloud/` 的参考编排：
+
+```bash
+cd deploy/cloud
+cp .env.example .env
+# 在 .env 里填 SCRAPE_MCP_HTTP_TOKEN 与上游清单
+docker compose up -d --build
+curl http://127.0.0.1:8002/healthz
+```
+
+拓扑：nginx（入口）→ `scrape-mcp-1` / `scrape-mcp-2` → Redis（租约状态）。任取一个实例申请，
+另一个实例立刻能看到同一份租约与用量：
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8002/cloud/proxy/lease
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8002/cloud/usage      # 多刷几次，数字一致
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8002/cloud/leases
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8002/cloud/proxy/lease/<lease_id>"                       # 名额立即空出
+```
+
+- 两个实例必须使用**同一份令牌配置**（`HTTP_TOKEN` 或 `HTTP_TOKENS[_FILE]`）；租户名一致才会落到同一个配额桶
+- `CLOUD_BROKER_REDIS_URL` 指向 Redis 后，租约、轮询游标、日配额都由 Redis 承载；镜像需带 `redis` 客户端，编排已通过 `INSTALL_REDIS=1` 构建
+- Redis 是共享状态单点：生产建议开启持久化（编排默认 `appendonly yes`）、加访问密码或限制在内网；备份 `redis_data` 卷即可恢复租约状态
+- 每个实例的 `/data` 独立（登录态与缓存不共享，避免并发写冲突）；`nginx.conf` 已关闭代理缓冲并放宽超时，兼容事件流模式
+- 横向扩容：复制 `scrape-mcp-N` 服务块并加入 nginx `upstream`；不要给实例映射宿主端口，统一经 nginx 进入
+- 本编排只做**控制面**分发，不转发浏览器/代理流量，也不产生计费账单
+
 ## 3. 直接运行镜像
 
 ```bash
@@ -83,6 +113,10 @@ scrape.example.com {
 | `SCRAPE_MCP_PROXY_POOL` | 出口代理池（逗号/分号/空白分隔）；比单个 `SCRAPE_MCP_PROXY` 优先；条目可带地区标签 `url\|us` |
 | `SCRAPE_MCP_PROXY_SESSIONS` | 会话绑定代理（`名字=代理` 条目）；同一登录会话固定走同一出口，优先级高于代理池 |
 | `SCRAPE_MCP_CAPTCHA_SOLVER_URL` | 可选 CAPTCHA 服务钩子，默认关闭；仅转发挑战信息并接受返回 cookie 重试，不做破解 |
+| `SCRAPE_MCP_CLOUD_BROKER_ENABLED` | 开启云端控制面 `/cloud/*`（上游租约分发、并发与日配额），默认关闭 |
+| `SCRAPE_MCP_CLOUD_BROWSER_UPSTREAMS` | 浏览器 CDP 上游（逗号分隔），仅控制面分发 |
+| `SCRAPE_MCP_CLOUD_PROXY_UPSTREAMS` | 代理上游，条目可带 `\|region` 标签供 `?region=` 筛选 |
+| `SCRAPE_MCP_CLOUD_BROKER_REDIS_URL` | 租约状态存 Redis，多实例部署必填；留空为进程内状态 |
 | `SCRAPE_MCP_CACHE_TTL` | 两层缓存 TTL 秒数，默认 300；`0` 全关 |
 | `SCRAPE_MCP_DATA_DIR` | 登录态与缓存目录，镜像内固定为 `/data`，挂卷持久化 |
 | `SCRAPE_MCP_L2_ENABLED` | 是否允许升级真浏览器；不装浏览器层时应设为 `false` |

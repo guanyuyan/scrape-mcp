@@ -1,0 +1,93 @@
+name: scrape-mcp-cloud
+
+# 多实例 + Redis 控制面共享状态的参考部署：
+#   nginx（入口）→ 两个 scrape-mcp 实例 → Redis（租约/轮询游标/日配额）
+# 浏览器与代理上游由运维提供；本编排只做控制面分发，不转发流量。
+# 用法见仓库根目录 DEPLOYMENT.md「多实例部署（云端控制面 broker）」。
+
+x-app: &app
+  image: scrape-mcp:cloud
+  build:
+    context: ../..
+    args:
+      # 需要 L2 真浏览器时改成 1；镜像会显著变大
+      INSTALL_BROWSER: ${INSTALL_BROWSER:-0}
+      # 云端 broker 的共享租约依赖 redis 客户端
+      INSTALL_REDIS: "1"
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+  environment: &app-env
+    SCRAPE_MCP_HTTP_TOKEN: ${SCRAPE_MCP_HTTP_TOKEN:?请在 deploy/cloud/.env 或环境变量里设置 SCRAPE_MCP_HTTP_TOKEN}
+    # 每秒请求上限与日配额（令牌桶；0 表示不限）
+    SCRAPE_MCP_HTTP_QPS: ${SCRAPE_MCP_HTTP_QPS:-5}
+    SCRAPE_MCP_HTTP_DAILY_QUOTA: ${SCRAPE_MCP_HTTP_DAILY_QUOTA:-10000}
+    # 云端控制面：开启后 /cloud/* 按租户分发上游租约
+    SCRAPE_MCP_CLOUD_BROKER_ENABLED: "1"
+    SCRAPE_MCP_CLOUD_BROWSER_UPSTREAMS: ${SCRAPE_MCP_CLOUD_BROWSER_UPSTREAMS:-}
+    SCRAPE_MCP_CLOUD_PROXY_UPSTREAMS: ${SCRAPE_MCP_CLOUD_PROXY_UPSTREAMS:-}
+    SCRAPE_MCP_CLOUD_LEASE_TTL: ${SCRAPE_MCP_CLOUD_LEASE_TTL:-300}
+    SCRAPE_MCP_CLOUD_MAX_LEASES_PER_TENANT: ${SCRAPE_MCP_CLOUD_MAX_LEASES_PER_TENANT:-2}
+    SCRAPE_MCP_CLOUD_DAILY_LEASES: ${SCRAPE_MCP_CLOUD_DAILY_LEASES:-0}
+    # 两个实例共享同一份租约状态；键前缀复用 SCRAPE_MCP_REDIS_PREFIX
+    SCRAPE_MCP_CLOUD_BROKER_REDIS_URL: redis://redis:6379/0
+    SCRAPE_MCP_REDIS_PREFIX: ${SCRAPE_MCP_REDIS_PREFIX:-scrape_mcp}
+    SCRAPE_MCP_LOG_LEVEL: ${SCRAPE_MCP_LOG_LEVEL:-WARNING}
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/healthz', timeout=3)"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  # 两个实例共用令牌文件/令牌环境变量，租户名必须一致，否则同一租户会落到不同配额桶
+  scrape-mcp-1:
+    <<: *app
+    volumes:
+      - scrape_data_1:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  scrape-mcp-2:
+    <<: *app
+    volumes:
+      - scrape_data_2:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      # 与单实例保持一致：默认只监听回环，公网入口交给外层反向代理
+      - "127.0.0.1:${SCRAPE_MCP_HTTP_PORT:-8002}:8080"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      scrape-mcp-1:
+        condition: service_healthy
+      scrape-mcp-2:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  scrape_data_1:
+  scrape_data_2:
