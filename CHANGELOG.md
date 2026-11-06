@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.26.0] - 2026-11-06
 
 ### Added
 - 云端控制面 broker（可选，`CLOUD_BROKER_ENABLED=1`）：`POST/GET /cloud/browser/lease` 与 `POST/GET /cloud/proxy/lease` 按租户轮询分配上游租约（浏览器为 CDP 端点、代理可带 `|region` 标签），`GET /cloud/usage` 返回本租户占用与剩余额度；租约按 `CLOUD_LEASE_TTL` 自动回收，并发上限超限返回 429 `cloud_lease_limit`，按日租约配额（与 HTTP 日配额独立）超限返回 429 `cloud_quota_exceeded`；未启用返回 404 `cloud_disabled`，上游为空返回 503 `cloud_unavailable`。只做控制面，不做流量转发、浏览器托管与计费账单
