@@ -180,6 +180,22 @@ class Settings(BaseSettings):
     # 异步 crawl 任务进入终态后，把任务 JSON 归档到 <S3_PREFIX>/jobs/<id>.json
     s3_job_artifacts: bool = False
 
+    # ---- P2-4b 云端控制面 broker（可选）----
+    # 默认关闭。/cloud/* 只做上游分发与租约/配额管理（控制面），不转发流量、
+    # 不托管浏览器进程；上游由运维提供，租约返回后由调用方直连
+    cloud_broker_enabled: bool = False
+    # 浏览器上游：逗号/分号/空白分隔的 CDP 端点（http/https/ws/wss），按租户轮询分配
+    cloud_browser_upstreams: str = ""
+    # 代理上游：逗号/分号/空白分隔的代理地址（http/https/socks4/socks5），
+    # 可带地区标签，如 socks5://host:port|us
+    cloud_proxy_upstreams: str = ""
+    # 租约有效期（秒）：到期自动回收，可重新申请
+    cloud_lease_ttl: float = 300.0
+    # 单租户同时持有的租约上限（浏览器/代理分别计算）；0 不限
+    cloud_max_leases_per_tenant: int = 2
+    # 单租户每日租约配额（UTC 自然日，浏览器/代理分别计算，与 HTTP 日配额独立）；0 不限
+    cloud_daily_leases: int = 0
+
     # ---- 搜索 ----
     # web_search 后端：duckduckgo（HTML 端点，无需 API key）/ searxng（自托管 JSON API）/
     # brave / tavily（商业 API，需要 key）

@@ -227,6 +227,12 @@ cp .env.example .env    # 生成配置模板
 | `HTTP_TOKENS_FILE` | — | 同格式 JSON 文件路径；适合把令牌放卷上保管（与 `HTTP_TOKENS` 互斥） |
 | `HTTP_QPS` | `5` | 每秒请求上限（令牌桶，允许同量突发）；多令牌时作为省略 `qps` 的租户默认值；`0` 不限 |
 | `HTTP_DAILY_QUOTA` | `10000` | 每日请求配额（UTC 自然日，跨日清零）；多令牌时作为省略 `daily_quota` 的租户默认值；`0` 不限 |
+| `CLOUD_BROKER_ENABLED` | `false` | 云端控制面 broker 开关；开启后暴露 `/cloud/*` 租约端点 |
+| `CLOUD_BROWSER_UPSTREAMS` | — | 浏览器上游（逗号/分号/空白分隔的 CDP 端点，`http/https/ws/wss`），按租户轮询分配 |
+| `CLOUD_PROXY_UPSTREAMS` | — | 代理上游（`http/https/socks4/socks5`），条目可带地区标签，如 `socks5://host:port\|us` |
+| `CLOUD_LEASE_TTL` | `300` | 租约有效期（秒），到期自动回收 |
+| `CLOUD_MAX_LEASES_PER_TENANT` | `2` | 单租户同时持有的租约上限（浏览器/代理分别计算）；`0` 不限 |
+| `CLOUD_DAILY_LEASES` | `0` | 单租户每日租约配额（UTC 自然日，浏览器/代理分别计算，与 HTTP 日配额独立）；`0` 不限 |
 | `JOB_BACKEND` | `local` | 异步 crawl 任务后端：`local`（本地 JSON）或 `redis`（共享状态 + 队列，需 `mcp-scrape[redis]`） |
 | `REDIS_URL` | `redis://127.0.0.1:6379/0` | `JOB_BACKEND=redis` 时的连接地址 |
 | `REDIS_PREFIX` | `scrape_mcp` | Redis 键前缀，便于多套环境共用实例 |
@@ -771,6 +777,38 @@ export SCRAPE_MCP_REMOTE_BROWSER_CDP_URL=http://127.0.0.1:3000   # Browserless �
 - 连接失败默认回退本地渠道；`REMOTE_BROWSER_FALLBACK=false` 时直接报错，避免云端池不可用时悄悄换成本地出口。
 - 只改变 L2 的浏览器来源，L1 抓取与 `login` 的 `cdp_url` 参数不受影响。
 - 远程模式连接的是服务端已有浏览器，`L2_CHANNEL` / `L2_HEADLESS` 等本地启动参数不生效；启动时会校验 URL 协议。
+
+## 云端控制面 broker（可选）
+
+P2-4b 只实现**控制面**：把运维提供的浏览器 / 代理上游按租户分发成短租约，并做并发上限与按日配额；不转发流量、不托管浏览器进程、也不生成计费账单。默认关闭，纯本机或自建部署不受影响。
+
+```bash
+export SCRAPE_MCP_CLOUD_BROKER_ENABLED=1
+export SCRAPE_MCP_CLOUD_BROWSER_UPSTREAMS=http://browser-pool-1:3000,ws://browser-pool-2:3000
+export SCRAPE_MCP_CLOUD_PROXY_UPSTREAMS=socks5://proxy-us:1080|us,http://proxy-hk:8080|hk
+export SCRAPE_MCP_CLOUD_LEASE_TTL=300
+export SCRAPE_MCP_CLOUD_MAX_LEASES_PER_TENANT=2
+export SCRAPE_MCP_CLOUD_DAILY_LEASES=100
+```
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/browser/lease
+# {"ok":true,"lease_id":"...","kind":"browser","url":"http://browser-pool-1:3000",
+#  "region":"","expires_at":"...Z","expires_in_s":300,"request_id":"..."}
+
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/usage
+# {"ok":true,"tenant":"team-a","lease_ttl_s":300,
+#  "browser":{"active":1,"limit":2,"daily_used":1,"daily_limit":100,"daily_remaining":99,"upstreams":2},
+#  "proxy":{...},"request_id":"..."}
+```
+
+- `POST /cloud/<kind>/lease` 申请新租约；`GET` 复用当前未过期租约（没有才发放，复用不消耗日配额）。`kind` 为 `browser` 或 `proxy`
+- 上游按轮询分配；租约到期自动回收。浏览器上游是 CDP 端点，代理上游条目可带 `|region` 标签
+- 单租户并发租约达到 `CLOUD_MAX_LEASES_PER_TENANT` 时返回 429 `cloud_lease_limit`，带 `Retry-After` 与 `retry_after_s`
+- 日租约配额（`CLOUD_DAILY_LEASES`，UTC 零点重置，浏览器/代理分别计数，与 `HTTP_DAILY_QUOTA` 独立）超限返回 429 `cloud_quota_exceeded`
+- `/cloud/*` 未启用返回 404 `cloud_disabled`；启用但某类上游为空返回 503 `cloud_unavailable`；租户身份来自 Bearer 中间件，未配置令牌的纯本机模式记为 `local`
+- 上游地址在启动时校验（浏览器 `http/https/ws/wss`，代理 `http/https/socks4/socks5` 且地区标签合法），非法配置直接拒绝启动
+- 租约与配额状态保存在进程内：多实例部署时需由反向代理把同一租户固定到同一实例，当前不跨实例共享
 
 ## 快照对象存储（可选）
 

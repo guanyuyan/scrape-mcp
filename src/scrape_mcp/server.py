@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 import sys
 import time
@@ -17,6 +18,14 @@ from mcp.server.mcpserver import Context, MCPServer
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from . import __version__, dashboard, metrics
+from .cloud.broker import (
+    CLOUD_DISABLED,
+    LOCAL_TENANT,
+    BrokerError,
+    CloudConfigError,
+    LeaseBroker,
+    build_broker,
+)
 from .config import get_settings
 from .core import deadline as dl
 from .core import errors, requestid, tracing
@@ -645,6 +654,108 @@ async def metrics_endpoint(request) -> Response:
     return Response(
         metrics.render(_l2_snapshot(), _pool_snapshot()), media_type=metrics.CONTENT_TYPE
     )
+
+
+# ---- P2-4b 云端控制面 broker ----
+# 默认关闭；开启后 /cloud/* 由 Bearer 中间件保护，租户身份来自它写入的 scope state
+_cloud_broker: LeaseBroker | None = None
+_cloud_broker_ready = False
+
+
+def get_cloud_broker() -> LeaseBroker | None:
+    """懒加载 broker：未启用返回 None；启用时首个请求/启动校验阶段构建。
+
+    只构建一次，租约状态必须落在同一个实例里；多进程部署时由反向代理
+    把同一租户固定到同一实例（本模块不共享状态）。
+    """
+    global _cloud_broker, _cloud_broker_ready
+    if not _cloud_broker_ready:
+        settings = get_settings()
+        _cloud_broker = build_broker(settings) if settings.cloud_broker_enabled else None
+        _cloud_broker_ready = True
+    return _cloud_broker
+
+
+def _cloud_tenant(request) -> str:
+    """租户名来自鉴权中间件；未配置令牌的纯本机模式统一记为 local。"""
+    state = request.scope.get("state") or {}
+    return str(state.get("scrape_mcp_tenant") or LOCAL_TENANT)
+
+
+def _cloud_response(
+    payload: dict[str, object], status: int = 200, retry_after: float | None = None
+) -> JSONResponse:
+    headers = {"cache-control": "no-store"}
+    if status == 429 and retry_after is not None:
+        headers["retry-after"] = str(math.ceil(retry_after))
+    return JSONResponse(payload, status_code=status, headers=headers)
+
+
+def _cloud_disabled() -> JSONResponse:
+    return _cloud_response(
+        {
+            "ok": False,
+            "error_code": CLOUD_DISABLED,
+            "error": "云端 broker 未启用；请设置 SCRAPE_MCP_CLOUD_BROKER_ENABLED=1",
+            "retryable": False,
+        },
+        404,
+    )
+
+
+async def _cloud_lease(request, kind: str) -> JSONResponse:
+    """申请（POST）或复用（GET）一张上游租约。"""
+    broker = get_cloud_broker()
+    if broker is None:
+        return _cloud_disabled()
+
+    tenant = _cloud_tenant(request)
+    rid = requestid.new_id()
+    try:
+        lease = broker.acquire(kind, tenant, reuse=request.method == "GET")
+    except BrokerError as exc:
+        payload: dict[str, object] = {
+            "ok": False,
+            "error_code": exc.code,
+            "error": exc.message,
+            "retryable": exc.status >= 429,
+            "request_id": rid,
+        }
+        if exc.retry_after is not None:
+            payload["retry_after_s"] = round(exc.retry_after, 1)
+        log_event("cloud.lease_rejected", kind=kind, tenant=tenant, code=exc.code, request_id=rid)
+        return _cloud_response(payload, exc.status, exc.retry_after)
+
+    payload = {"ok": True, **lease.payload(broker.now()), "request_id": rid}
+    log_event("cloud.lease", kind=kind, tenant=tenant, lease_id=lease.lease_id, request_id=rid)
+    return _cloud_response(payload)
+
+
+async def _cloud_usage(request) -> JSONResponse:
+    """本租户用量与剩余额度；不含其它租户明细。"""
+    broker = get_cloud_broker()
+    if broker is None:
+        return _cloud_disabled()
+    tenant = _cloud_tenant(request)
+    return _cloud_response({"ok": True, **broker.usage(tenant), "request_id": requestid.new_id()})
+
+
+@mcp.custom_route("/cloud/browser/lease", methods=["GET", "POST"])
+async def cloud_browser_lease(request) -> JSONResponse:
+    """浏览器上游租约：POST 申请新租约，GET 复用未过期租约。"""
+    return await _cloud_lease(request, "browser")
+
+
+@mcp.custom_route("/cloud/proxy/lease", methods=["GET", "POST"])
+async def cloud_proxy_lease(request) -> JSONResponse:
+    """代理上游租约：POST 申请新租约，GET 复用未过期租约。"""
+    return await _cloud_lease(request, "proxy")
+
+
+@mcp.custom_route("/cloud/usage", methods=["GET"])
+async def cloud_usage(request) -> JSONResponse:
+    """当前租户的租约占用与当日剩余配额。"""
+    return await _cloud_usage(request)
 
 
 # 大页面 + 极小正文 → 疑似 JS 登录墙/骨架页，加 note 提示（不判失败，避免误杀超短正文）。
@@ -3882,6 +3993,12 @@ async def session_import(
 def _run_http(settings, port: int, policies: list[TokenPolicy]) -> None:  # pragma: no cover
     """构建带鉴权的 StreamableHTTP 应用并交给 uvicorn。"""
     import uvicorn
+
+    if settings.cloud_broker_enabled:
+        try:
+            get_cloud_broker()
+        except CloudConfigError as exc:
+            raise SystemExit(f"云端 broker 配置不合法: {exc}") from exc
 
     app = mcp.streamable_http_app(
         json_response=settings.http_json,

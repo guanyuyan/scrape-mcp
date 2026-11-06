@@ -221,6 +221,12 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `HTTP_TOKENS_FILE` | — | Path to the same JSON format, handy for keeping tokens on a volume (exclusive with `HTTP_TOKENS`) |
 | `HTTP_QPS` | `5` | Per-token request rate (token bucket, allows an equal burst); also the default for tenants that omit `qps`; `0` disables |
 | `HTTP_DAILY_QUOTA` | `10000` | Per-token daily request quota (UTC day, resets at midnight); also the default for tenants that omit `daily_quota`; `0` disables |
+| `CLOUD_BROKER_ENABLED` | `false` | Enable the cloud control-plane broker and expose the `/cloud/*` lease endpoints |
+| `CLOUD_BROWSER_UPSTREAMS` | — | Browser upstreams (comma/semicolon/whitespace-separated CDP endpoints, `http/https/ws/wss`), assigned round-robin per tenant |
+| `CLOUD_PROXY_UPSTREAMS` | — | Proxy upstreams (`http/https/socks4/socks5`); an item may carry a region label such as `socks5://host:port\|us` |
+| `CLOUD_LEASE_TTL` | `300` | Lease lifetime in seconds; expired leases are reclaimed automatically |
+| `CLOUD_MAX_LEASES_PER_TENANT` | `2` | Concurrent leases per tenant (browser/proxy counted separately); `0` disables the cap |
+| `CLOUD_DAILY_LEASES` | `0` | Daily lease quota per tenant (UTC day, browser/proxy counted separately and independent of the HTTP quota); `0` disables |
 | `JOB_BACKEND` | `local` | Async crawl backend: `local` (JSON on disk) or `redis` (shared state + queue, requires `mcp-scrape[redis]`) |
 | `REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis connection URL when `JOB_BACKEND=redis` |
 | `REDIS_PREFIX` | `scrape_mcp` | Redis key prefix, so several environments can share one instance |
@@ -761,6 +767,38 @@ export SCRAPE_MCP_REMOTE_BROWSER_CDP_URL=http://127.0.0.1:3000   # Browserless e
 - A failed connection falls back to local channels by default; with `REMOTE_BROWSER_FALLBACK=false` it fails fast so a cloud outage never silently switches to the local exit.
 - Only the L2 browser source changes; L1 fetching and the `login` `cdp_url` argument are unaffected.
 - Remote mode attaches to an existing server-side browser, so `L2_CHANNEL` / `L2_HEADLESS` launch options do not apply; the URL scheme is validated at startup.
+
+## Cloud control-plane broker (optional)
+
+P2-4b covers the **control plane only**: it splits operator-provided browser / proxy upstreams into short-lived per-tenant leases and enforces concurrency and daily quotas. It does not proxy traffic, host browser processes, or produce billing invoices. It is off by default, so local and self-hosted deployments are unaffected.
+
+```bash
+export SCRAPE_MCP_CLOUD_BROKER_ENABLED=1
+export SCRAPE_MCP_CLOUD_BROWSER_UPSTREAMS=http://browser-pool-1:3000,ws://browser-pool-2:3000
+export SCRAPE_MCP_CLOUD_PROXY_UPSTREAMS=socks5://proxy-us:1080|us,http://proxy-hk:8080|hk
+export SCRAPE_MCP_CLOUD_LEASE_TTL=300
+export SCRAPE_MCP_CLOUD_MAX_LEASES_PER_TENANT=2
+export SCRAPE_MCP_CLOUD_DAILY_LEASES=100
+```
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/browser/lease
+# {"ok":true,"lease_id":"...","kind":"browser","url":"http://browser-pool-1:3000",
+#  "region":"","expires_at":"...Z","expires_in_s":300,"request_id":"..."}
+
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/cloud/usage
+# {"ok":true,"tenant":"team-a","lease_ttl_s":300,
+#  "browser":{"active":1,"limit":2,"daily_used":1,"daily_limit":100,"daily_remaining":99,"upstreams":2},
+#  "proxy":{...},"request_id":"..."}
+```
+
+- `POST /cloud/<kind>/lease` requests a new lease; `GET` reuses the current unexpired lease (and only allocates when none exists; reuse does not consume daily quota). `kind` is `browser` or `proxy`
+- Upstreams are assigned round-robin; expired leases are reclaimed automatically. Browser upstreams are CDP endpoints, while proxy items may carry a `|region` label
+- Reaching `CLOUD_MAX_LEASES_PER_TENANT` returns 429 `cloud_lease_limit` with `Retry-After` and `retry_after_s`
+- Exceeding the daily lease quota (`CLOUD_DAILY_LEASES`, reset at UTC midnight, counted separately for browser/proxy and independent of `HTTP_DAILY_QUOTA`) returns 429 `cloud_quota_exceeded`
+- `/cloud/*` returns 404 `cloud_disabled` when the broker is off, and 503 `cloud_unavailable` when the requested upstream pool is empty; the tenant identity comes from the Bearer middleware, and the token-less local mode is recorded as `local`
+- Upstream URLs are validated at startup (browser: `http/https/ws/wss`; proxy: `http/https/socks4/socks5` with a valid region label); invalid config aborts startup
+- Lease and quota state lives in-process: for multi-instance deployments, pin the same tenant to the same instance (state is not shared across instances yet)
 
 ## Object-storage snapshots (optional)
 
