@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.30.0] - 2026-11-06
 
 ### Added
 - 新增 `examples/06_vector_store.py`：dataset JSONL 切块写入 Chroma/Qdrant，metadata 保留 `url` / `title` / `tool` / `ts` / `status`，块 ID 稳定可重复导入；支持 `--dry-run`、`--limit`、`--batch`，`--embedder auto` 在装了 `sentence-transformers` 时用语义向量、否则退化为 hash 向量
