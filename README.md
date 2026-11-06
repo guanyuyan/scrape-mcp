@@ -653,6 +653,18 @@ scrape-mcp recipe list                               # 列出已生效的 recipe
 
 `examples/recipes/` 就是社区配方集：加一份新配方 = 放一个 `<host>.json` 并用 `recipe validate` 验过；CI 会以 `--strict` 校验这八份，坏配方进不来。
 
+分享或批量迁移时用 bundle：一个文件装多份 recipe，带 schema 版本与导出信息。
+
+```bash
+scrape-mcp recipe export --dir examples/recipes -o recipes.bundle.json  # 整个目录打包
+scrape-mcp recipe export --dir examples/recipes cnblogs.com github.com  # 只导出指定 host
+scrape-mcp recipe import recipes.bundle.json                      # 导入到 RECIPES_DIR
+scrape-mcp recipe import recipes.bundle.json --dry-run            # 只打印计划，不写文件
+scrape-mcp recipe import recipes.bundle.json --overwrite          # 覆盖同名但内容不同的本地 recipe
+```
+
+导出会跳过解析失败或有结构错误的文件并给出警告。导入先整体校验（schema/版本、host 重复、选择器语法、`extract` 规则），有任何错误就一个文件都不写；同名但内容不同的 recipe 默认记为冲突、退出码 1，避免误覆盖本地调整；内容完全相同则跳过。
+
 单次覆盖：显式参数优先于 recipe，例如 `web_fetch(url="...", wait_for=".comments")`。
 
 ### 自定义字段类型（插件）
@@ -1124,6 +1136,7 @@ src/scrape_mcp
 │   ├── browser.py     # L2 Playwright + stealth
 │   ├── session.py     # 登录态持久化（多会话 + cookie 导入导出）
 │   ├── recipes.py     # 站点 recipe（按 host 最长后缀匹配、mtime 重载）
+│   ├── recipe_bundle.py # recipe 导出/导入 bundle（schema 版本、整体校验）
 │   ├── cache.py       # HTTP 响应缓存 + 正文/抽取结果缓存
 │   ├── stats.py       # 进程内计数（/stats 端点数据源）
 │   ├── jobs.py        # 异步爬取任务（状态落盘、进度、恢复与取消）

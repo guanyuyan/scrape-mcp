@@ -377,14 +377,93 @@ def _cmd_recipe(argv: list[str]) -> int:
     checker = sub.add_parser("validate", help="校验结构、选择器语法与抽取 schema")
     checker.add_argument("paths", nargs="*", help="要校验的 .json 文件或目录；缺省校验默认目录")
     checker.add_argument("--strict", action="store_true", help="把警告也视为失败")
+    exporter = sub.add_parser("export", help="把本地 recipe 打包成可分享的 bundle")
+    exporter.add_argument("hosts", nargs="*", help="只导出这些 host；缺省导出目录里全部")
+    exporter.add_argument("--dir", help="recipe 目录；缺省为 <DATA_DIR>/recipes")
+    exporter.add_argument("-o", "--out", help="输出文件；缺省打印到 stdout")
+    importer = sub.add_parser("import", help="导入 bundle 到 recipe 目录")
+    importer.add_argument("bundle", help="bundle 的 .json 路径")
+    importer.add_argument("--dir", help="recipe 目录；缺省为 <DATA_DIR>/recipes")
+    importer.add_argument("--overwrite", action="store_true", help="覆盖同名但内容不同的 recipe")
+    importer.add_argument("--dry-run", action="store_true", help="只打印计划，不写文件")
     args = parser.parse_args(argv)
 
+    from .core.recipe_bundle import (
+        BundleImportResult,
+        RecipeBundleError,
+        build_bundle,
+        import_bundle,
+    )
     from .core.recipes import (
         RecipeIssue,
         default_recipe_dir,
         recipe_host,
         validate_recipe_file,
     )
+
+    if args.action == "export":
+        directory = Path(args.dir).expanduser() if args.dir else default_recipe_dir()
+        if not directory.is_dir():
+            print(f"[空] 目录不存在：{directory}（可用 RECIPES_DIR 或 --dir 指定）")
+            return 0
+        bundle, warnings = build_bundle(directory, list(args.hosts))
+        for warning in warnings:
+            print(f"[警告] {warning}", file=sys.stderr)
+        text = json.dumps(bundle, ensure_ascii=False, indent=2) + "\n"
+        if args.out:
+            target = Path(args.out).expanduser()
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            except OSError as exc:
+                print(f"[错误] 写入失败：{exc}", file=sys.stderr)
+                return 2
+            print(f"[完成] 导出 {len(bundle['recipes'])} 个 recipe → {target}")
+        else:
+            sys.stdout.write(text)
+            print(f"[完成] 导出 {len(bundle['recipes'])} 个 recipe", file=sys.stderr)
+        missing = any("未找到 host" in warning for warning in warnings)
+        return 1 if missing else 0
+
+    if args.action == "import":
+        source = Path(args.bundle).expanduser()
+        try:
+            data = json.loads(source.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"[错误] 读取失败：{exc}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as exc:
+            print(
+                f"[错误] JSON 解析失败：{exc.msg}（第 {exc.lineno} 行第 {exc.colno} 列）",
+                file=sys.stderr,
+            )
+            return 1
+        directory = Path(args.dir).expanduser() if args.dir else default_recipe_dir()
+        try:
+            result: BundleImportResult = import_bundle(
+                data, directory, overwrite=args.overwrite, dry_run=args.dry_run
+            )
+        except RecipeBundleError as exc:
+            print(f"[错误] bundle 不可用：{source}", file=sys.stderr)
+            for issue in exc.issues:
+                print(f"  {issue}", file=sys.stderr)
+            return 1
+        label = "[预览]" if args.dry_run else "[写入]"
+        for path in result.written:
+            print(f"{label} {path.name}")
+        for path in result.identical:
+            print(f"[相同] {path.name}")
+        for path in result.conflicts:
+            print(f"[冲突] {path.name}（已存在且内容不同，加 --overwrite 覆盖）")
+        summary = (
+            f"写入 {len(result.written)} 个，相同 {len(result.identical)} 个，"
+            f"冲突 {len(result.conflicts)} 个（{directory}）"
+        )
+        if result.conflicts:
+            print(f"\n[失败] {summary}", file=sys.stderr)
+            return 1
+        print(f"\n[完成] {summary}")
+        return 0
 
     if args.action == "list":
         directory = Path(args.dir).expanduser() if args.dir else default_recipe_dir()

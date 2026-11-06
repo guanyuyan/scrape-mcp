@@ -643,6 +643,18 @@ It reports JSON/encoding problems (including the BOM older Windows editors write
 
 `examples/recipes/` doubles as the community collection: adding a recipe means dropping in a `<host>.json` and getting it through `recipe validate`; CI validates all eight with `--strict`.
 
+Sharing or migrating in bulk uses a bundle — one file holding many recipes, with a schema version and export metadata:
+
+```bash
+scrape-mcp recipe export --dir examples/recipes -o recipes.bundle.json  # pack the whole directory
+scrape-mcp recipe export --dir examples/recipes cnblogs.com github.com  # only these hosts
+scrape-mcp recipe import recipes.bundle.json                      # import into RECIPES_DIR
+scrape-mcp recipe import recipes.bundle.json --dry-run            # print the plan only
+scrape-mcp recipe import recipes.bundle.json --overwrite          # replace differing local recipes
+```
+
+Export skips unreadable or structurally invalid files and warns about them. Import validates the whole bundle first (schema/version, duplicate hosts, selector syntax, `extract` rules) and writes nothing if anything is wrong; a same-host recipe with different content is a conflict (exit code 1) unless `--overwrite` is given, while identical content is skipped.
+
 Per-call overrides: explicit arguments beat the recipe, e.g. `web_fetch(url="...", wait_for=".comments")`.
 
 ### Custom field types (plugins)
@@ -1065,6 +1077,7 @@ src/scrape_mcp
 │   ├── browser.py     # L2 Playwright + stealth
 │   ├── session.py     # Session persistence (named sessions + cookie import/export)
 │   ├── recipes.py     # Site recipes (longest-suffix match, mtime reload)
+│   ├── recipe_bundle.py # Recipe bundle export/import (schema version, full validation)
 │   ├── cache.py       # HTTP response cache + content/extraction result cache
 │   ├── stats.py       # In-process counters (source for /stats)
 │   ├── jobs.py        # Async crawl jobs (state persistence, progress, resume, cancel)
