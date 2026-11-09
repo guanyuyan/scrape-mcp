@@ -122,6 +122,48 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **输出格式可选**：`format=markdown|text|json|chunks`；`json` 给段落数组，`chunks` 直接给 RAG 分块（固定窗口 + overlap + 标题路径），可原样入库。
 - **同域并发闸门**：同一站点默认最多 2 个并发请求，跨站仍可并行，避免批量抓取时把单站打穿。
 - **Stealth 加固**：Wipe `webdriver`、UA 数据、Canvas/WebGL 确定性指纹噪声、时区对齐。
+- **挑战诊断**：被拦截时载荷带 `challenge`（厂商 / 类型 / `sitekey` / `action` / 状态码 / `Retry-After`），把"为什么抓不到"说清楚，便于决定换出口还是交人工。
+- **求解闭环**：可选求解钩子（默认关闭）+ cookie 缓存 + L1/L2 重试，同一站点同一会话只解一次；不内置破解。
+- **住宅出口**：代理池支持 `residential` 类别，被限流/挑战且预算允许时只升级一次住宅出口，凭据全程脱敏。
+
+## 反爬与出口
+
+### 挑战页诊断
+
+页面被判为拦截（`blocked` 非 `none`）时，抓取结果会多一个 `challenge` 字段，正常页面为 `null`：
+
+```json
+{
+  "ok": false,
+  "error_code": "blocked",
+  "blocked": "waf",
+  "challenge": {
+    "provider": "recaptcha",
+    "kind": "captcha",
+    "sitekey": "6Lcabc",
+    "action": "login",
+    "status": 403,
+    "retry_after": null,
+    "evidence": "命中 recaptcha 特征: g-recaptcha"
+  },
+  "diagnostics": {
+    "decisions": ["challenge:recaptcha:captcha", "challenge:sitekey=6Lcabc"],
+    "attempts": 1
+  }
+}
+```
+
+- `provider`：`cloudflare` / `turnstile` / `datadome` / `akamai` / `perimeterx` / `recaptcha` / `hcaptcha` / `unknown`
+- `kind`：`js_challenge` / `interstitial` / `captcha` / `rate_limit` / `login_wall`
+- `sitekey` 只回传前 6 位（求解服务收到的是完整值）；普通 403/404 错误页不带挑战特征，保持 `null`
+- 只扫描正文前 200 KB，避免长文里的"验证码"教程造成误判
+
+### 求解与住宅升级
+
+- 求解钩子默认关闭：`SCRAPE_MCP_CAPTCHA_SOLVER_URL` 留空时整条链路 no-op。配置后把 `{url,status,blocked,provider,kind,sitekey,action}`（不含正文）发给你的合规服务，接受 `{ok,cookies,note,user_agent}` 并重试：先 L1，仍被拦且预算允许再渲染一次 L2
+- 求解缓存：`SCRAPE_MCP_CAPTCHA_COOKIE_CACHE=true` 时按 `(session, host)` 复用求解 cookie（TTL 默认 900 秒，LRU 256，落盘权限 600）；同一站点第二次被拦先用缓存重试，命中不再调用求解服务。cookie 属敏感数据，多租户共用进程请勿开启
+- 住宅升级：配置 `SCRAPE_MCP_PROXY_PROVIDER_TEMPLATE`（`{user}`/`{pass}`/`{host}`/`{region}`/`{session}`）或在代理池写 `url|region|residential`；完整链路仍命中 `rate_limit` / `cloudflare` / `captcha` / `waf` 且预算足够时只升级一次（`decisions` 含 `egress:escalate_residential`），显式 `proxy` 与会话绑定代理不改写
+- 凭据脱敏：`notes`、日志与代理池快照都不含账号密码，必要时显示为 `***`
 
 ## 安装
 
@@ -170,14 +212,19 @@ cp .env.example .env    # 生成配置模板
 | `IMPERSONATE` | `chrome` | curl_cffi 指纹模板 |
 | `REQUEST_TIMEOUT` | `20` | L1 超时（秒） |
 | `PROXY` | — | 单个代理，L1/L2 共用；配置了代理池时作为兜底 |
-| `PROXY_POOL` | — | 代理池（逗号/分号/空白分隔），按站点粘性轮询；非空时优先于 `PROXY` |
+| `PROXY_POOL` | — | 代理池（逗号/分号/空白分隔），按站点粘性轮询；非空时优先于 `PROXY`。条目可写 `url\|region\|kind`，`kind` 取 `dc`（默认）/ `residential`，住宅条目只用于被拦后的一次升级 |
 | `PROXY_POOL_FAIL_THRESHOLD` | `2` | 同一出口连续失败多少次后进入冷却 |
 | `PROXY_POOL_COOLDOWN` | `60` | 出口冷却时长（秒），冷却期内不再分配 |
 | `PROXY_POOL_STICKY_TTL` | `300` | 同一主机固定走同一出口的时长（秒） |
 | `PROXY_SESSIONS` | — | 会话绑定代理（`名字=代理` 条目，逗号/分号/空白分隔），如 `work=http://1.2.3.4:8080`；同一会话（含登录态）固定走该出口。优先级：单请求 `proxy` > 会话绑定 > 代理池 > `PROXY` |
-| `CAPTCHA_SOLVER_URL` | — | 可选 CAPTCHA 服务钩子，留空即关闭（默认）。配置后仅在检测到人机验证时把 URL/状态码/拦截类型转给该端点，接受其返回的 `cookies` 做一次重试 |
+| `CAPTCHA_SOLVER_URL` | — | 可选 CAPTCHA 服务钩子，留空即关闭（默认）。配置后仅在检测到人机验证时把 URL/状态码/拦截类型（识别到挑战时附带 `provider`/`kind`/`sitekey`/`action`）转给该端点，接受其返回的 `cookies` 做一次重试 |
 | `CAPTCHA_SOLVER_KEY` | — | 钩子服务的 Bearer 令牌（可选） |
 | `CAPTCHA_SOLVER_TIMEOUT` | `10` | 钩子调用超时（秒） |
+| `CAPTCHA_COOKIE_CACHE` | `false` | 是否把求解得到的 cookie 按 `(session, host)` 缓存复用；cookie 属敏感数据，多租户共用进程时请勿开启 |
+| `CAPTCHA_COOKIE_TTL` | `900` | 求解 cookie 缓存有效期（秒）；过期视为未命中 |
+| `PROXY_PROVIDER_TEMPLATE` | — | 住宅代理服务商模板，留空不启用住宅升级；支持 `{user}` / `{pass}` / `{host}` / `{region}` / `{session}` 占位符，启动时用假值预展开校验 |
+| `PROXY_PROVIDER_USER` / `PROXY_PROVIDER_PASS` | — | 模板中的账号密码（只出现在展开后的代理 URL，日志与 `notes` 脱敏） |
+| `PROXY_PROVIDER_STICKY` | `true` | 按站点派生稳定 session（`true`，同站点固定同一住宅 IP）或每请求轮换（`false`） |
 | `L2_ENABLED` | `true` | 是否启用 Playwright 升级链 |
 | `L2_CHANNEL` | — | 关联浏览器：空=自带 Chromium，`chrome`/`msedge`=系统 |
 | `L2_SETTLE_TIMEOUT` | `8` | 挑战页等待窗口（秒） |
@@ -400,7 +447,10 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 代理：`proxy`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）只对本次调用生效，L1 与升级后的 L2 走同一个出口；不传则按代理池分配，未配池时沿用 `SCRAPE_MCP_PROXY`。显式传入代理的请求不读也不写共享缓存，避免不同出口的结果混在一起
   - 出口优先级：单请求 `proxy` > 会话绑定（`SCRAPE_MCP_PROXY_SESSIONS`）> 代理池 > 全局 `PROXY`
   - 地区定向：`region`（如 `us` / `hk` / `jp`）只在走代理池时生效，仅从带该地区标签的出口中选择（池条目写成 `http://host:port|us`）；没有该地区出口时直接返回 `invalid_argument`，不会悄悄换出口。会话绑定了代理或显式传了 `proxy` 时不生效，`notes` 会说明实际出口
-  - CAPTCHA 钩子（`SCRAPE_MCP_CAPTCHA_SOLVER_URL`）默认关闭且**不做破解**：仅在检测到人机验证时把 URL/状态码/拦截类型转给你指定的合规服务（人工值守或已获授权的 solver），按对方返回的 `cookies` 重试一次；失败只写 `notes`，不影响原有结果。使用前请确认目标站条款与当地法律，不要用于大规模绕过验证或批量注册
+  - 挑战诊断：被抓页面被判为拦截时，载荷新增 `challenge`（`provider` / `kind` / `sitekey` / `action` / `status` / `retry_after` / `evidence`），正常页面为 `null`。`sitekey` 只回传前 6 位；支持 Cloudflare / Turnstile / DataDome / Akamai / PerimeterX / reCAPTCHA / hCaptcha，无法归类时保持 `null`
+  - CAPTCHA 钩子（`SCRAPE_MCP_CAPTCHA_SOLVER_URL`）默认关闭且**不做破解**：仅在检测到人机验证时把 URL/状态码/拦截类型（识别到挑战时附带 `provider` / `kind` / `sitekey` / `action`）转给你指定的合规服务（人工值守或已获授权的 solver），按对方返回的 `cookies` 重试一次（L1 不行再试一次 L2）；失败只写 `notes`，不影响原有结果。使用前请确认目标站条款与当地法律，不要用于大规模绕过验证或批量注册
+  - 求解缓存：`SCRAPE_MCP_CAPTCHA_COOKIE_CACHE=true` 时把求解得到的 cookie 按 `(session, host)` 缓存 `CAPTCHA_COOKIE_TTL` 秒，同站点再次被拦先用缓存重试，命中不再调用求解服务。cookie 属敏感数据，多租户共用进程时请谨慎开启
+  - 住宅出口升级：配置 `SCRAPE_MCP_PROXY_PROVIDER_TEMPLATE`（或池中 `|residential` 条目）后，完整链路仍命中 `rate_limit` / `cloudflare` / `captcha` / `waf` 且预算足够时，只升级一次住宅出口重试；显式 `proxy` 与会话绑定代理不改写。代理凭据在 `notes` 与日志中脱敏为 `***`
   - 总预算：`deadline_ms`（毫秒，可选）限制整次调用；不够时逐级降级，见"错误码与诊断"中的 `deadline:*` 说明
   - 登录态：`session`（默认 `default`），与 `login` 时的会话名一致即可自动带上对应登录态
   - 渲染参数（仅 L2 生效）：`wait_for`（等 CSS 选择器）、`scroll`（滚动触发懒加载）、`click`（点"加载更多"）；`actions`（动作链，按顺序执行 click/type/press/select/wait/scroll，单个动作失败只写入 `notes`）

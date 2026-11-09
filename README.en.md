@@ -118,6 +118,48 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Selectable output format**: `format=markdown|text|json|chunks`; `json` yields a paragraph array, while `chunks` yields RAG-ready chunks (fixed window + overlap + heading path) that can be stored as-is.
 - **Per-host concurrency gate**: at most 2 concurrent requests per host by default, while different hosts still run in parallel.
 - **Stealth hardening**: `webdriver` wiped, UA data aligned, deterministic Canvas/WebGL noise, timezone matching.
+- **Challenge diagnostics**: blocked fetches carry `challenge` (provider / kind / `sitekey` / `action` / status / `Retry-After`) so callers can tell why a page failed and whether to switch exits or hand it to a human.
+- **Solve loop**: an optional solver hook (off by default), solved-cookie cache and L1/L2 retries mean one solve per site and session; no cracking is bundled.
+- **Residential egress**: pool entries can be tagged `residential`; after rate limits or challenges (and if budget allows) the fetch escalates exactly once, with credentials masked throughout.
+
+## Anti-bot and egress
+
+### Challenge diagnostics
+
+When a page is classified as blocked (`blocked` is not `none`), the fetch payload gains a `challenge` field; normal pages report `null`:
+
+```json
+{
+  "ok": false,
+  "error_code": "blocked",
+  "blocked": "waf",
+  "challenge": {
+    "provider": "recaptcha",
+    "kind": "captcha",
+    "sitekey": "6Lcabc",
+    "action": "login",
+    "status": 403,
+    "retry_after": null,
+    "evidence": "matched recaptcha marker: g-recaptcha"
+  },
+  "diagnostics": {
+    "decisions": ["challenge:recaptcha:captcha", "challenge:sitekey=6Lcabc"],
+    "attempts": 1
+  }
+}
+```
+
+- `provider`: `cloudflare` / `turnstile` / `datadome` / `akamai` / `perimeterx` / `recaptcha` / `hcaptcha` / `unknown`
+- `kind`: `js_challenge` / `interstitial` / `captcha` / `rate_limit` / `login_wall`
+- `sitekey` is truncated to 6 characters in the payload (the solver receives the full value); plain 403/404 error pages carry no challenge markers and stay `null`
+- only the first 200 KB of the document is scanned, so "captcha" tutorials in long articles cannot produce false positives
+
+### Solving and residential escalation
+
+- The solver hook is off by default: with `SCRAPE_MCP_CAPTCHA_SOLVER_URL` empty the whole path is a no-op. When set, `{url,status,blocked,provider,kind,sitekey,action}` (no page body) is posted to your compliant service, which returns `{ok,cookies,note,user_agent}`; the fetch then retries L1 and, if still blocked and budget allows, one L2 render
+- Solve cache: with `SCRAPE_MCP_CAPTCHA_COOKIE_CACHE=true`, solved cookies are reused per `(session, host)` (TTL 900 s, LRU 256, file mode 600); a second block on that site retries from cache without calling the solver. Cookies are sensitive — keep this off when one process serves multiple tenants
+- Residential escalation: set `SCRAPE_MCP_PROXY_PROVIDER_TEMPLATE` (`{user}`/`{pass}`/`{host}`/`{region}`/`{session}`) or tag pool entries `url|region|residential`; if the full chain still hits `rate_limit` / `cloudflare` / `captcha` / `waf` and budget permits, the fetch escalates once (`decisions` contains `egress:escalate_residential`). Explicit `proxy` and session-bound exits are never rewritten
+- Credentials never appear in `notes`, logs or pool snapshots; when a display is needed they are shown as `***`
 
 ## Installation
 
@@ -164,7 +206,7 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `IMPERSONATE` | `chrome` | curl_cffi fingerprint template |
 | `REQUEST_TIMEOUT` | `20` | L1 timeout (seconds) |
 | `PROXY` | — | Single proxy shared by L1 and L2; acts as the fallback when a pool is configured |
-| `PROXY_POOL` | — | Proxy pool (comma/semicolon/whitespace separated), round-robin with per-site stickiness; takes precedence over `PROXY` |
+| `PROXY_POOL` | — | Proxy pool (comma/semicolon/whitespace separated), round-robin with per-site stickiness; takes precedence over `PROXY`. Items may be written as `url\|region\|kind` where `kind` is `dc` (default) or `residential`; residential entries are only used for the one-shot escalation after a block |
 | `PROXY_POOL_FAIL_THRESHOLD` | `2` | Consecutive failures before an exit is cooled down |
 | `PROXY_POOL_COOLDOWN` | `60` | Cooldown seconds for a failing exit; it is not assigned meanwhile |
 | `PROXY_POOL_STICKY_TTL` | `300` | Seconds a host keeps the same exit |
@@ -172,6 +214,11 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `CAPTCHA_SOLVER_URL` | — | Optional CAPTCHA service hook, off when empty (default). When set, a detected challenge is forwarded (URL / status / block type) and the returned `cookies` are used for one retry |
 | `CAPTCHA_SOLVER_KEY` | — | Bearer token for the hook service (optional) |
 | `CAPTCHA_SOLVER_TIMEOUT` | `10` | Hook timeout in seconds |
+| `CAPTCHA_COOKIE_CACHE` | `false` | Cache solved cookies per `(session, host)` and reuse them on a later block; cookies are sensitive, keep it off when one process serves multiple tenants |
+| `CAPTCHA_COOKIE_TTL` | `900` | Solved-cookie cache TTL in seconds; expired entries count as a miss |
+| `PROXY_PROVIDER_TEMPLATE` | — | Residential provider template; empty disables residential escalation. Supports `{user}` / `{pass}` / `{host}` / `{region}` / `{session}` and is validated at startup with dummy values |
+| `PROXY_PROVIDER_USER` / `PROXY_PROVIDER_PASS` | — | Credentials for the template (only used in the expanded proxy URL; masked in logs and `notes`) |
+| `PROXY_PROVIDER_STICKY` | `true` | Derive a stable per-site session (`true`, same residential IP per site) or rotate per request (`false`) |
 | `L2_ENABLED` | `true` | Enable the Playwright escalation path |
 | `L2_CHANNEL` | — | Browser channel: empty = bundled Chromium, `chrome`/`msedge` = system |
 | `L2_SETTLE_TIMEOUT` | `8` | Wait window for challenge pages (seconds) |
@@ -394,7 +441,10 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Proxy: `proxy` (e.g. `http://127.0.0.1:7890`, `socks5://127.0.0.1:1080`) applies to this call only, and both L1 and any L2 escalation use the same exit; omit it to let `SCRAPE_MCP_PROXY_POOL` assign one per site, falling back to `SCRAPE_MCP_PROXY`. An explicit proxy bypasses the shared cache so results from different exits never mix
   - Exit precedence: per-call `proxy` > session binding (`SCRAPE_MCP_PROXY_SESSIONS`) > proxy pool > global `PROXY`
   - Region targeting: `region` (e.g. `us` / `hk` / `jp`) applies only when the pool is used, picking exclusively among exits tagged with that region (write pool items as `http://host:port|us`); if the pool has no such exit the call returns `invalid_argument` instead of silently switching exits. Session-bound proxies and explicit `proxy` take precedence, and `notes` reports the exit actually used
-  - CAPTCHA hook (`SCRAPE_MCP_CAPTCHA_SOLVER_URL`) is off by default and **never cracks CAPTCHAs**: it only forwards a detected challenge (URL / status / block type) to a compliant service you run (a human desk or an authorized solver) and retries once with the returned `cookies`; failures are written to `notes` without discarding the original result. Check the target site's terms and local law before enabling it; do not use it for large-scale challenge bypassing or bulk registration
+  - Challenge diagnostics: blocked pages now carry `challenge` (`provider` / `kind` / `sitekey` / `action` / `status` / `retry_after` / `evidence`); normal pages report `null`. `sitekey` is truncated to its first 6 characters. Recognized providers: Cloudflare / Turnstile / DataDome / Akamai / PerimeterX / reCAPTCHA / hCaptcha; unrecognized pages keep `null`
+  - CAPTCHA hook (`SCRAPE_MCP_CAPTCHA_SOLVER_URL`) is off by default and **never cracks CAPTCHAs**: it only forwards a detected challenge (URL / status / block type, plus `provider` / `kind` / `sitekey` / `action` when recognized) to a compliant service you run (a human desk or an authorized solver) and retries once with the returned `cookies` (one L2 render if L1 still fails); failures are written to `notes` without discarding the original result. Check the target site's terms and local law before enabling it; do not use it for large-scale challenge bypassing or bulk registration
+  - Solve cache: with `SCRAPE_MCP_CAPTCHA_COOKIE_CACHE=true`, cookies from a successful solve are cached per `(session, host)` for `CAPTCHA_COOKIE_TTL` seconds; the next block on that site retries with them instead of calling the solver again. Cookies are sensitive — leave it off when one process serves multiple tenants
+  - Residential escalation: with `SCRAPE_MCP_PROXY_PROVIDER_TEMPLATE` set (or `|residential` pool entries), a call that still hits `rate_limit` / `cloudflare` / `captcha` / `waf` after the full chain escalates once to a residential exit, budget permitting; explicit `proxy` and session-bound exits are never rewritten. Proxy credentials are masked as `***` in `notes` and logs
   - Total budget: optional `deadline_ms` caps the whole call; degradation markers are listed under "Error codes and diagnostics"
   - Session: `session` (default `default`); use the same name as `login` to attach the stored session
   - Render options (L2 only): `wait_for` (CSS selector), `scroll` (trigger lazy loading), `click` ("load more"); `actions` runs an ordered chain (click/type/press/select/wait/scroll) with per-step failures recorded in `notes`

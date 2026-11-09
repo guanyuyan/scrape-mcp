@@ -31,6 +31,8 @@ class HookResult:
     ok: bool
     cookies: dict[str, str] = field(default_factory=dict)
     note: str = ""
+    # 求解服务可顺带返回配套 UA（挑战 cookie 常与 UA 绑定），留空沿用原请求
+    user_agent: str = ""
 
 
 def enabled(settings: Settings) -> bool:
@@ -62,9 +64,13 @@ async def request_solve(
     url: str,
     status: int,
     blocked: str,
+    challenge: dict[str, Any] | None = None,
     deadline: float | None = None,
 ) -> HookResult | None:
     """把挑战页信息转发给外部服务；未配置端点返回 None（调用方视为未启用）。
+
+    请求体是向后兼容的超集：基础字段 ``{url,status,blocked}`` 不变，识别到挑战时
+    追加 ``{provider,kind,sitekey,action}``（不含页面正文）。旧端点忽略多余字段即可。
 
     失败（网络异常/非 JSON/ok=false）都收敛成 ``HookResult(ok=False, note=...)``，
     由调用方写进 notes，不影响已经拿到的 L1 结果。
@@ -77,9 +83,15 @@ async def request_solve(
     if key:
         headers["Authorization"] = f"Bearer {key}"
     timeout = budget.cap(deadline, max(1.0, float(settings.captcha_solver_timeout)))
+    payload: dict[str, Any] = {"url": url, "status": int(status), "blocked": blocked}
+    if challenge:
+        for name in ("provider", "kind", "sitekey", "action"):
+            value = challenge.get(name)
+            if isinstance(value, str) and value:
+                payload[name] = value
     response = await http.post_json(
         endpoint,
-        payload={"url": url, "status": int(status), "blocked": blocked},
+        payload=payload,
         headers=headers,
         timeout=timeout,
     )
@@ -95,6 +107,8 @@ async def request_solve(
     cookies = _parse_cookies(body.get("cookies"))
     note = body.get("note")
     note = note.strip()[:200] if isinstance(note, str) else ""
+    user_agent = body.get("user_agent")
+    user_agent = user_agent.strip()[:256] if isinstance(user_agent, str) else ""
     if not cookies:
         return HookResult(ok=False, note=note or "CAPTCHA 服务未返回可用 cookie")
-    return HookResult(ok=True, cookies=cookies, note=note)
+    return HookResult(ok=True, cookies=cookies, note=note, user_agent=user_agent)

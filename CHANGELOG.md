@@ -2,6 +2,15 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- 挑战页诊断 `core/challenge.py`：从拦截页识别 Cloudflare / Turnstile / DataDome / Akamai / PerimeterX / reCAPTCHA / hCaptcha，提取 `sitekey` / `action`，并区分 `captcha` / `interstitial` / `js_challenge` / `rate_limit` / `login_wall`；`web_fetch` / `web_batch` 载荷新增 `challenge` 字段（正常页为 `null`，`sitekey` 只回传前 6 位），无法归类的错误页保持 `null`
+- CAPTCHA 钩子请求体扩展：识别到挑战时附带 `provider` / `kind` / `sitekey` / `action`，求解服务可返回 `user_agent` 与 cookie 一起重试；L1 重试仍被拦且预算允许时再渲染一次 L2
+- 求解 cookie 缓存（`CAPTCHA_COOKIE_CACHE`，默认关闭）：按 `(session, host)` 记住求解结果与 UA，TTL `CAPTCHA_COOKIE_TTL`（默认 900 秒）、LRU 256，落盘 `DATA_DIR/captcha_cookies.json`（原子写、权限 600）；再次被拦先用缓存重试，命中不再调用求解服务
+- 住宅出口升级：代理池条目支持 `url|region|residential` 第三段，新增 `PROXY_PROVIDER_TEMPLATE` / `PROXY_PROVIDER_USER` / `PROXY_PROVIDER_PASS` / `PROXY_PROVIDER_STICKY` 接入服务商模板（模板启动时用假值预展开校验）；完整链路仍命中 `rate_limit` / `cloudflare` / `captcha` / `waf` 且预算足够时只升级一次住宅出口，显式代理与会话绑定代理不改写
+- 代理池 `snapshot()` 增加 `dc` / `residential` 分类计数；代理凭据在 `notes` 与日志中统一脱敏为 `***`
+
 ## [0.31.0] - 2026-11-06
 
 ### Added

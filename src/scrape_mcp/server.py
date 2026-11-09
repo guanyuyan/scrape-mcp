@@ -478,6 +478,18 @@ def _diagnostics(outcome: FetchOutcome, *, detail: bool = False) -> dict:
     return diag
 
 
+def _challenge_field(outcome: FetchOutcome) -> dict | None:
+    """挑战诊断载荷；sitekey 只保留前 6 位，避免把可用于求解的完整凭证带出工具边界。"""
+    info = outcome.challenge
+    if not info:
+        return None
+    payload = dict(info)
+    sitekey = payload.get("sitekey")
+    if isinstance(sitekey, str) and sitekey:
+        payload["sitekey"] = sitekey[:6]
+    return payload
+
+
 # 合规检查至少要留出的预算：限流等待 + robots.txt 抓取 + 真正发请求
 _COMPLIANCE_MIN_S = 0.5
 
@@ -965,6 +977,7 @@ async def _fetch_html(
             "error": f"{hint}；{explain}",
             "retryable": errors.is_retryable(code),
             "diagnostics": _diagnostics(outcome, detail=True),
+            "challenge": _challenge_field(outcome),
         }
         if outcome.retry_after is not None:
             payload["retry_after_s"] = outcome.retry_after
@@ -1133,6 +1146,7 @@ def _plain_payload(
         "attempts": outcome.attempts,
         "content_type": outcome.content_type,
         "kind": outcome.kind,
+        "challenge": _challenge_field(outcome),
     }
     payload.update(extra)
     if fmt != "markdown":
@@ -1301,6 +1315,7 @@ async def _fetch_dict(
         "elapsed_ms": outcome.elapsed_ms,
         "cached": outcome.cached,
         "attempts": outcome.attempts,
+        "challenge": _challenge_field(outcome),
     }
     if fmt != "markdown":
         payload["format"] = fmt

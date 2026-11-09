@@ -54,6 +54,7 @@ BLOCKED_PAYLOAD = {
     "error",
     "retryable",
     "diagnostics",
+    "challenge",
 }
 
 HTTP_STATUS_PAYLOAD = {
@@ -88,6 +89,7 @@ FETCH_OK_PAYLOAD = {
     "elapsed_ms",
     "cached",
     "attempts",
+    "challenge",
 }
 
 # batch / crawl 的内嵌结果共用同一套主键，但 request_id 只出现在整次调用的顶层

@@ -405,6 +405,7 @@ class BrowserRenderer:
         session: str = "default",
         timeout: float | None = None,
         proxy: str | None = None,
+        cookies: dict[str, str] | None = None,
     ) -> BrowserOutcome:
         t0 = time.perf_counter()
         host = host or urlparse(url).netloc.lower()
@@ -420,6 +421,8 @@ class BrowserRenderer:
             proxy or "",
             timeout or 0.0,
             json.dumps(actions or [], sort_keys=True, ensure_ascii=False),
+            # 求解得到的 cookie 会改变页面状态，必须进合并键，否则会串结果
+            json.dumps(cookies or {}, sort_keys=True, ensure_ascii=False),
         )
         return await self._inflight.run(
             identify,
@@ -434,6 +437,7 @@ class BrowserRenderer:
                 session=session,
                 timeout=timeout,
                 proxy=proxy,
+                cookies=cookies,
             ),
         )
 
@@ -450,6 +454,7 @@ class BrowserRenderer:
         session: str,
         timeout: float | None,
         proxy: str | None = None,
+        cookies: dict[str, str] | None = None,
     ) -> BrowserOutcome:
         # 并发页上限：超出时排队；排队期间不计入在途，空闲回收仍可正常关浏览器
         slots = self._page_slots()
@@ -472,6 +477,7 @@ class BrowserRenderer:
                 session=session,
                 timeout=timeout,
                 proxy=proxy,
+                cookies=cookies,
             )
         finally:
             self._active -= 1
@@ -490,6 +496,7 @@ class BrowserRenderer:
         session: str,
         timeout: float | None,
         proxy: str | None = None,
+        cookies: dict[str, str] | None = None,
     ) -> BrowserOutcome:
         # 单步超时可由调用方的总预算压缩（deadline_ms），默认仍取配置值
         nav_ms = int((timeout or self._s.l2_navigate_timeout) * 1000)
@@ -512,6 +519,9 @@ class BrowserRenderer:
         clicked: bool | None = None
         scroll_rounds = 0
         action_trail: list[dict[str, Any]] = []
+        if cookies:
+            # 求解服务返回的 cookie 要在导航前注入：挑战页首帧就依赖它决定放不放行
+            await self._inject_cookies(context, url, cookies, notes)
         try:
             resp = await page.goto(
                 url,
@@ -651,6 +661,22 @@ class BrowserRenderer:
                 notes.append(f"action[{index}] {name} 失败: {type(exc).__name__}")
                 trail.append({"action": name, "ok": False, "detail": type(exc).__name__})
         return trail
+
+    async def _inject_cookies(
+        self,
+        context: Any,
+        url: str,
+        cookies: dict[str, str],
+        notes: list[str],
+    ) -> None:
+        """把求解得到的 cookie 注入当前 context（按 URL 归属，不污染其他站点）。"""
+        try:
+            await context.add_cookies(
+                [{"name": name, "value": value, "url": url} for name, value in cookies.items()]
+            )
+        except Exception as exc:
+            # cookie 注入失败不致命：继续导航，由页面自身判定是否放行
+            notes.append(f"注入求解 cookie 失败: {type(exc).__name__}")
 
     # ---------- 截图 ----------
 

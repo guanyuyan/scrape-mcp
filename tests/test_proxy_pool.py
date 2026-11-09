@@ -9,7 +9,13 @@ from scrape_mcp.config import Settings
 from scrape_mcp.core.browser import BrowserOutcome
 from scrape_mcp.core.fetcher import Fetcher
 from scrape_mcp.core.http_client import HttpResponse
-from scrape_mcp.core.proxy import ProxyPool, split_pool, valid_proxy
+from scrape_mcp.core.proxy import (
+    ProxyPool,
+    build_provider_proxy,
+    mask_proxy,
+    split_pool,
+    valid_proxy,
+)
 
 URL = "https://a.test/article"
 P1 = "http://127.0.0.1:7891"
@@ -72,7 +78,13 @@ def test_failures_cool_down_and_rebind_host():
 
     pool.report(first, ok=False)
     assert pool.pick("a.test") != first  # 冷却后换一个出口
-    assert pool.snapshot() == {"size": 2, "healthy": 1, "cooling": 1}
+    assert pool.snapshot() == {
+        "size": 2,
+        "healthy": 1,
+        "cooling": 1,
+        "dc": 2,
+        "residential": 0,
+    }
 
 
 def test_success_resets_failure_streak():
@@ -96,7 +108,13 @@ def test_report_ignores_proxy_outside_pool():
     pool = ProxyPool([P1])
     pool.report("http://127.0.0.1:9999", ok=False)
 
-    assert pool.snapshot() == {"size": 1, "healthy": 1, "cooling": 0}
+    assert pool.snapshot() == {
+        "size": 1,
+        "healthy": 1,
+        "cooling": 0,
+        "dc": 1,
+        "residential": 0,
+    }
 
 
 # ---- Fetcher 集成 ----
@@ -216,3 +234,122 @@ def test_deadline_exhausted_does_not_blame_proxy():
 
     assert http.calls == []
     assert fetcher._pool.snapshot()["cooling"] == 0
+
+
+# ---- 住宅出口升级 ----
+
+
+class _ResidentialHttp(_FakeHttp):
+    """第一个出口被拦、住宅出口放行。"""
+
+    def __init__(self, blocked_proxy: str):
+        super().__init__()
+        self.blocked_proxy = blocked_proxy
+
+    async def get(self, url: str, **kwargs) -> HttpResponse:
+        self.calls.append(kwargs)
+        if kwargs.get("proxy") == self.blocked_proxy:
+            return HttpResponse(
+                ok=True,
+                status=403,
+                url=url,
+                content_type="text/html",
+                text=CLOUDFLARE_HTML,
+                elapsed_ms=1,
+            )
+        return HttpResponse(
+            ok=True,
+            status=200,
+            url=url,
+            content_type="text/html",
+            text=PLAIN_HTML,
+            elapsed_ms=1,
+        )
+
+
+def test_pool_residential_entry_is_used_after_block():
+    residential = "socks5://user:pass@127.0.0.1:7894|us|residential"
+    http = _ResidentialHttp(P1)
+    fetcher = _fetcher(
+        http,
+        l2_enabled=False,
+        retry_times=0,
+        proxy_pool=f"{P1},{residential}",
+    )
+
+    outcome = asyncio.run(fetcher.fetch(URL))
+
+    assert outcome.blocked == "none"
+    assert "egress:escalate_residential" in outcome.decisions
+    assert [c["proxy"] for c in http.calls] == [P1, "socks5://user:pass@127.0.0.1:7894"]
+    # 凭据只以脱敏形式出现在 notes
+    assert any("socks5://***@127.0.0.1:7894" in note for note in outcome.notes)
+    assert not any("user:pass" in note for note in outcome.notes)
+
+
+def test_explicit_proxy_never_escalates():
+    residential = f"{P2}|us|residential"
+    http = _ResidentialHttp(P1)
+    fetcher = _fetcher(http, l2_enabled=False, retry_times=0, proxy_pool=residential)
+
+    outcome = asyncio.run(fetcher.fetch(URL, proxy=P1))
+
+    assert outcome.blocked == "cloudflare"
+    assert "egress:escalate_residential" not in outcome.decisions
+    assert [c["proxy"] for c in http.calls] == [P1]
+
+
+def test_provider_template_builds_residential_exit():
+    http = _ResidentialHttp(P1)
+    fetcher = _fetcher(
+        http,
+        l2_enabled=False,
+        retry_times=0,
+        proxy_pool=P1,
+        proxy_provider_template="http://{user}:{pass}@gate.test:8000",
+        proxy_provider_user="u",
+        proxy_provider_pass="p",
+    )
+
+    outcome = asyncio.run(fetcher.fetch(URL))
+
+    assert outcome.blocked == "none"
+    assert http.calls[1]["proxy"] == "http://u:p@gate.test:8000"
+    assert any("http://***@gate.test:8000" in note for note in outcome.notes)
+
+
+def test_invalid_provider_template_fails_fast():
+    import pytest
+
+    with pytest.raises(ValueError):
+        Fetcher(
+            Settings(
+                data_dir=".",
+                proxy_provider_template="http://{user}@",
+            )
+        )
+
+
+def test_build_provider_proxy_session_is_sticky_per_host():
+    template = "http://user-{session}:p@gate.test:8000"
+
+    first = build_provider_proxy(template, host="a.test")
+    same = build_provider_proxy(template, host="a.test")
+    other = build_provider_proxy(template, host="b.test")
+    rotating_a = build_provider_proxy(template, host="a.test", sticky=False)
+    rotating_b = build_provider_proxy(template, host="a.test", sticky=False)
+
+    assert first == same
+    assert first != other
+    assert rotating_a != rotating_b
+
+
+def test_build_provider_proxy_rejects_unknown_placeholder():
+    assert build_provider_proxy("http://{token}@gate.test:8000") is None
+    assert build_provider_proxy("") is None
+
+
+def test_mask_proxy_hides_credentials():
+    assert mask_proxy("http://u:p@127.0.0.1:8000") == "http://***@127.0.0.1:8000"
+    assert mask_proxy(P1) == P1
+    assert mask_proxy("not a url") == "***"

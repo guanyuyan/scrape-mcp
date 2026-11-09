@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     captcha_solver_url: str = ""
     captcha_solver_key: str = ""
     captcha_solver_timeout: float = 10.0
+    # 求解结果缓存：把求解服务返回的 cookie 按 (session, host) 复用，默认关闭。
+    # cookie 属敏感数据，多租户共用进程时开启会跨租户泄露；TTL 到期即失效
+    captcha_cookie_cache: bool = False
+    captcha_cookie_ttl: float = 900.0
+    # 住宅代理服务商模板，留空表示不启用住宅升级。占位符：
+    # {user} {pass} {host} {region} {session}，例如
+    # http://{user}:{pass}@gate.provider.com:8000
+    proxy_provider_template: str = ""
+    proxy_provider_user: str = ""
+    proxy_provider_pass: str = ""
+    # True=按站点派生稳定 session（同站点固定同一住宅 IP）；False=每请求轮换
+    proxy_provider_sticky: bool = True
     accept_language: str = "zh-CN,zh;q=0.9,en;q=0.8"
 
     # ---- M4 缓存与批量 ----
