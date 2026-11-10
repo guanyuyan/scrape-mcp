@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.33.0] - 2026-11-10
 
 ### Added
 - 挑战页诊断 `core/challenge.py`：从拦截页识别 Cloudflare / Turnstile / DataDome / Akamai / PerimeterX / reCAPTCHA / hCaptcha，提取 `sitekey` / `action`，并区分 `captcha` / `interstitial` / `js_challenge` / `rate_limit` / `login_wall`；`web_fetch` / `web_batch` 载荷新增 `challenge` 字段（正常页为 `null`，`sitekey` 只回传前 6 位），无法归类的错误页保持 `null`
