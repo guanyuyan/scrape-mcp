@@ -12,7 +12,7 @@ import time
 from contextlib import asynccontextmanager
 from functools import wraps
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 from mcp.server.mcpserver import Context, MCPServer
 from starlette.responses import HTMLResponse, JSONResponse, Response
@@ -78,6 +78,8 @@ from .extract.chunks import (
 )
 from .extract.compact import LINK_POLICIES, compact_html
 from .extract.documents import DocumentError, document_text
+from .extract.fit import build_token_report, fit_markdown
+from .extract.inspect import inspect_html
 from .extract.links import extract_links, next_link
 from .extract.llm import (
     MAX_PROMPT_CHARS,
@@ -862,6 +864,7 @@ async def _fetch_html(
     scroll: bool | None = None,
     click: str | None = None,
     actions: list[dict] | None = None,
+    force_l2: bool = False,
     bypass_cache: bool = False,
     session: str = "default",
     deadline: float | None = None,
@@ -905,6 +908,7 @@ async def _fetch_html(
                 scroll=bool(scroll),
                 click=click,
                 actions=actions,
+                force_l2=force_l2,
                 bypass_cache=bypass_cache,
                 session=session,
                 deadline=deadline,
@@ -1231,6 +1235,8 @@ async def _fetch_dict(
 
     budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
     recipe = _recipe_for(url)
+    # fit_markdown 会改变正文内容，必须进入缓存 key；默认仍输出普通 markdown
+    fit_mode = fmt == "fit_markdown" or (fmt == "markdown" and settings.fit_markdown_default)
     cache: ResultCache | None = None
     key = ""
     if _cacheable(
@@ -1253,6 +1259,7 @@ async def _fetch_dict(
             chunk_overlap=chunk_overlap,
             link_policy=link_policy,
             budget=budget,
+            fit=fit_mode,
             root=recipe.root_selector if recipe else None,
             wait_for=wait_for if wait_for is not None else (recipe.wait_for if recipe else None),
             click=click if click is not None else (recipe.click if recipe else None),
@@ -1298,6 +1305,15 @@ async def _fetch_dict(
         root_selector=recipe.root_selector if recipe else None,
     )
 
+    content = result.content
+    dropped: dict[str, int] = {}
+    fit_applied = False
+    if fit_mode:
+        fitted = fit_markdown(content)
+        content = fitted.content
+        dropped = fitted.dropped
+        fit_applied = fitted.applied
+
     payload = {
         "ok": True,
         "url": url,
@@ -1305,8 +1321,8 @@ async def _fetch_dict(
         "status": outcome.status,
         "tier": outcome.tier,
         "title": result.title,
-        "content": result.content,
-        "token_estimate": count_tokens(result.content),
+        "content": content,
+        "token_estimate": count_tokens(content),
         "truncated": result.truncated,
         "blocks": result.blocks,
         "links_kept": result.links_kept,
@@ -1320,17 +1336,25 @@ async def _fetch_dict(
     if fmt != "markdown":
         payload["format"] = fmt
         if fmt == "text":
-            payload["content"] = to_plain_text(result.content)
+            payload["content"] = to_plain_text(content)
             payload["token_estimate"] = count_tokens(payload["content"])
         elif fmt == "chunks":
-            payload["content"] = chunk_markdown(
-                result.content, size=chunk_size, overlap=chunk_overlap
-            )
+            payload["content"] = chunk_markdown(content, size=chunk_size, overlap=chunk_overlap)
             payload["chunk_count"] = len(payload["content"])
             payload["token_estimate"] = sum(c["tokens"] for c in payload["content"])
-        else:  # json：按行分块，方便调用方逐段入库/切片
-            payload["content"] = to_blocks(result.content)
+        elif fmt == "json":  # json：按行分块，方便调用方逐段入库/切片
+            payload["content"] = to_blocks(content)
             payload["token_estimate"] = sum(count_tokens(b) for b in payload["content"])
+    if fit_mode:
+        final = payload["content"]
+        final_text = final if isinstance(final, str) else "\n".join(str(item) for item in final)
+        payload["token_report"] = build_token_report(
+            html_chars=len(outcome.html),
+            content=final_text,
+            tokens=payload["token_estimate"],
+            dropped=dropped,
+            fit=fit_applied,
+        )
     if outcome.notes:
         payload["notes"] = outcome.notes
     if debug:
@@ -1578,6 +1602,119 @@ async def _search_once(
     return hits, {"cached": cached}
 
 
+_TRACKING_PARAMS = ("gclid", "fbclid", "msclkid", "spm")
+
+
+def _canonical_url(url: str) -> str:
+    """去掉 fragment 与跟踪参数，避免同一页面的多个分享链接重复占预算。"""
+    parts = urlsplit(url)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and key.lower() not in _TRACKING_PARAMS
+    ]
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), parts.path, urlencode(query), "")
+    )
+
+
+def _read_targets(hits: list[SearchHit], *, top_k: int, per_host: int) -> list[SearchHit]:
+    """按排名挑出要读正文的结果：URL 去重 + 同域条数上限。"""
+    picked: list[SearchHit] = []
+    seen: set[str] = set()
+    counts: dict[str, int] = {}
+    for hit in hits:
+        key = _canonical_url(hit.url)
+        host = (urlparse(hit.url).hostname or "").lower()
+        if key in seen or counts.get(host, 0) >= per_host:
+            continue
+        seen.add(key)
+        counts[host] = counts.get(host, 0) + 1
+        picked.append(hit)
+        if len(picked) >= top_k:
+            break
+    return picked
+
+
+async def _read_search_hits(
+    hits: list[SearchHit],
+    *,
+    top_k: int,
+    max_tokens: int,
+    content_format: str,
+    deadline: float | None,
+    proxy: str | None,
+) -> tuple[list[dict], dict]:
+    """并发读 top_k 的正文，并按排名顺序在 token 预算内填充。
+
+    单页失败只写 read_error，不影响其他结果；未读到的条目保留标题/URL/摘要，
+    用 truncated=true 提示"正文未返回"。
+    """
+    settings = get_settings()
+    targets = _read_targets(hits, top_k=top_k, per_host=max(1, settings.search_read_per_host))
+    fmt = "text" if content_format == "text" else "markdown"
+    sem = asyncio.Semaphore(max(1, settings.search_read_concurrency))
+
+    async def read_one(hit: SearchHit) -> dict:
+        async with sem:
+            return await _fetch_dict(
+                hit.url,
+                max_tokens,
+                "none",
+                fmt=fmt,
+                deadline=deadline,
+                proxy=proxy,
+                record_tool="search_read",
+            )
+
+    fetched = await asyncio.gather(*(read_one(hit) for hit in targets), return_exceptions=True)
+    outcomes = {hit.url: item for hit, item in zip(targets, fetched, strict=False)}
+
+    results: list[dict] = []
+    used = read = skipped = 0
+    for rank, hit in enumerate(hits, start=1):
+        item = {
+            "rank": rank,
+            "title": hit.title,
+            "url": hit.url,
+            "snippet": hit.snippet,
+            "engine": hit.engine,
+            "published_at": hit.published_at,
+        }
+        payload = outcomes.get(hit.url)
+        if payload is None:
+            item["truncated"] = True
+            results.append(item)
+            continue
+        if isinstance(payload, BaseException):
+            item["read_error"] = f"{type(payload).__name__}: {payload}"[:160]
+            item["truncated"] = False
+            skipped += 1
+        elif not payload.get("ok"):
+            item["read_error"] = str(payload.get("error") or "正文抓取失败")[:160]
+            item["truncated"] = False
+            skipped += 1
+        else:
+            tokens = int(payload.get("token_estimate") or 0)
+            if used + tokens > max_tokens and read > 0:
+                item["truncated"] = True
+                skipped += 1
+            else:
+                item["content"] = payload.get("content")
+                item["content_chars"] = len(item["content"] or "")
+                item["truncated"] = bool(payload.get("truncated"))
+                used += tokens
+                read += 1
+        results.append(item)
+
+    return results, {
+        "budget": max_tokens,
+        "used": used,
+        "results_read": read,
+        "results_skipped": skipped,
+    }
+
+
 @_tool()
 async def web_search(
     query: str,
@@ -1590,10 +1727,16 @@ async def web_search(
     bypass_cache: bool = False,
     deadline_ms: int | None = None,
     proxy: str | None = None,
+    read: bool = False,
+    top_k: int = 3,
+    max_tokens: int | None = None,
+    content_format: str = "markdown",
 ) -> str:
     """搜索关键词，返回结构化的结果列表（标题 / URL / 摘要），不抓结果页正文。
 
     适合"先找入口再抓正文"的两步流程：本工具负责发现候选 URL，正文仍交给 web_fetch。
+    传 ``read=true`` 时会并发抓取 top_k 条结果的正文并在 token 预算内返回，
+    一次调用即可完成"搜索 + 阅读"。
 
     Args:
         query: 搜索关键词，不能为空。
@@ -1611,6 +1754,10 @@ async def web_search(
         bypass_cache: 跳过并绕过搜索结果缓存，强制现查。
         deadline_ms: 整次调用的总预算（毫秒），不传表示不限；回退同样受此预算约束。
         proxy: 本次请求使用的代理；不传则按代理池分配，未配池时沿用全局配置。
+        read: True 时同时抓取前 top_k 条结果的正文（默认 False，行为与旧版本一致）。
+        top_k: read=true 时要读正文的条数，1~10，默认 3。
+        max_tokens: read=true 时的正文 token 总预算；不传取配置 search_read_max_tokens。
+        content_format: read=true 时正文形态，markdown（默认）或 text。
     """
     if not isinstance(query, str) or not query.strip():
         return _payload(
@@ -1642,6 +1789,16 @@ async def web_search(
         return _payload(**engines_err)
     if fallback is not None and not isinstance(fallback, bool):
         return _payload(**_argument_error("fallback 必须是布尔值"))
+    if not isinstance(read, bool):
+        return _payload(**_argument_error("read 必须是布尔值"))
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 10:
+        return _payload(**_argument_error("top_k 需为 1~10 的整数"))
+    if max_tokens is not None and (
+        isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 500
+    ):
+        return _payload(**_argument_error("max_tokens 需为不小于 500 的整数"))
+    if content_format not in ("markdown", "text"):
+        return _payload(**_argument_error("content_format 需为 markdown 或 text"))
 
     settings = get_settings()
     name = (provider or settings.search_provider or "duckduckgo").strip().lower()
@@ -1677,6 +1834,15 @@ async def web_search(
     limit = min(max_results, max(1, int(settings.search_max_results)))
     use_fallback = settings.search_fallback if fallback is None else fallback
     chain = _search_chain(name, settings, use_fallback)
+    read_budget = 0
+    if read:
+        read_budget = max(
+            500,
+            min(
+                int(max_tokens or settings.search_read_max_tokens),
+                max(500, settings.search_read_hard_max_tokens),
+            ),
+        )
 
     cache: ResultCache | None = None
     key = ""
@@ -1693,6 +1859,10 @@ async def web_search(
             site=site or "",
             time_range=time_range or "",
             engines=engines or [],
+            read=read,
+            top_k=top_k if read else 0,
+            read_budget=read_budget,
+            content_format=content_format if read else "",
         )
         if (hit := _cache_hit(cache, key)) is not None:
             return _payload(**hit)
@@ -1712,12 +1882,17 @@ async def web_search(
             proxy=proxy,
         )
         if hits is not None:
-            payload = {
-                "ok": True,
-                "query": query,
-                "provider": backend,
-                "count": len(hits),
-                "results": [
+            if read:
+                results, token_meta = await _read_search_hits(
+                    hits,
+                    top_k=top_k,
+                    max_tokens=read_budget,
+                    content_format=content_format,
+                    deadline=deadline,
+                    proxy=proxy,
+                )
+            else:
+                results = [
                     {
                         "rank": i,
                         "title": hit.title,
@@ -1727,11 +1902,19 @@ async def web_search(
                         "published_at": hit.published_at,
                     }
                     for i, hit in enumerate(hits, start=1)
-                ],
+                ]
+            payload = {
+                "ok": True,
+                "query": query,
+                "provider": backend,
+                "count": len(hits),
+                "results": results,
                 "attempts": attempts,
                 "elapsed_ms": max(1, int((time.perf_counter() - started) * 1000)),
                 "cached": bool(meta.get("cached")),
             }
+            if read:
+                payload["tokens"] = token_meta
             if cache is not None:
                 cache.put(key, payload)
             return _payload(**payload)
@@ -1748,6 +1931,95 @@ async def web_search(
         error_code=first["error_code"],
         error=first["error"],
         attempts=attempts,
+    )
+
+
+@_tool()
+async def web_inspect(
+    url: str,
+    max_elements: int | None = None,
+    session: str = "default",
+    deadline_ms: int | None = None,
+    proxy: str | None = None,
+    region: str | None = None,
+) -> str:
+    """只读扫描页面，列出可点击/可输入元素、表单与分页候选。
+
+    返回的每个元素都带 ``ref``（稳定 CSS 选择器），可直接放进 web_fetch /
+    web_screenshot 的 ``actions[].selector`` 执行"输入 → 点击 → 等待"，
+    不需要模型猜选择器。只读：不执行任意 JS，不返回整页 HTML。
+
+    Args:
+        url: 目标网页完整 URL。
+        max_elements: 最多返回多少个元素；不传取配置 inspect_max_elements（默认 120）。
+        session: 已登录会话名，渲染时带上该会话的 cookie。
+        deadline_ms: 整次调用的总预算（毫秒），不传表示不限。
+        proxy: 本次请求使用的代理；不传则按代理池分配。
+        region: 地区定向（如 us / hk / jp），只在走代理池时生效。
+    """
+    settings = get_settings()
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if (session_err := _session_error(session)) is not None:
+        return _payload(**session_err)
+    if max_elements is not None and (
+        isinstance(max_elements, bool) or not isinstance(max_elements, int) or max_elements < 1
+    ):
+        return _payload(**_argument_error("max_elements 需为正整数"))
+    proxy, proxy_err = _proxy_arg(proxy)
+    if proxy_err is not None:
+        return _payload(**proxy_err)
+    region, region_err = _region_arg(region, session=session)
+    if region_err is not None:
+        return _payload(**region_err)
+    deadline, deadline_err = _deadline_arg(deadline_ms)
+    if deadline_err is not None:
+        return _payload(**deadline_err)
+
+    limit = min(
+        int(max_elements or settings.inspect_max_elements),
+        max(1, settings.inspect_hard_max_elements),
+    )
+    outcome, error = await _fetch_html(
+        url,
+        session=session,
+        deadline=deadline,
+        proxy=proxy,
+        region=region,
+        force_l2=True,
+    )
+    if error is not None:
+        return _payload(**error)
+    assert outcome is not None
+    if outcome.kind != "html":
+        return _payload(
+            ok=False,
+            url=url,
+            error_code=errors.UNSUPPORTED_CONTENT,
+            error="该地址不是 HTML 页面，无法生成交互地图",
+            tier=outcome.tier,
+        )
+
+    found = inspect_html(outcome.html, outcome.final_url or url, limit)
+    notes = list(outcome.notes)
+    if outcome.tier != "l2":
+        notes.append("inspect:l1_fallback（浏览器渲染不可用，元素可能不完整）")
+    return _payload(
+        ok=True,
+        url=url,
+        final_url=outcome.final_url,
+        status=outcome.status,
+        tier=outcome.tier,
+        count=len(found["elements"]),
+        elements=found["elements"],
+        forms=found["forms"],
+        next=found["next"],
+        elapsed_ms=outcome.elapsed_ms,
+        notes=notes,
     )
 
 

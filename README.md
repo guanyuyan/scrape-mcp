@@ -89,7 +89,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 | 腾讯新闻首页 | 列表/门户 | L2 | 338KB | ~1.4k token（约 1.6%） | 动态页升级浏览器渲染 |
 | 极客邦首页 | SPA/动态 | L2 | 12KB | ~1.4k token | JS 骨架页，需渲染才有正文 |
 
-**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、变更检测 `web_watch`、定时监控 `web_schedule`、搜索 `web_search`、截图 `web_screenshot`、站点 URL 发现 `web_map`、sitemap 增量索引 `web_index`、异步爬取任务 `web_crawl_start/status/cancel/list`、登录持久化 `login`，缓存默认开启。
+**形态**：本地 MCP Server（stdio/HTTP 均可），隐私可控；支持单页 `web_fetch`、批量 `web_batch`、结构化抽取 `web_extract`、变更检测 `web_watch`、定时监控 `web_schedule`、搜索 `web_search`、页面交互地图 `web_inspect`、截图 `web_screenshot`、站点 URL 发现 `web_map`、sitemap 增量索引 `web_index`、异步爬取任务 `web_crawl_start/status/cancel/list`、登录持久化 `login`，缓存默认开启。
 
 ---
 
@@ -110,7 +110,8 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。页数多时改用 `web_crawl_start` 起后台任务，用 `status` 轮询、`cancel` 停止，进程重启后自动续跑。
 - **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
 - **定时监控与通知**：`web_schedule` 把 `web_watch` / `web_index` 变成计划任务（任务可查、可暂停、可手动跑一次），由本机 `scrape-mcp schedule daemon` 按间隔执行；检测到真实变更后 POST 到你配置的 webhook。首次执行只建立基线，不发通知；抓取失败只记状态，不覆盖快照。
-- **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要 / 来源引擎 / 发布时间），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API 或配置 key 使用 Brave / Tavily；支持 `site`、`time_range`、`engines` 过滤与后端失败自动回退，结果可缓存，适合"先搜再抓"的两步流程。
+- **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要 / 来源引擎 / 发布时间），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API 或配置 key 使用 Brave / Tavily；支持 `site`、`time_range`、`engines` 过滤与后端失败自动回退，结果可缓存。传 `read=true` 时一次调用并发抓取前 `top_k` 条正文，按 `max_tokens` 预算截断并去重，直接完成"搜索 + 阅读"。
+- **页面交互地图**：`web_inspect` 只读扫描页面，列出可点击/可输入元素、表单字段与"下一页"候选；每个元素带稳定 `ref`（合法 CSS 选择器），可直接作为 `actions[].selector` 执行，不用模型猜选择器。不执行任意 JS，不返回整页 HTML。
 - **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG 或整页 PDF，支持整页/视口、自定义尺寸、元素裁剪、设备预设（desktop/mobile）、截图前隐藏固定导航/弹窗，以及等待元素与额外延时；`actions` 可在截图前先点击/输入/翻页。复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
 - **站点索引**：`web_index` 读 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`），递归展开 sitemap index 并解压 `.gz`；清单落盘后，下次返回新增 / 变更 / 未变 / 移除，可选回抓正文比哈希过滤"只改了时间戳"的假变更，或输出与 `web_watch` 同口径的差异摘要。
 - **站点 URL 发现**：`web_map` 同时读 sitemap 与入口页站内链接（可选合并 `web_search` 结果），同一 URL 只出现一次并标出来源；支持 `include`/`exclude` 正则、`search` 子串过滤与 `limit` 截断，适合无 sitemap 的站点。
@@ -119,7 +120,7 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
 - **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`；第三方包可通过入口点注册自定义字段类型。
 - **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
-- **输出格式可选**：`format=markdown|text|json|chunks`；`json` 给段落数组，`chunks` 直接给 RAG 分块（固定窗口 + overlap + 标题路径），可原样入库。
+- **输出格式可选**：`format=markdown|fit_markdown|text|json|chunks`；`json` 给段落数组，`chunks` 直接给 RAG 分块（固定窗口 + overlap + 标题路径），可原样入库。`fit_markdown` 在 compact 之后继续剔除导航、页脚、评论、推荐位与广告，并返回 `token_report`（原始 HTML 体积、输出体积、token 估算、压缩比、各类丢弃块数）。
 - **同域并发闸门**：同一站点默认最多 2 个并发请求，跨站仍可并行，避免批量抓取时把单站打穿。
 - **Stealth 加固**：Wipe `webdriver`、UA 数据、Canvas/WebGL 确定性指纹噪声、时区对齐。
 - **挑战诊断**：被拦截时载荷带 `challenge`（厂商 / 类型 / `sitekey` / `action` / 状态码 / `Retry-After`），把"为什么抓不到"说清楚，便于决定换出口还是交人工。
@@ -258,6 +259,12 @@ cp .env.example .env    # 生成配置模板
 | `SEARCH_TAVILY_API_KEY` | — | Tavily API key；留空则该后端不可用，也不参与回退 |
 | `SEARCH_FALLBACK` | `true` | 后端失败时是否自动回退到其他已配置的后端（duckduckgo → searxng → brave → tavily） |
 | `SEARCH_MAX_RESULTS` | `20` | `web_search` 单次返回条数硬上限 |
+| `SEARCH_READ_CONCURRENCY` | `3` | `web_search(read=true)` 并发抓取正文的页面数 |
+| `SEARCH_READ_MAX_TOKENS` | `4000` | `web_search(read=true)` 未显式传 `max_tokens` 时的默认 token 预算 |
+| `SEARCH_READ_HARD_MAX_TOKENS` | `16000` | `web_search(read=true)` 单次 token 预算硬上限，超出按此截断 |
+| `SEARCH_READ_PER_HOST` | `2` | `web_search(read=true)` 同一主机最多保留几条结果 |
+| `INSPECT_MAX_ELEMENTS` | `120` | `web_inspect` 默认返回的可交互元素数（硬上限 300） |
+| `FIT_MARKDOWN_DEFAULT` | `false` | `format` 未显式指定时是否对 markdown 默认启用 `fit_markdown` 裁剪 |
 | `LLM_BASE_URL` | — | OpenAI 兼容端点根地址（如 `https://api.deepseek.com/v1`）；留空则完全不发起 LLM 调用 |
 | `LLM_API_KEY` | — | LLM 端点 key（Bearer）；本地兼容端点可不填 |
 | `LLM_MODEL` | — | 模型名；与 `LLM_BASE_URL` 同时配置才启用 LLM 辅助抽取 |
@@ -440,7 +447,8 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
 
 - **`web_fetch(url, max_tokens=4000, link_policy="internal", format="markdown", ...)`** → 状态 + 极省正文
   - `link_policy`: `internal`（站内相对链接+站外降级）/ `all` / `none`
-  - `format`: `markdown`（默认，保留标题/列表/链接）/ `text`（剥掉标记的纯文本）/ `json`（`content` 为段落数组）/ `chunks`（RAG 分块，见下）
+  - `format`: `markdown`（默认，保留标题/列表/链接）/ `fit_markdown`（在 markdown 基础上再剔除导航/页脚/评论/推荐/广告）/ `text`（剥掉标记的纯文本）/ `json`（`content` 为段落数组）/ `chunks`（RAG 分块，见下）
+  - `format=fit_markdown` 时载荷额外返回 `token_report`：`raw_chars`（原始 HTML 字符数）/ `output_chars` / `output_tokens_est` / `compression_ratio` / `dropped`（nav/footer/comments/related/ads 各丢弃多少行）/ `fit`（是否真的裁剪；触发保护回退时为 `false`）
   - `format=chunks`: `content` 为分块数组，每块含 `index` / `text` / `heading_path`（标题层级路径）/ `start` / `end`（在正文中的字符偏移）/ `tokens`；顶层另有 `chunk_count`，可直接写入向量库
   - `chunk_size` / `chunk_overlap`: `chunks` 模式的窗口与重叠字符数（默认 `1200` / `200`；窗口 100~8000，重叠不超过窗口一半）
   - 抓取参数：`headers` / `cookies`（自定义请求，不走共享缓存）、`timeout`、`bypass_cache`
@@ -502,13 +510,21 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `list` / `get` 查看任务与上次状态；`pause` / `resume` 启停（暂停后 daemon 不再执行）；`delete` 删除调度状态（页面快照保留）
   - `run` 立即执行一次：首次返回 `first_seen=true` 且不发通知；之后仅在真实变更时推送 webhook，失败不影响任务状态
   - 实际执行由 `scrape-mcp schedule daemon` 驱动（见下文「定时监控」）；任务状态落在 `DATA_DIR/schedule/tasks.json`
-- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, ...)`** → 搜索关键词，返回结构化结果列表
+- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, read=False, top_k=3, max_tokens=None, content_format="markdown", ...)`** → 搜索关键词，返回结构化结果列表
   - `provider`: `duckduckgo`（默认，取 `SEARCH_PROVIDER`）/ `searxng`（需先设 `SEARCH_SEARXNG_URL`）/ `brave` / `tavily`（需先设对应 key）
   - `site` 以 `site:` 运算符透传给后端（是否严格限定取决于该引擎支持程度）；`time_range` 取 `day` / `week` / `month` / `year`；`engines` 为 SearXNG 引擎名单（仅对 searxng 生效）
   - 每条结果含 `rank` / `title` / `url` / `snippet` / `engine` / `published_at`；`attempts` 记录回退前的失败后端
+  - `read=true` 时并发抓取前 `top_k` 条（1~10）的结果正文，每条新增 `content` / `content_chars` / `truncated`（或 `read_error`）；顶层 `tokens` 给出 `budget` / `used` / `results_read` / `results_skipped`
+  - 阅读模式会先按规范化 URL 去重（忽略 `utm_*` 等跟踪参数）并限制同域条数（`SEARCH_READ_PER_HOST`）；正文按排名顺序填充，超出 `max_tokens` 的条目只保留标题/URL/摘要并标 `truncated=true`；单页失败不影响其他结果
+  - `content_format` 取 `markdown`（默认）或 `text`；`max_tokens` 默认取 `SEARCH_READ_MAX_TOKENS`，硬上限 `SEARCH_READ_HARD_MAX_TOKENS`
   - 后端失败（限流/拦截/传输错误）时按 `fallback`（默认取 `SEARCH_FALLBACK`）自动回退到其他已配置的后端；全部不可用时行为与之前一致
   - 搜索服务按接口使用：仍遵守主机白/黑名单与全局限流，但不套目标站的 robots 抓取规则
-  - `bypass_cache` 强制现查；`proxy` 与 `deadline_ms` 语义同 `web_fetch`，回退同样受总预算约束
+  - `bypass_cache` 强制现查；`proxy` 与 `deadline_ms` 语义同 `web_fetch`，回退与正文抓取同样受总预算约束
+- **`web_inspect(url, max_elements=None, session="default", deadline_ms=None, proxy=None, region=None)`** → 只读页面交互地图
+  - 返回 `elements`（`ref` / `role` / `tag` / `text` / `name` / `type` / `href` / `disabled`）、`forms`（`action` / `method` / `fields`）与 `next`（"下一页"候选）
+  - `ref` 是稳定 CSS 选择器（优先 id / data-testid / name / aria-label，退化到 nth-child 路径），可直接用于 `web_fetch` / `web_screenshot` 的 `actions[].selector`；同页两次调用结果一致
+  - 默认用浏览器渲染（`tier=l2`）；浏览器不可用或预算不足时回退 L1 并在 `notes` 写 `inspect:l1_fallback`
+  - `max_elements` 默认 `INSPECT_MAX_ELEMENTS`（120），硬上限 300；只返回轻量字段，不含整页 HTML，也不提供任意 JS 执行
 - **`web_screenshot(url, path=None, full_page=False, width=None, height=None, wait_ms=0, selector=None, hide=None, device=None, pdf=False, ...)`** → 浏览器渲染并截图，返回本地 PNG/PDF 路径
   - 不传 `path` 时存到 `DATA_DIR/screenshots/`；`full_page=true` 截整页，否则只截视口；`pdf=true` 导出整页 PDF（需 Chromium，忽略元素裁剪）
   - `selector` 截图前等待该 CSS 选择器出现，命中时按元素包围盒裁剪；未命中或元素不可见时回退整页并在 `notes` 说明
@@ -982,6 +998,7 @@ from scrape_mcp.sdk import (
     extract,
     fetch,
     index,
+    inspect,
     screenshot,
     search,
     site_map,
@@ -1062,7 +1079,17 @@ python examples/03_crawl_docs.py --max-pages 5 --out docs.md
 
 ## 基准
 
-三类基准，口径不同：`bench.py` 看缓存带来的延迟收益，`bench_sites.py` 看真实站点上取到的内容对不对、全不全，`benchmarks/bench_core.py` 看本地热路径吞吐有没有退化。
+三类基准，口径不同：`bench.py` 看缓存带来的延迟收益，`bench_sites.py` 看真实站点上取到的内容对不对、全不全，`benchmarks/bench_core.py` 看本地热路径吞吐有没有退化；`bench_search_read.py` 单独对比"搜索 + 逐个抓取"与 `read=true` 的耗时和 token。
+
+### 搜索即阅读
+
+```bash
+python scripts/bench_search_read.py                      # 默认查询，top-3
+python scripts/bench_search_read.py --query "async python" --top-k 5
+python scripts/bench_search_read.py --json                # 机器可读
+```
+
+两条路径都用同一查询、同样条数与预算：先用 `search` 再顺序 `fetch` 每条，与一次 `search(read=true)` 相比。脚本输出耗时、token 总量与读到条数，需要能访问搜索后端与目标站点。
 
 ### 缓存与延迟
 

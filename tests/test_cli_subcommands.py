@@ -318,6 +318,7 @@ def test_sdk_module_is_the_programmatic_entry():
         "extract",
         "fetch",
         "index",
+        "inspect",
         "screenshot",
         "search",
         "site_map",

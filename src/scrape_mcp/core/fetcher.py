@@ -200,6 +200,7 @@ class Fetcher:
         scroll: bool = False,
         click: str | None = None,
         actions: list[dict[str, Any]] | None = None,
+        force_l2: bool = False,
         bypass_cache: bool = False,
         session: str = "default",
         deadline: float | None = None,
@@ -224,6 +225,7 @@ class Fetcher:
             scroll=scroll,
             click=click,
             actions=actions,
+            force_l2=force_l2,
             # 显式指定的出口可能让同一 URL 拿到不同内容，这类结果不进共享缓存
             bypass_cache=bypass_cache,
             allow_cache=allow_cache,
@@ -554,6 +556,7 @@ class Fetcher:
         scroll: bool = False,
         click: str | None = None,
         actions: list[dict[str, Any]] | None = None,
+        force_l2: bool = False,
         bypass_cache: bool = False,
         allow_cache: bool = True,
         session: str = "default",
@@ -562,8 +565,9 @@ class Fetcher:
     ) -> FetchOutcome:
         host = _host_of(url)
         sticky_failed = False
-        # 动作链只能在浏览器里执行：跳过 L1 直接渲染，避免"点完再抓"拿到未交互的页面
-        if actions:
+        # 动作链只能在浏览器里执行：跳过 L1 直接渲染，避免"点完再抓"拿到未交互的页面。
+        # force_l2 用于需要真实渲染 DOM 的只读场景（web_inspect），规则一致。
+        if actions or force_l2:
             left = budget.remaining(deadline)
             if left is None or left >= _L2_MIN_BUDGET_S:
                 placeholder = FetchOutcome(
@@ -576,7 +580,9 @@ class Fetcher:
                     content_type="",
                     html="",
                     elapsed_ms=0,
-                    decisions=["skip_l1:actions"],
+                    decisions=[
+                        "skip_l1:inspect" if force_l2 and not actions else "skip_l1:actions"
+                    ],
                 )
                 l2 = await self._fetch_l2(
                     url,
@@ -603,8 +609,15 @@ class Fetcher:
                 deadline=deadline,
                 proxy=proxy,
             )
-            outcome.notes = [*outcome.notes, "actions 未执行：浏览器渲染不可用或预算不足"]
-            outcome.decisions.insert(0, "actions_skipped:l2_unavailable")
+            outcome.notes = [
+                *outcome.notes,
+                "actions 未执行：浏览器渲染不可用或预算不足"
+                if actions
+                else "inspect 未拿到渲染结果：浏览器不可用或预算不足，已回退 L1",
+            ]
+            outcome.decisions.insert(
+                0, "actions_skipped:l2_unavailable" if actions else "inspect:l1_fallback"
+            )
             return outcome
 
         if self._sticky_active(host, url):

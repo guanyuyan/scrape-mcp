@@ -86,7 +86,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 | A news portal home | portal/listing | L2 | 338 KB | ~1.4k tokens (~1.6%) | dynamic page, browser render |
 | A tech blog home | SPA | L2 | 12 KB | ~1.4k tokens | JS shell, needs rendering |
 
-**Shape**: a local MCP server (stdio or HTTP) with privacy under your control. Tools: `web_fetch`, `web_batch`, `web_extract`, `web_crawl`, `web_map`, async crawl jobs (`web_crawl_start/status/cancel/list`), `web_watch`, `web_schedule`, `web_search`, `web_screenshot`, `web_index`, `login`, `session_*`. Caching is on by default.
+**Shape**: a local MCP server (stdio or HTTP) with privacy under your control. Tools: `web_fetch`, `web_batch`, `web_extract`, `web_crawl`, `web_map`, async crawl jobs (`web_crawl_start/status/cancel/list`), `web_watch`, `web_schedule`, `web_search`, `web_inspect`, `web_screenshot`, `web_index`, `login`, `session_*`. Caching is on by default.
 
 ---
 
@@ -106,7 +106,8 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped. For large jobs use `web_crawl_start` to run in the background, poll with `status`, stop with `cancel`, and it resumes after a restart.
 - **Change detection**: `web_watch` keeps a snapshot of the body after every successful fetch and reports `changed` plus an added/removed line summary on the next call; pass `selector` to watch just one block (leaderboard, price box). Failed fetches never overwrite the snapshot, so changes that happened during a block are still visible afterwards.
 - **Scheduled monitoring + notifications**: `web_schedule` turns `web_watch` / `web_index` into scheduled tasks (listable, pausable, runnable on demand) executed by a local `scrape-mcp schedule daemon`; real changes are POSTed to your webhook. The first run only establishes a baseline and never notifies, and failed fetches are recorded without overwriting snapshots.
-- **Search discovery**: `web_search` turns keywords into structured results (title / URL / snippet / engine / publish date). It uses DuckDuckGo's HTML endpoint by default (no API key), or a self-hosted SearXNG JSON API, or Brave / Tavily with configured keys; it supports `site`, `time_range` and `engines` filters plus automatic backend fallback, and results are cacheable — ideal for a search-then-fetch flow.
+- **Search discovery**: `web_search` turns keywords into structured results (title / URL / snippet / engine / publish date). It uses DuckDuckGo's HTML endpoint by default (no API key), or a self-hosted SearXNG JSON API, or Brave / Tavily with configured keys; it supports `site`, `time_range` and `engines` filters plus automatic backend fallback, and results are cacheable — ideal for a search-then-fetch flow. With `read=true`, one call also fetches the top `top_k` pages concurrently, trims them to a `max_tokens` budget and dedupes URLs, so "search then read" is a single round trip.
+- **Page interaction map**: `web_inspect` scans a page read-only and lists clickable/fillable elements, form fields and "next page" candidates; each element carries a stable `ref` (a valid CSS selector) that can be passed straight to `actions[].selector`, so the model never has to guess selectors. It runs no arbitrary JS and never returns the full HTML.
 - **Page screenshots**: `web_screenshot` renders in a real browser and exports a PNG or a full-page PDF, supporting full-page/viewport capture, custom dimensions, element cropping, device presets (desktop/mobile), hiding fixed navigation or pop-ups before capture, selector waiting and extra delay; `actions` can click/type/scroll before the shot. It reuses the login session, so pages behind auth or JS rendering still work.
 - **Site index**: `web_index` reads `Sitemap:` lines from robots.txt (falling back to `/sitemap.xml`), recursively expands sitemap indexes and unpacks `.gz` files. It persists a baseline and later reports new / changed / unchanged / removed entries, optionally re-fetching changed pages to filter out timestamp-only changes or to return the same diff summary as `web_watch`.
 - **Site URL discovery**: `web_map` combines sitemap entries with the entry page's same-site links (optionally merged with `web_search` hits), dedupes URLs and tags each with its source; supports `include`/`exclude` regexes, a `search` substring filter and `limit` truncation, so sites without a sitemap still work.
@@ -115,7 +116,7 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Total budget with degradation**: `web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start` accept `deadline_ms`. When time runs short it degrades step by step — cap each request → skip retries → skip L2 rendering → return `timeout` — while any content already fetched is still returned. Degraded results are never cached, so later calls with a larger budget cannot inherit truncated content. The budget also covers the compliance stage (rate-limit wait and robots.txt fetch): if it is too tight, the call returns `timeout` early instead of burning the budget on preparation.
 - **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent. Third-party packages can register their own field types through an entry point.
 - **Site recipes**: keep per-site rendering hints, root selector, extraction schema and pagination rules in a JSON file; later calls need no arguments, and per-call arguments still win.
-- **Selectable output format**: `format=markdown|text|json|chunks`; `json` yields a paragraph array, while `chunks` yields RAG-ready chunks (fixed window + overlap + heading path) that can be stored as-is.
+- **Selectable output format**: `format=markdown|fit_markdown|text|json|chunks`; `json` yields a paragraph array, while `chunks` yields RAG-ready chunks (fixed window + overlap + heading path) that can be stored as-is. `fit_markdown` goes further than compact and also drops navigation, footers, comments, related boxes and ads, returning a `token_report` (raw HTML size, output size, token estimate, compression ratio, per-category dropped lines).
 - **Per-host concurrency gate**: at most 2 concurrent requests per host by default, while different hosts still run in parallel.
 - **Stealth hardening**: `webdriver` wiped, UA data aligned, deterministic Canvas/WebGL noise, timezone matching.
 - **Challenge diagnostics**: blocked fetches carry `challenge` (provider / kind / `sitekey` / `action` / status / `Retry-After`) so callers can tell why a page failed and whether to switch exits or hand it to a human.
@@ -252,6 +253,12 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `SEARCH_TAVILY_API_KEY` | — | Tavily API key; empty makes that backend unavailable and excludes it from fallback |
 | `SEARCH_FALLBACK` | `true` | Whether to fall back to other configured backends on failure (duckduckgo → searxng → brave → tavily) |
 | `SEARCH_MAX_RESULTS` | `20` | Hard cap on results per `web_search` |
+| `SEARCH_READ_CONCURRENCY` | `3` | Pages fetched concurrently by `web_search(read=true)` |
+| `SEARCH_READ_MAX_TOKENS` | `4000` | Default token budget for `web_search(read=true)` when `max_tokens` is omitted |
+| `SEARCH_READ_HARD_MAX_TOKENS` | `16000` | Hard cap on that token budget |
+| `SEARCH_READ_PER_HOST` | `2` | Max results kept per host in read mode |
+| `INSPECT_MAX_ELEMENTS` | `120` | Interactive elements returned by `web_inspect` by default (hard cap 300) |
+| `FIT_MARKDOWN_DEFAULT` | `false` | Whether markdown output uses `fit_markdown` trimming when `format` is not given |
 | `LLM_BASE_URL` | — | OpenAI-compatible endpoint root (e.g. `https://api.deepseek.com/v1`); empty disables every LLM call |
 | `LLM_API_KEY` | — | API key (Bearer) for the endpoint; local compatible servers may omit it |
 | `LLM_MODEL` | — | Model name; LLM-assisted extraction requires both this and `LLM_BASE_URL` |
@@ -434,7 +441,8 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
 
 - **`web_fetch(url, max_tokens=4000, link_policy="internal", format="markdown", ...)`** → status + compact content
   - `link_policy`: `internal` (keep same-site links, demote off-site) / `all` / `none`
-  - `format`: `markdown` (default, keeps headings/lists/links) / `text` (plain) / `json` (`content` is a paragraph array) / `chunks` (RAG chunks, see below)
+  - `format`: `markdown` (default, keeps headings/lists/links) / `fit_markdown` (markdown with navigation, footers, comments, related boxes and ads removed) / `text` (plain) / `json` (`content` is a paragraph array) / `chunks` (RAG chunks, see below)
+  - `format=fit_markdown` also returns `token_report`: `raw_chars` (raw HTML characters) / `output_chars` / `output_tokens_est` / `compression_ratio` / `dropped` (lines dropped per category: nav/footer/comments/related/ads) / `fit` (`false` when the keep-ratio guard rolled the trimming back)
   - `format=chunks`: `content` is an array of chunks, each with `index` / `text` / `heading_path` / `start` / `end` (character offsets in the content) / `tokens`; the payload also carries `chunk_count`, ready for a vector store
   - `chunk_size` / `chunk_overlap`: window and overlap in characters for `chunks` (default `1200` / `200`; window 100~8000, overlap at most half the window)
   - Fetch options: `headers` / `cookies` (custom requests bypass the shared cache), `timeout`, `bypass_cache`
@@ -496,13 +504,21 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `list` / `get` show tasks and last status; `pause` / `resume` toggle execution; `delete` removes the schedule (page snapshots are kept)
   - `run` executes once now: the first run returns `first_seen=true` without notifying; later runs notify only on real changes, and failures never break task state
   - Execution is driven by `scrape-mcp schedule daemon` (see "Scheduled monitoring" below); task state lives in `DATA_DIR/schedule/tasks.json`
-- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, ...)`** → search keywords and return structured results
+- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, read=False, top_k=3, max_tokens=None, content_format="markdown", ...)`** → search keywords and return structured results
   - `provider`: `duckduckgo` (default, from `SEARCH_PROVIDER`) / `searxng` (requires `SEARCH_SEARXNG_URL`) / `brave` / `tavily` (requires the matching key)
   - `site` is passed through as the `site:` operator (how strictly it is enforced depends on the backend engine); `time_range` takes `day` / `week` / `month` / `year`; `engines` is a SearXNG engine list (searxng only)
   - Each hit has `rank` / `title` / `url` / `snippet` / `engine` / `published_at`; `attempts` records backends that failed before the fallback succeeded
+  - `read=true` fetches the body of the top `top_k` hits (1~10) concurrently; each hit gains `content` / `content_chars` / `truncated` (or `read_error`), and the payload carries `tokens` with `budget` / `used` / `results_read` / `results_skipped`
+  - Read mode dedupes by canonical URL (ignoring `utm_*` and similar tracking parameters) and limits hits per host (`SEARCH_READ_PER_HOST`); bodies fill the budget in rank order, and hits beyond it keep only title/URL/snippet with `truncated=true`; one failed page never sinks the others
+  - `content_format` is `markdown` (default) or `text`; `max_tokens` defaults to `SEARCH_READ_MAX_TOKENS` with `SEARCH_READ_HARD_MAX_TOKENS` as the hard cap
   - On failure (rate limit / block / transport error) it falls back to other configured backends per `fallback` (defaults to `SEARCH_FALLBACK`); when nothing else is configured, behaviour matches previous releases
   - The search service is used as an API: host allow/deny lists and the global rate limit still apply, but robots rules for the target site do not
-  - `bypass_cache` forces a fresh query; `proxy` and `deadline_ms` behave like `web_fetch`, and fallback attempts share the same budget
+  - `bypass_cache` forces a fresh query; `proxy` and `deadline_ms` behave like `web_fetch`, and fallback attempts and read fetches share the same budget
+- **`web_inspect(url, max_elements=None, session="default", deadline_ms=None, proxy=None, region=None)`** → read-only page interaction map
+  - Returns `elements` (`ref` / `role` / `tag` / `text` / `name` / `type` / `href` / `disabled`), `forms` (`action` / `method` / `fields`) and `next` ("next page" candidates)
+  - `ref` is a stable CSS selector (id / data-testid / name / aria-label when available, otherwise an nth-child path) that can be used directly as `actions[].selector` in `web_fetch` / `web_screenshot`; two calls on the same page return the same refs
+  - Renders in a browser by default (`tier=l2`); when the browser is unavailable or the budget is too tight it falls back to L1 and writes `inspect:l1_fallback` into `notes`
+  - `max_elements` defaults to `INSPECT_MAX_ELEMENTS` (120) with a hard cap of 300; only lightweight fields are returned — no full HTML and no arbitrary JS execution
 - **`web_screenshot(url, path=None, full_page=False, width=None, height=None, wait_ms=0, selector=None, hide=None, device=None, pdf=False, ...)`** → render in a browser and save a PNG/PDF, returning its local path
   - Without `path`, files go to `DATA_DIR/screenshots/`; `full_page=true` captures the whole page, otherwise only the viewport; `pdf=true` exports a full-page PDF (Chromium only, element cropping ignored)
   - `selector` waits for a CSS selector before capture and crops to the element's bounding box; a miss or invisible element falls back to the full page and is recorded in `notes`
@@ -972,6 +988,7 @@ from scrape_mcp.sdk import (
     extract,
     fetch,
     index,
+    inspect,
     screenshot,
     search,
     site_map,
@@ -1043,7 +1060,17 @@ Also see `examples/example_client.py` (MCP client call example) and `examples/re
 
 ## Benchmarks
 
-Three benchmarks with different purposes: `bench.py` measures the latency win from caching, `bench_sites.py` measures whether real sites return the right, complete content, and `benchmarks/bench_core.py` guards local hot-path throughput against regressions.
+Three benchmarks with different purposes: `bench.py` measures the latency win from caching, `bench_sites.py` measures whether real sites return the right, complete content, and `benchmarks/bench_core.py` guards local hot-path throughput against regressions; `bench_search_read.py` compares "search then fetch each" against `read=true` on latency and tokens.
+
+### Search-then-read
+
+```bash
+python scripts/bench_search_read.py                      # default query, top-3
+python scripts/bench_search_read.py --query "async python" --top-k 5
+python scripts/bench_search_read.py --json                # machine-readable
+```
+
+Both paths use the same query, hit count and budget: `search` followed by a sequential `fetch` per hit, versus one `search(read=true)` call. The script reports elapsed time, total tokens and hits read, and needs network access to the search backend and target sites.
 
 ### Cache and latency
 

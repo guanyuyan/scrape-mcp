@@ -2,6 +2,14 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [Unreleased]
+
+### Added
+- `web_search(read=true)` 搜索即阅读：一次调用并发抓取前 `top_k` 条结果正文（`SEARCH_READ_CONCURRENCY`），按规范化 URL 去重（忽略 `utm_*` 等跟踪参数）、限制同域条数（`SEARCH_READ_PER_HOST`），并按排名填充 `max_tokens` 预算（默认 `SEARCH_READ_MAX_TOKENS`，硬上限 `SEARCH_READ_HARD_MAX_TOKENS`）；每条新增 `content` / `content_chars` / `truncated`（失败为 `read_error`），顶层 `tokens` 给出 `budget` / `used` / `results_read` / `results_skipped`，单页失败不影响其他结果
+- `web_inspect` 只读页面交互地图：返回可点击/可输入元素、表单字段（`action` / `method` / `fields`）与"下一页"候选；每个元素带稳定 `ref`（合法 CSS 选择器，优先 id / data-testid / name / aria-label，退化到 nth-child 路径），可直接用于 `actions[].selector`。默认浏览器渲染，不可用或预算不足时回退 L1 并在 `notes` 写 `inspect:l1_fallback`；不执行任意 JS，不返回整页 HTML
+- `format=fit_markdown`：在 compact 之后继续剔除导航、页脚、评论、推荐位与广告，代码围栏内保留；命中保留率保护（`<30%` 且原文 ≥400 字符）时放弃裁剪；载荷附带 `token_report`（`raw_chars` / `output_chars` / `output_tokens_est` / `compression_ratio` / 各类 `dropped` / `fit`），并提供 `FIT_MARKDOWN_DEFAULT` 开关
+- Python SDK 新增 `inspect()`；新增配置 `SEARCH_READ_CONCURRENCY` / `SEARCH_READ_MAX_TOKENS` / `SEARCH_READ_HARD_MAX_TOKENS` / `SEARCH_READ_PER_HOST` / `INSPECT_MAX_ELEMENTS` / `INSPECT_HARD_MAX_ELEMENTS` / `FIT_MARKDOWN_DEFAULT`
+
 ## [0.33.0] - 2026-11-10
 
 ### Added

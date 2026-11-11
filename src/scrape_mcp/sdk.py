@@ -31,6 +31,7 @@ __all__ = [
     "extract",
     "fetch",
     "index",
+    "inspect",
     "screenshot",
     "search",
     "site_map",
@@ -110,6 +111,12 @@ async def search(query: str, **options: Any) -> dict[str, Any]:
     """搜索关键词并返回结构化结果；参数同 ``web_search``。"""
     _ensure_logging()
     return _parse(await server.web_search(query, **options))
+
+
+async def inspect(url: str, **options: Any) -> dict[str, Any]:
+    """只读列出页面可交互元素与表单；参数同 ``web_inspect``。"""
+    _ensure_logging()
+    return _parse(await server.web_inspect(url, **options))
 
 
 async def screenshot(url: str, **options: Any) -> dict[str, Any]:

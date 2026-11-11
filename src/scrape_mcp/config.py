@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     host_max_concurrency: int = 2
     # web_crawl 单次最多抓取的页面数硬上限
     crawl_max_pages: int = 20
+    # web_inspect 单次返回的可交互元素数默认值与硬上限
+    inspect_max_elements: int = 120
+    inspect_hard_max_elements: int = 300
+    # format=markdown 时是否默认启用 fit_markdown 裁剪；默认关闭，保持既有输出不变
+    fit_markdown_default: bool = False
 
     # ---- 传输层重试 ----
     # 仅对网络异常与 5xx 生效；429/403 属反爬信号，同层重试通常无效，交给分级降级处理
@@ -225,6 +230,13 @@ class Settings(BaseSettings):
     search_fallback: bool = True
     # 单次返回的结果条数硬上限（max_results 超出时按此截断）
     search_max_results: int = 20
+    # read=true 时并发抓取正文的页面数；单页仍受代理/限流/robots 约束
+    search_read_concurrency: int = 3
+    # read=true 时的 token 预算默认值与硬上限（Agent 可调，超过即截断）
+    search_read_max_tokens: int = 4000
+    search_read_hard_max_tokens: int = 16000
+    # read=true 时同一主机最多保留几条结果，避免一个站点占满预算
+    search_read_per_host: int = 2
 
     # ---- LLM 辅助抽取（可选）----
     # OpenAI 兼容的 /v1 根地址（如 https://api.deepseek.com/v1）；留空则永不发起外部调用。
