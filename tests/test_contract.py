@@ -331,6 +331,7 @@ def test_error_code_values_are_locked():
         "unsupported_content",
         "empty",
         "unknown",
+        "no_snapshot",
     )
 
 
@@ -689,6 +690,141 @@ def test_web_search_failure_keys(monkeypatch):
     out = _run(server.web_search("示例"))
     assert set(out) == SEARCH_ERROR_PAYLOAD
     assert out["error_code"] == errors.TIMEOUT
+
+
+# ---- 0.35：query 摘录 / 历史快照 / 字段 diff / 字段溯源 ----
+
+SEARCH_EXCERPT_ITEM = {
+    "rank",
+    "title",
+    "url",
+    "snippet",
+    "engine",
+    "published_at",
+    "excerpts",
+    "excerpt_chars",
+    "excerpt_fallback",
+    "truncated",
+}
+
+FETCH_EXCERPT_EXTRA = {"excerpts", "excerpt_chars", "excerpt_fallback"}
+
+FETCH_SNAPSHOT_PAYLOAD = {
+    "request_id",
+    "ok",
+    "url",
+    "format",
+    "content",
+    "token_estimate",
+    "truncated",
+    "cached",
+    "version",
+    "captured_at",
+    "hash",
+    "chars",
+    "source_version",
+}
+
+SNAPSHOT_ERROR_PAYLOAD = {"request_id", "ok", "url", "error_code", "error", "retryable"}
+
+HISTORY_OK_PAYLOAD = {"request_id", "ok", "url", "selector", "count", "versions"}
+
+HISTORY_ERROR_PAYLOAD = {
+    "request_id",
+    "ok",
+    "url",
+    "selector",
+    "error_code",
+    "error",
+    "retryable",
+}
+
+CHANGES_OK_PAYLOAD = {
+    "request_id",
+    "ok",
+    "url",
+    "selector",
+    "mode",
+    "from_version",
+    "to_version",
+    "captured_from",
+    "captured_to",
+    "compare",
+    "summary",
+    "added_lines",
+    "removed_lines",
+    "diff",
+    "diff_truncated",
+}
+
+GROUNDING_ENTRY = {"selector", "snippet", "offset", "basis"}
+
+
+def _patch_html(monkeypatch, *pages: str) -> None:
+    """按调用顺序返回不同页面，供 web_watch 建立多版本快照。"""
+    queue = list(pages)
+
+    async def fake(url, **_kwargs):
+        return _outcome(html=queue.pop(0) if len(queue) > 1 else queue[0]), None
+
+    monkeypatch.setattr(server, "_fetch_html", fake)
+
+
+def test_web_search_excerpt_keys(monkeypatch):
+    html = SEARCH_HTML.replace("摘要", "这是一段足够长的摘要内容")
+    _patch_fetch(monkeypatch, _outcome(html=html))
+    out = _run(server.web_search("摘要", provider="duckduckgo", read="excerpt", top_k=1))
+    assert set(out) == SEARCH_OK_PAYLOAD | {"tokens"}
+    assert set(out["tokens"]) == {"budget", "used", "results_read", "results_skipped", "mode"}
+    assert out["tokens"]["mode"] == "excerpt"
+    assert set(out["results"][0]) == SEARCH_EXCERPT_ITEM
+
+
+def test_web_fetch_with_query_keys(monkeypatch):
+    _patch_fetch(monkeypatch, _outcome())
+    out = _run(server.web_fetch(URL, query="正文"))
+    assert set(out) == FETCH_OK_PAYLOAD | FETCH_EXCERPT_EXTRA
+    assert out["excerpt_fallback"] is False
+    assert all(
+        set(item) == {"text", "heading", "start", "end", "score"} for item in out["excerpts"]
+    )
+
+
+def test_web_fetch_snapshot_and_history_keys(monkeypatch):
+    _patch_html(monkeypatch, HTML)
+    _run(server.web_watch(URL))
+
+    snapshot = _run(server.web_fetch(URL, version="latest"))
+    assert set(snapshot) == FETCH_SNAPSHOT_PAYLOAD
+    assert snapshot["cached"] is True
+
+    history = _run(server.web_history(URL))
+    assert set(history) == HISTORY_OK_PAYLOAD
+    assert set(history["versions"][0]) == {"version", "captured_at", "chars", "hash"}
+
+    missing = _run(server.web_history("https://a.test/none"))
+    assert set(missing) == HISTORY_ERROR_PAYLOAD
+    assert missing["error_code"] == errors.NO_SNAPSHOT
+
+
+def test_web_changes_keys(monkeypatch):
+    _patch_html(monkeypatch, HTML, HTML.replace("正文内容", "新的正文内容"))
+    _run(server.web_watch(URL))
+    _run(server.web_watch(URL))
+
+    out = _run(server.web_changes(URL))
+    assert set(out) == CHANGES_OK_PAYLOAD
+    assert out["mode"] == "lines"
+    assert out["from_version"] == 2 and out["to_version"] == 1
+
+
+def test_web_extract_grounding_keys(monkeypatch):
+    _patch_fetch(monkeypatch, _outcome())
+    out = _run(
+        server.web_extract(URL, {"title": {"selector": "h1", "type": "text"}}, grounding=True)
+    )
+    assert set(out) == EXTRACT_OK_PAYLOAD | {"grounding"}
+    assert set(out["grounding"]["title"]) == GROUNDING_ENTRY
 
 
 # ---- web_screenshot ----

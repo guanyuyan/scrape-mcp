@@ -54,8 +54,18 @@ def test_local_backend_roundtrip(tmp_path):
 
     assert backend.load("abc") is None
     backend.save("abc", {"text": "第一版"})
-    assert backend.load("abc") == {"text": "第一版"}
-    assert (tmp_path / "watch" / "abc.json").exists()
+    record = backend.load("abc")
+    assert record["text"] == "第一版"
+    assert record["version"] == 1
+    assert list((tmp_path / "snapshots" / "abc").glob("*.json"))
+
+    backend.save("abc", {"text": "第二版"})
+    latest = backend.load("abc")
+    assert latest["text"] == "第二版"
+    assert latest["version"] == 1
+    versions = backend.versions("abc")
+    assert [item["text"] for item in versions] == ["第二版", "第一版"]
+    assert [item["version"] for item in versions] == [1, 2]
 
 
 def test_local_backend_ignores_broken_files(tmp_path):
@@ -86,10 +96,12 @@ def test_s3_backend_roundtrip_and_key_prefix():
     assert backend.load("abc") is None
     backend.save("abc", {"text": "hello"})
 
-    key = ("bucket", "prod/watch/abc.json")
-    assert key in client.objects
-    assert json.loads(client.objects[key]) == {"text": "hello"}
-    assert backend.load("abc") == {"text": "hello"}
+    keys = [key for bucket, key in client.objects if bucket == "bucket"]
+    assert len(keys) == 1
+    assert keys[0].startswith("prod/snapshots/abc/")
+    assert keys[0].endswith(".json")
+    assert json.loads(client.objects[("bucket", keys[0])])["text"] == "hello"
+    assert backend.load("abc")["text"] == "hello"
 
 
 def test_s3_backend_without_prefix_uses_short_key():
@@ -97,7 +109,7 @@ def test_s3_backend_without_prefix_uses_short_key():
     backend = S3SnapshotBackend(client, "bucket", "")
     backend.save("abc", {"n": 1})
 
-    assert ("bucket", "watch/abc.json") in client.objects
+    assert any(key.startswith("snapshots/abc/") for _bucket, key in client.objects)
 
 
 def test_s3_backend_swallows_errors_and_bad_payloads():
@@ -151,7 +163,7 @@ def test_build_backend_s3_uses_bucket_and_client(monkeypatch):
 
     assert isinstance(backend, S3SnapshotBackend)
     backend.save("abc", {"n": 1})
-    assert ("bucket", "env/watch/abc.json") in fake.objects
+    assert any(key.startswith("env/snapshots/abc/") for _bucket, key in fake.objects)
 
 
 def test_build_backend_rejects_bad_config(monkeypatch):

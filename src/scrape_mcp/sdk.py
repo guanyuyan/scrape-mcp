@@ -23,6 +23,7 @@ from .core.logging import configure
 __all__ = [
     "aclose",
     "batch",
+    "changes",
     "crawl",
     "crawl_cancel",
     "crawl_list",
@@ -30,6 +31,7 @@ __all__ = [
     "crawl_status",
     "extract",
     "fetch",
+    "history",
     "index",
     "inspect",
     "screenshot",
@@ -105,6 +107,18 @@ async def watch(url: str, **options: Any) -> dict[str, Any]:
     """对比页面自上次抓取以来的变化；参数同 ``web_watch``。"""
     _ensure_logging()
     return _parse(await server.web_watch(url, **options))
+
+
+async def history(url: str, **options: Any) -> dict[str, Any]:
+    """列出该 URL 的历史快照版本；参数同 ``web_history``。"""
+    _ensure_logging()
+    return _parse(await server.web_history(url, **options))
+
+
+async def changes(url: str, **options: Any) -> dict[str, Any]:
+    """比较两个快照版本的字段/行级差异；参数同 ``web_changes``。"""
+    _ensure_logging()
+    return _parse(await server.web_changes(url, **options))
 
 
 async def search(query: str, **options: Any) -> dict[str, Any]:

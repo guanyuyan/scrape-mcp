@@ -10,28 +10,93 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from ..config import get_settings
 
+# 文件名用固定 13 位毫秒时间戳：按字符串排序即按时间排序，跨平台也稳定
+_TS_WIDTH = 13
+
+
+def _ts_name(ts: float) -> str:
+    return f"{int(ts * 1000):0{_TS_WIDTH}d}"
+
+
+def _ts_from_name(name: str) -> float | None:
+    stem = name.rsplit(".", 1)[0]
+    try:
+        return int(stem) / 1000
+    except ValueError:
+        return None
+
+
+def _limits() -> tuple[int, float]:
+    """版本数与保留天数双限；配置异常时退回文档承诺的默认值。"""
+    settings = get_settings()
+    versions = max(1, int(getattr(settings, "watch_max_versions", 20) or 20))
+    days = float(getattr(settings, "watch_retention_days", 90) or 0)
+    return versions, days
+
+
+def _keep_flags(ordered: list[float]) -> list[bool]:
+    """ordered 为"从新到旧"的时间戳；返回每一条是否保留（写入前先淘汰）。"""
+    versions, days = _limits()
+    now = time.time()
+    flags: list[bool] = []
+    for index, ts in enumerate(ordered):
+        fresh = days <= 0 or ts >= now - days * 86400
+        flags.append(index < versions and fresh)
+    return flags
+
+
+def _records(items: list[tuple[float, dict[str, Any]]], limit: int | None) -> list[dict[str, Any]]:
+    """按时间倒序编号：version=1 表示最新，序号供 web_fetch / web_changes 引用。"""
+    items.sort(key=lambda pair: pair[0], reverse=True)
+    if limit is not None:
+        items = items[: max(1, limit)]
+    records: list[dict[str, Any]] = []
+    for index, (ts, data) in enumerate(items, start=1):
+        record = dict(data)
+        record["version"] = index
+        record["ts"] = ts
+        record["captured_at"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        record.setdefault("saved_at", ts)
+        records.append(record)
+    return records
+
 
 @runtime_checkable
 class SnapshotBackend(Protocol):
-    """快照后端的最小接口：按稳定 key 读写一份 JSON 对象。"""
+    """快照后端的最小接口：按稳定 key 读写 JSON，并可按版本回读。"""
 
     def load(self, key: str) -> dict[str, Any] | None: ...
 
     def save(self, key: str, data: dict[str, Any]) -> None: ...
 
+    def versions(self, key: str, limit: int | None = None) -> list[dict[str, Any]]: ...
+
 
 class LocalSnapshotBackend:
-    """落在 ``<root>/watch`` 的本地实现，与旧行为逐字节一致。"""
+    """落在 ``<root>/snapshots/<key>/<ts>.json``；旧版单文件 ``<root>/watch/<key>.json`` 仍可读。"""
 
     def __init__(self, root: str | Path) -> None:
-        self._path = Path(os.path.expanduser(str(root))).resolve() / "watch"
+        base = Path(os.path.expanduser(str(root))).resolve()
+        self._path = base / "watch"
+        self._snapshots = base / "snapshots"
 
-    def load(self, key: str) -> dict[str, Any] | None:
+    def _dir(self, key: str) -> Path:
+        return self._snapshots / key
+
+    def _files(self, key: str) -> list[Path]:
+        try:
+            return sorted(self._dir(key).glob("*.json"), reverse=True)
+        except OSError:
+            return []
+
+    def _legacy(self, key: str) -> dict[str, Any] | None:
         try:
             with (self._path / f"{key}.json").open("r", encoding="utf-8") as handle:
                 data = json.load(handle)
@@ -39,18 +104,66 @@ class LocalSnapshotBackend:
             return None
         return data if isinstance(data, dict) else None
 
+    def versions(self, key: str, limit: int | None = None) -> list[dict[str, Any]]:
+        items: list[tuple[float, dict[str, Any]]] = []
+        for path in self._files(key)[: max(1, limit) if limit is not None else None]:
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            ts = data.get("ts")
+            if not isinstance(ts, (int, float)):
+                ts = _ts_from_name(path.name) or 0.0
+            items.append((float(ts), data))
+        if not items:
+            legacy = self._legacy(key)
+            if legacy is None:
+                return []
+            ts = float(legacy.get("ts") or legacy.get("saved_at") or 0) or (
+                _ts_from_name(f"{key}.json") or 0.0
+            )
+            return _records([(ts, legacy)], limit)
+        return _records(items, limit)
+
+    def load(self, key: str) -> dict[str, Any] | None:
+        records = self.versions(key, limit=1)
+        return records[0] if records else None
+
     def save(self, key: str, data: dict[str, Any]) -> None:
+        directory = self._dir(key)
         try:
-            path = self._path / f"{key}.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, ensure_ascii=False)
-        except (OSError, TypeError):
-            pass
+            directory.mkdir(parents=True, exist_ok=True)
+            ts = time.time()
+            while (directory / f"{_ts_name(ts)}.json").exists():
+                # 同一毫秒内重复写入：顺延 1ms，保证不覆盖上一版
+                ts += 0.001
+            name = f"{_ts_name(ts)}.json"
+            payload = {"ts": ts, **data}
+            tmp = directory / f".{name}.tmp"
+            with tmp.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(tmp, directory / name)
+        except OSError:
+            return
+        self._prune(key)
+
+    def _prune(self, key: str) -> None:
+        files = self._files(key)
+        if not files:
+            return
+        stamps = [(_ts_from_name(path.name) or 0.0) for path in files]
+        for path, keep in zip(files, _keep_flags(stamps), strict=False):
+            if keep:
+                continue
+            with contextlib.suppress(OSError):
+                path.unlink()
 
 
 class S3SnapshotBackend:
-    """S3 兼容对象存储：对象键为 ``<prefix>/watch/<key>.json``。"""
+    """S3 兼容对象存储：版本对象键为 ``<prefix>/snapshots/<key>/<ts>.json``。"""
 
     def __init__(self, client: Any, bucket: str, prefix: str = "") -> None:
         if not bucket:
@@ -60,31 +173,92 @@ class S3SnapshotBackend:
         self._prefix = (prefix or "").strip().strip("/")
 
     def _key(self, key: str) -> str:
+        parts = [part for part in (self._prefix, "snapshots", key) if part]
+        return "/".join(parts)
+
+    def _legacy_key(self, key: str) -> str:
         parts = [part for part in (self._prefix, "watch", f"{key}.json") if part]
         return "/".join(parts)
 
-    def load(self, key: str) -> dict[str, Any] | None:
+    def _list(self, key: str) -> list[tuple[float, str]]:
+        prefix = f"{self._key(key)}/"
+        found: list[tuple[float, str]] = []
+        token: str | None = None
         try:
-            response = self._client.get_object(Bucket=self._bucket, Key=self._key(key))
-            body = response["Body"].read()
-            data = json.loads(body.decode("utf-8"))
+            while True:
+                kwargs: dict[str, Any] = {"Bucket": self._bucket, "Prefix": prefix}
+                if token:
+                    kwargs["ContinuationToken"] = token
+                response = self._client.list_objects_v2(**kwargs)
+                for item in response.get("Contents") or []:
+                    name = str(item.get("Key") or "").rsplit("/", 1)[-1]
+                    ts = _ts_from_name(name)
+                    if ts is not None:
+                        found.append((ts, str(item["Key"])))
+                token = response.get("NextContinuationToken")
+                if not token:
+                    break
         except Exception:
-            # 对象不存在、权限不足、网络抖动都按"没有快照"处理
+            return []
+        return found
+
+    def versions(self, key: str, limit: int | None = None) -> list[dict[str, Any]]:
+        entries = sorted(self._list(key), key=lambda pair: pair[0], reverse=True)
+        if limit is not None:
+            entries = entries[: max(1, limit)]
+        items: list[tuple[float, dict[str, Any]]] = []
+        for ts, object_key in entries:
+            try:
+                response = self._client.get_object(Bucket=self._bucket, Key=object_key)
+                data = json.loads(response["Body"].read().decode("utf-8"))
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                items.append((ts, data))
+        if not items:
+            legacy = self._load_key(self._legacy_key(key))
+            return _records([(float(legacy.get("saved_at") or 0), legacy)], limit) if legacy else []
+        return _records(items, limit)
+
+    def _load_key(self, object_key: str) -> dict[str, Any] | None:
+        try:
+            response = self._client.get_object(Bucket=self._bucket, Key=object_key)
+            data = json.loads(response["Body"].read().decode("utf-8"))
+        except Exception:
             return None
         return data if isinstance(data, dict) else None
 
+    def load(self, key: str) -> dict[str, Any] | None:
+        records = self.versions(key, limit=1)
+        return records[0] if records else None
+
     def save(self, key: str, data: dict[str, Any]) -> None:
+        ts = time.time()
+        payload = {"ts": ts, **data}
         try:
-            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self._client.put_object(
                 Bucket=self._bucket,
-                Key=self._key(key),
+                Key=f"{self._key(key)}/{_ts_name(ts)}.json",
                 Body=body,
                 ContentType="application/json; charset=utf-8",
             )
         except Exception:
-            # 导出/快照是旁路，上传失败不阻断本次抓取
-            pass
+            # 快照是旁路，上传失败不阻断本次抓取
+            return
+        self._prune(key)
+
+    def _prune(self, key: str) -> None:
+        entries = sorted(self._list(key), key=lambda pair: pair[0], reverse=True)
+        if not entries:
+            return
+        for (_ts, object_key), keep in zip(
+            entries, _keep_flags([ts for ts, _ in entries]), strict=False
+        ):
+            if keep:
+                continue
+            with contextlib.suppress(Exception):
+                self._client.delete_object(Bucket=self._bucket, Key=object_key)
 
 
 class S3ObjectStore:

@@ -2,6 +2,23 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
+## [0.35.0] - 2026-11-12
+
+### Added
+- 查询摘录：`web_search(read="excerpt")` 每页只返回与关键词最相关的段落（BM25 + 中文 bigram，标题 2 倍加权，默认 3 段 / 600 字符，`READ_EXCERPT_CHUNKS` / `READ_EXCERPT_MAX_CHARS`）；每条结果新增 `excerpts` / `excerpt_chars` / `excerpt_fallback`，顶层 `tokens.mode="excerpt"`；召回不足（命中字符占比 <5%）时回退整页并标 `excerpt_fallback=true`，不返回空片段。`read` 现支持 `true` / `false` / `"excerpt"` / `"full"`，旧取值行为不变
+- `web_fetch(query=...)`：复用同一选段器，`content` 换成命中段落并附带 `excerpts` / `excerpt_chars` / `excerpt_fallback`，仅支持 `format=markdown|text`；非 HTML 页面不生效并在 `notes` 说明
+- `web_extract(grounding=true)` 字段级溯源：新增 `grounding`，键路径与 `data` 完全一致（含 `items[0].price` 这类下标），每项含 `selector` / `snippet`（页面原文）/ `offset`（相对 `basis` 的字符偏移，找不到为 `null`）/ `basis`（`markdown` 或 `html`）；必填字段缺失时新增 `missing_candidates`（每字段 ≤3 个近似命中候选）。默认值由 `GROUNDING_DEFAULT` 控制，片段长度由 `GROUNDING_SNIPPET_CHARS` 控制；LLM 抽取不提供溯源
+- 快照时间序列：本地快照改为 `DATA_DIR/snapshots/<key>/<13 位毫秒时间戳>.json`，按 `WATCH_MAX_VERSIONS`（默认 20 版）与 `WATCH_RETENTION_DAYS`（默认 90 天）双限剪枝，写入带 `captured_at`（UTC ISO）；旧布局单文件快照仍可读取。S3 后端同步改为 `<S3_PREFIX>/snapshots/<key>/<ts>.json`，兼容旧 `<S3_PREFIX>/watch/<key>.json`
+- `web_history(url, selector=None, limit=20)`：列出历史快照版本（不抓取），返回 `version`（1=最新，可直接给 `web_fetch(version=...)` / `web_changes(compare=...)`）/ `captured_at` / `chars` / `hash`；无快照时返回新错误码 `no_snapshot`
+- `web_fetch(version=...)`：读取历史快照而不发请求，支持 `latest` / `prev` / 序号 / ISO 时间点，返回 `version` / `captured_at` / `hash` / `source_version`
+- `web_changes(url, schema=None, compare="prev", selector=None, limit=20)`：比较任意两版快照（不抓取），`mode=fields` 时返回字段级 `changes`（`added` / `removed` / `modified`，数值带 `delta` / `pct`）与 `summary`；无字段数据时回退 `mode=lines` 行级 diff 并在 `notes` 说明
+- `web_watch(schema=...)`：抽取字段并随快照保存，下次对比返回 `changes` 与人类可读的 `summary_text`（如 `price 299→249（-16.7%）`）；历史快照无字段数据时只重建基线并写 `notes`
+- `web_schedule` 的 `create` 支持 `schema`（仅 `kind=watch`）：执行时做字段级对比，webhook 载荷额外带 `changes`（≤20 条）与 `summary_text`，原有 `summary` 键保持不变
+- Python SDK 新增 `history()` / `changes()`；新增配置 `READ_EXCERPT_CHUNKS` / `READ_EXCERPT_MAX_CHARS` / `GROUNDING_DEFAULT` / `GROUNDING_SNIPPET_CHARS` / `WATCH_MAX_VERSIONS` / `WATCH_RETENTION_DAYS`；新增错误码 `no_snapshot`
+
+### Changed
+- 快照默认目录由 `DATA_DIR/watch/` 变为 `DATA_DIR/snapshots/`（旧目录仍可读取，新写入进入新布局）；`.env.example` 与双语 README 同步更新
+
 ## [0.34.0] - 2026-11-12
 
 ### Added

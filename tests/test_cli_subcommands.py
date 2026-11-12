@@ -310,6 +310,7 @@ def test_sdk_module_is_the_programmatic_entry():
     assert set(sdk.__all__) == {
         "aclose",
         "batch",
+        "changes",
         "crawl",
         "crawl_cancel",
         "crawl_list",
@@ -317,6 +318,7 @@ def test_sdk_module_is_the_programmatic_entry():
         "crawl_status",
         "extract",
         "fetch",
+        "history",
         "index",
         "inspect",
         "screenshot",

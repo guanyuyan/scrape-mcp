@@ -157,3 +157,86 @@ def test_read_true_validates_arguments():
     assert _search(read=True, top_k=11)["error_code"] == errors.INVALID_ARGUMENT
     assert _search(read=True, max_tokens=100)["error_code"] == errors.INVALID_ARGUMENT
     assert _search(read=True, content_format="html")["error_code"] == errors.INVALID_ARGUMENT
+
+
+ARTICLE = (
+    "<html><body><article><h1>版本说明</h1>"
+    "<p>基础版每月 29 元，适合个人开发者。</p>"
+    "<h2>专业版</h2><p>专业版每月 99 元，适合团队协作。</p>"
+    "</article></body></html>"
+)
+
+
+def test_read_excerpt_returns_relevant_passages_only(monkeypatch):
+    url = "https://a.test/price"
+    fake = _Fake(_json(url), {url: ARTICLE})
+    _patch(monkeypatch, fake)
+
+    out = _run(
+        server.web_search(
+            "专业版多少钱",
+            provider="searxng",
+            read="excerpt",
+            top_k=1,
+            bypass_cache=True,
+        )
+    )
+
+    item = out["results"][0]
+    assert out["tokens"]["mode"] == "excerpt"
+    assert item["excerpt_fallback"] is False
+    assert item["excerpts"] and "99" in item["excerpts"][0]["text"]
+    assert "content" not in item  # 摘录模式不返回整页正文
+    assert item["excerpt_chars"] > 0
+
+
+def test_read_excerpt_falls_back_when_nothing_matches(monkeypatch):
+    url = "https://a.test/price"
+    fake = _Fake(_json(url), {url: ARTICLE})
+    _patch(monkeypatch, fake)
+
+    out = _run(
+        server.web_search(
+            "量子计算",
+            provider="searxng",
+            read="excerpt",
+            top_k=1,
+            bypass_cache=True,
+        )
+    )
+
+    item = out["results"][0]
+    assert item["excerpt_fallback"] is True
+    assert item["excerpts"] == []
+    assert "基础版每月" in item["content"]  # 回退整页，不返回空结果
+
+
+def test_fetch_with_query_returns_excerpts(monkeypatch):
+    url = "https://a.test/price"
+    fake = _Fake("", {url: ARTICLE})
+    _patch(monkeypatch, fake)
+
+    out = _run(server.web_fetch(url, query="专业版多少钱", bypass_cache=True))
+
+    assert out["ok"] is True
+    assert out["excerpt_fallback"] is False
+    assert "99" in out["content"]
+    assert out["excerpts"][0]["heading"] == "专业版"
+    assert out["truncated"] is True
+
+
+def test_fetch_with_query_validates_and_falls_back(monkeypatch):
+    url = "https://a.test/price"
+    fake = _Fake("", {url: ARTICLE})
+    _patch(monkeypatch, fake)
+
+    assert (
+        _run(server.web_fetch(url, query="x", format="json"))["error_code"]
+        == errors.INVALID_ARGUMENT
+    )
+    assert _run(server.web_fetch(url, query="   "))["error_code"] == errors.INVALID_ARGUMENT
+
+    out = _run(server.web_fetch(url, query="量子计算", bypass_cache=True))
+    assert out["excerpt_fallback"] is True
+    assert out["excerpts"] == []
+    assert "基础版每月" in out["content"]

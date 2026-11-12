@@ -68,7 +68,17 @@ from .core.siteindex import (
     sitemap_candidates,
 )
 from .core.stats import get_stats
-from .core.watch import MAX_SNAPSHOT_CHARS, WatchStore, content_hash, diff_summary, watch_key
+from .core.watch import (
+    MAX_CHANGES,
+    MAX_SNAPSHOT_CHARS,
+    SnapshotError,
+    WatchStore,
+    change_summary,
+    content_hash,
+    diff_summary,
+    field_changes,
+    watch_key,
+)
 from .extract.chunks import (
     CHUNK_OVERLAP_DEFAULT,
     CHUNK_SIZE_DEFAULT,
@@ -78,7 +88,10 @@ from .extract.chunks import (
 )
 from .extract.compact import LINK_POLICIES, compact_html
 from .extract.documents import DocumentError, document_text
+from .extract.excerpts import query_hits, select_excerpts, should_fallback
 from .extract.fit import build_token_report, fit_markdown
+from .extract.grounding import build as build_grounding
+from .extract.grounding import candidates as grounding_candidates
 from .extract.inspect import inspect_html
 from .extract.links import extract_links, next_link
 from .extract.llm import (
@@ -1170,6 +1183,43 @@ def _plain_payload(
     return payload
 
 
+def _apply_query_excerpts(payload: dict, content: str, query: str, fmt: str) -> None:
+    """在 compact 正文上按 query 选段，替换 payload 的 content；召回不足时保留整页。
+
+    选段前先过一遍 fit_markdown：导航/页脚/评论区不参与打分，避免把预算花在噪声上。
+    """
+    settings = get_settings()
+    fitted = fit_markdown(content)
+    base = fitted.content if fitted.applied else content
+    excerpts = select_excerpts(
+        base,
+        query,
+        max_chunks=settings.read_excerpt_chunks,
+        max_chars=settings.read_excerpt_max_chars,
+    )
+    items: list[dict] = []
+    for excerpt in excerpts:
+        item = excerpt.as_dict()
+        if fmt == "text":
+            item["text"] = to_plain_text(item["text"])
+        items.append(item)
+    text = "\n\n".join(item["text"] for item in items)
+    fallback = should_fallback(
+        excerpt_chars=len(text),
+        content_chars=len(base),
+        hits=query_hits(query, base),
+    )
+    payload["excerpts"] = items
+    payload["excerpt_chars"] = len(text)
+    payload["excerpt_fallback"] = fallback
+    if fallback:
+        return
+    payload["content"] = text
+    payload["token_estimate"] = count_tokens(text)
+    # 只返回命中段落，整页正文并未返回，如实标记为截断
+    payload["truncated"] = True
+
+
 async def _fetch_dict(
     url: str,
     max_tokens: int,
@@ -1192,6 +1242,7 @@ async def _fetch_dict(
     proxy: str | None = None,
     region: str | None = None,
     record_tool: str = "fetch",
+    query: str | None = None,
 ) -> dict:
     """单个 URL 的完整抓取闭环，返回可序列化的 payload dict（web_fetch 与 web_batch 共用）。"""
     settings = get_settings()
@@ -1266,6 +1317,7 @@ async def _fetch_dict(
             scroll=scroll if scroll is not None else (recipe.scroll if recipe else None),
             actions=actions,
             pdf_max_pages=settings.pdf_max_pages,
+            query=query or "",
         )
         if (hit := _cache_hit(cache, key)) is not None:
             return hit
@@ -1291,6 +1343,8 @@ async def _fetch_dict(
     budget = max(200, min(int(max_tokens), settings.hard_max_tokens))
     if outcome.kind != "html":
         payload = _plain_payload(outcome, url, budget, fmt, chunk_size, chunk_overlap)
+        if query and payload.get("ok"):
+            payload.setdefault("notes", []).append("query 仅对 HTML 页面生效，已返回整份文档文本")
         if payload.get("ok"):
             get_stats().record_tokens(payload.get("token_estimate", 0))
             if cache is not None and not _deadline_limited(outcome):
@@ -1345,6 +1399,8 @@ async def _fetch_dict(
         elif fmt == "json":  # json：按行分块，方便调用方逐段入库/切片
             payload["content"] = to_blocks(content)
             payload["token_estimate"] = sum(count_tokens(b) for b in payload["content"])
+    if query:
+        _apply_query_excerpts(payload, content, query, fmt)
     if fit_mode:
         final = payload["content"]
         final_text = final if isinstance(final, str) else "\n".join(str(item) for item in final)
@@ -1644,15 +1700,19 @@ async def _read_search_hits(
     content_format: str,
     deadline: float | None,
     proxy: str | None,
+    mode: str = "full",
+    query: str = "",
 ) -> tuple[list[dict], dict]:
     """并发读 top_k 的正文，并按排名顺序在 token 预算内填充。
 
     单页失败只写 read_error，不影响其他结果；未读到的条目保留标题/URL/摘要，
-    用 truncated=true 提示"正文未返回"。
+    用 truncated=true 提示"正文未返回"。``mode="excerpt"`` 时每页只带命中问题的段落，
+    召回不足的页面回退整页并标记 excerpt_fallback。
     """
     settings = get_settings()
     targets = _read_targets(hits, top_k=top_k, per_host=max(1, settings.search_read_per_host))
     fmt = "text" if content_format == "text" else "markdown"
+    excerpt_mode = mode == "excerpt"
     sem = asyncio.Semaphore(max(1, settings.search_read_concurrency))
 
     async def read_one(hit: SearchHit) -> dict:
@@ -1661,10 +1721,11 @@ async def _read_search_hits(
                 hit.url,
                 max_tokens,
                 "none",
-                fmt=fmt,
+                fmt="markdown" if excerpt_mode else fmt,
                 deadline=deadline,
                 proxy=proxy,
                 record_tool="search_read",
+                query=query if excerpt_mode else None,
             )
 
     fetched = await asyncio.gather(*(read_one(hit) for hit in targets), return_exceptions=True)
@@ -1699,6 +1760,16 @@ async def _read_search_hits(
             if used + tokens > max_tokens and read > 0:
                 item["truncated"] = True
                 skipped += 1
+            elif excerpt_mode:
+                item["excerpts"] = payload.get("excerpts") or []
+                item["excerpt_chars"] = int(payload.get("excerpt_chars") or 0)
+                item["excerpt_fallback"] = bool(payload.get("excerpt_fallback"))
+                if item["excerpt_fallback"]:
+                    item["content"] = payload.get("content")
+                    item["content_chars"] = len(item["content"] or "")
+                item["truncated"] = bool(payload.get("truncated"))
+                used += tokens
+                read += 1
             else:
                 item["content"] = payload.get("content")
                 item["content_chars"] = len(item["content"] or "")
@@ -1712,6 +1783,7 @@ async def _read_search_hits(
         "used": used,
         "results_read": read,
         "results_skipped": skipped,
+        "mode": mode,
     }
 
 
@@ -1727,7 +1799,7 @@ async def web_search(
     bypass_cache: bool = False,
     deadline_ms: int | None = None,
     proxy: str | None = None,
-    read: bool = False,
+    read: bool | str = False,
     top_k: int = 3,
     max_tokens: int | None = None,
     content_format: str = "markdown",
@@ -1736,7 +1808,8 @@ async def web_search(
 
     适合"先找入口再抓正文"的两步流程：本工具负责发现候选 URL，正文仍交给 web_fetch。
     传 ``read=true`` 时会并发抓取 top_k 条结果的正文并在 token 预算内返回，
-    一次调用即可完成"搜索 + 阅读"。
+    一次调用即可完成"搜索 + 阅读"；传 ``read="excerpt"`` 时只返回与 query 最相关的
+    段落（更省 token，适合问答型调用）。
 
     Args:
         query: 搜索关键词，不能为空。
@@ -1754,10 +1827,12 @@ async def web_search(
         bypass_cache: 跳过并绕过搜索结果缓存，强制现查。
         deadline_ms: 整次调用的总预算（毫秒），不传表示不限；回退同样受此预算约束。
         proxy: 本次请求使用的代理；不传则按代理池分配，未配池时沿用全局配置。
-        read: True 时同时抓取前 top_k 条结果的正文（默认 False，行为与旧版本一致）。
-        top_k: read=true 时要读正文的条数，1~10，默认 3。
-        max_tokens: read=true 时的正文 token 总预算；不传取配置 search_read_max_tokens。
-        content_format: read=true 时正文形态，markdown（默认）或 text。
+        read: false=不读正文（默认）；true=抓整页正文；"excerpt"=只返回与 query
+            最相关的段落（召回不足时回退整页并标记 excerpt_fallback）。
+        top_k: read 生效时要读正文的条数，1~10，默认 3。
+        max_tokens: read 生效时的正文 token 总预算；不传取配置 search_read_max_tokens。
+        content_format: read=true 时正文形态，markdown（默认）或 text；excerpt 模式固定
+            在 markdown 上选段（text 输出的片段会去格式）。
     """
     if not isinstance(query, str) or not query.strip():
         return _payload(
@@ -1789,8 +1864,12 @@ async def web_search(
         return _payload(**engines_err)
     if fallback is not None and not isinstance(fallback, bool):
         return _payload(**_argument_error("fallback 必须是布尔值"))
-    if not isinstance(read, bool):
-        return _payload(**_argument_error("read 必须是布尔值"))
+    if isinstance(read, bool):
+        read_mode = "full" if read else "none"
+    elif isinstance(read, str) and read.strip().lower() in ("excerpt", "full"):
+        read_mode = read.strip().lower()
+    else:
+        return _payload(**_argument_error('read 需为 false / true / "excerpt"'))
     if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 10:
         return _payload(**_argument_error("top_k 需为 1~10 的整数"))
     if max_tokens is not None and (
@@ -1835,7 +1914,7 @@ async def web_search(
     use_fallback = settings.search_fallback if fallback is None else fallback
     chain = _search_chain(name, settings, use_fallback)
     read_budget = 0
-    if read:
+    if read_mode != "none":
         read_budget = max(
             500,
             min(
@@ -1859,10 +1938,15 @@ async def web_search(
             site=site or "",
             time_range=time_range or "",
             engines=engines or [],
-            read=read,
-            top_k=top_k if read else 0,
+            read=read_mode,
+            top_k=top_k if read_mode != "none" else 0,
             read_budget=read_budget,
-            content_format=content_format if read else "",
+            content_format=content_format if read_mode == "full" else "",
+            excerpt=(
+                (settings.read_excerpt_chunks, settings.read_excerpt_max_chars)
+                if read_mode == "excerpt"
+                else None
+            ),
         )
         if (hit := _cache_hit(cache, key)) is not None:
             return _payload(**hit)
@@ -1882,7 +1966,7 @@ async def web_search(
             proxy=proxy,
         )
         if hits is not None:
-            if read:
+            if read_mode != "none":
                 results, token_meta = await _read_search_hits(
                     hits,
                     top_k=top_k,
@@ -1890,6 +1974,8 @@ async def web_search(
                     content_format=content_format,
                     deadline=deadline,
                     proxy=proxy,
+                    mode=read_mode,
+                    query=query.strip(),
                 )
             else:
                 results = [
@@ -1913,7 +1999,7 @@ async def web_search(
                 "elapsed_ms": max(1, int((time.perf_counter() - started) * 1000)),
                 "cached": bool(meta.get("cached")),
             }
-            if read:
+            if read_mode != "none":
                 payload["tokens"] = token_meta
             if cache is not None:
                 cache.put(key, payload)
@@ -2748,6 +2834,8 @@ async def web_fetch(
     session: str = "default",
     proxy: str | None = None,
     region: str | None = None,
+    query: str | None = None,
+    version: str | int | None = None,
 ) -> str:
     """抓取网页并返回极省 token 的紧凑正文（自动辨别反爬拦截页并如实上报）。
 
@@ -2789,6 +2877,12 @@ async def web_fetch(
         region: 地区定向（如 us / hk / jp），只在走代理池时生效：仅从带该地区标签的
             出口中选择。池里没有该地区时直接返回 invalid_argument，不会悄悄换出口。
             会话已在 SCRAPE_MCP_PROXY_SESSIONS 绑定代理、或显式传了 proxy 时不生效。
+        query: 传入时只返回与问题最相关的段落（结构同 web_search(read="excerpt")）：
+            content 换成命中段落、附 excerpts/offset，召回不足时回退整页并标记
+            excerpt_fallback。仅支持 format=markdown/text。
+        version: 读取历史快照而不发请求：latest（默认最新）/ prev（上一版）/ 序号
+            （1=最新）/ ISO 时间点。用于"上周那版长什么样"这类回溯，不抓实时页面；
+            没有快照时返回 no_snapshot。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -2796,6 +2890,15 @@ async def web_fetch(
             error_code=errors.INVALID_URL,
             error="url 必须以 http:// 或 https:// 开头",
         )
+    if version is not None:
+        return _payload(**_snapshot_payload(url, version, max_tokens))
+    if query is not None:
+        if not isinstance(query, str) or not query.strip():
+            return _payload(**_argument_error("query 不能为空字符串"))
+        if len(query) > 500:
+            return _payload(**_argument_error("query 最长 500 字符"))
+        if format not in ("markdown", "text"):
+            return _payload(**_argument_error('query 只支持 format="markdown" 或 "text"'))
     if (session_err := _session_error(session)) is not None:
         return _payload(**session_err)
     proxy, proxy_err = _proxy_arg(proxy)
@@ -2831,8 +2934,48 @@ async def web_fetch(
             deadline=deadline,
             proxy=proxy,
             region=region,
+            query=query,
         )
     )
+
+
+def _snapshot_payload(url: str, version: object, max_tokens: int) -> dict:
+    """读取历史快照（不触发抓取）；无快照或版本越界时返回 no_snapshot。"""
+    try:
+        record = _watch_store().resolve(watch_key(url, None), version)
+    except SnapshotError as exc:
+        return {
+            "ok": False,
+            "url": url,
+            "error_code": errors.INVALID_ARGUMENT,
+            "error": str(exc),
+            "retryable": False,
+        }
+    if record is None:
+        return {
+            "ok": False,
+            "url": url,
+            "error_code": errors.NO_SNAPSHOT,
+            "error": "该 URL 没有可用的历史快照（先用 web_watch 建立基线，或版本号/时间点超出范围）",
+            "retryable": False,
+        }
+    text = str(record.get("text") or "")
+    budget = max(200, min(int(max_tokens), get_settings().hard_max_tokens))
+    text, truncated, tokens = truncate_to_budget(text, budget)
+    return {
+        "ok": True,
+        "url": url,
+        "format": "markdown",
+        "content": text,
+        "token_estimate": tokens,
+        "truncated": truncated,
+        "cached": True,
+        "version": int(record.get("version") or 1),
+        "captured_at": record.get("captured_at"),
+        "hash": record.get("hash"),
+        "chars": int(record.get("chars") or len(str(record.get("text") or ""))),
+        "source_version": int(record.get("version") or 1),
+    }
 
 
 async def _llm_extract(
@@ -2862,11 +3005,29 @@ async def _llm_extract(
     return result.fields, result.model
 
 
+def _schema_selectors(fields: list, prefix: str = "") -> dict[str, str]:
+    """按数据路径收集 schema 里的选择器，用于必填缺失时找近似节点。"""
+    found: dict[str, str] = {}
+    for item in fields:
+        label = f"{prefix}{item.key}"
+        if item.selector:
+            found[label] = item.selector
+        if item.fields:
+            found.update(_schema_selectors(item.fields, f"{label}."))
+    return found
+
+
+def _strip_indexes(label: str) -> str:
+    """items[0].price → items.price，让必填缺失路径能对上 schema 里的字段标签。"""
+    return re.sub(r"\[\d+\]", "", label)
+
+
 @_tool()
 async def web_extract(
     url: str,
     schema: dict | None = None,
     prompt: str | None = None,
+    grounding: bool | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     timeout: float | None = None,
@@ -2915,6 +3076,9 @@ async def web_extract(
         prompt: 可选的自然语言抽取要求。配置了 LLM（SCRAPE_MCP_LLM_BASE_URL / MODEL）时
             交给模型抽取；未配置或调用失败时自动回退确定性 schema，不产生默认外部调用。
             字段规则里可用 ``description`` 说明字段含义，会一并传给模型。
+        grounding: 是否返回字段级溯源（默认取配置 grounding_default，关闭时载荷不变）。
+            开启后 data 的每个路径都会带 selector / snippet / offset / basis，
+            必填字段缺失时附 ≤3 个近似命中候选；LLM 抽取不提供溯源并写入 notes。
         headers: 自定义请求头；传入时不走共享缓存。
         cookies: 自定义 cookie 字典；传入时不走共享缓存。
         timeout: 单次请求超时秒数。
@@ -2947,6 +3111,9 @@ async def web_extract(
     deadline, deadline_err = _deadline_arg(deadline_ms)
     if deadline_err is not None:
         return _payload(**deadline_err)
+    use_grounding = get_settings().grounding_default if grounding is None else grounding
+    if not isinstance(use_grounding, bool):
+        return _payload(**_argument_error("grounding 必须是布尔值"))
 
     prompt_text = ""
     if prompt is not None:
@@ -3010,6 +3177,8 @@ async def web_extract(
             wait_for=wait_for if wait_for is not None else (recipe.wait_for if recipe else None),
             click=click if click is not None else (recipe.click if recipe else None),
             scroll=scroll if scroll is not None else (recipe.scroll if recipe else None),
+            grounding=use_grounding,
+            grounding_chars=get_settings().grounding_snippet_chars if use_grounding else None,
         )
         if (hit := _cache_hit(cache, key)) is not None:
             return _payload(**hit)
@@ -3042,7 +3211,13 @@ async def web_extract(
             retryable=False,
         )
 
-    result = extract_fields(outcome.html, fields, base_url=outcome.final_url or url)
+    grounding_hits: dict[str, dict] = {}
+    result = extract_fields(
+        outcome.html,
+        fields,
+        base_url=outcome.final_url or url,
+        hits=grounding_hits if use_grounding else None,
+    )
     data = result.fields
     required_missing = result.required_missing
     schema_notes = list(result.errors)
@@ -3091,6 +3266,28 @@ async def web_extract(
         payload["extract_mode"] = extract_mode
         if model:
             payload["model"] = model
+    if use_grounding:
+        if extract_mode == "llm":
+            notes.append("LLM 抽取不提供字段级溯源（grounding 已跳过）")
+        else:
+            snippet_chars = get_settings().grounding_snippet_chars
+            markdown = compact_html(outcome.html, outcome.final_url or url).content
+            payload["grounding"] = build_grounding(
+                grounding_hits,
+                markdown=markdown,
+                html=outcome.html,
+                snippet_chars=snippet_chars,
+            )
+            if required_missing:
+                selectors = _schema_selectors(fields)
+                payload["missing_candidates"] = {
+                    label: grounding_candidates(
+                        outcome.html,
+                        selectors.get(_strip_indexes(label), ""),
+                        snippet_chars=snippet_chars,
+                    )
+                    for label in required_missing
+                }
     if notes:
         payload["notes"] = notes
     if schema_notes:
@@ -3833,11 +4030,15 @@ async def web_watch(
     session: str = "default",
     deadline_ms: int | None = None,
     proxy: str | None = None,
+    schema: dict | None = None,
 ) -> str:
     """检测网页（或页面内某个区块）自上次调用以来的变化。
 
-    每次成功抓取都会保存一份正文快照，下次调用与它对比，返回 changed 与增删行摘要，
-    适合"每天看一眼这个页面有没有新内容"的场景；无变化时 changed=false 且 diff 为空。
+    每次成功抓取都会保存一份快照（按时间序列保留，多版本可回溯），下次调用与最新版
+    对比，返回 changed 与增删行摘要，适合"每天看一眼这个页面有没有新内容"的场景；
+    无变化时 changed=false 且 diff 为空。
+    传 ``schema`` 时额外抽取字段并做字段级对比（价格从 299 变成 249 这类变化更直观），
+    字段随快照一起保存，供 web_changes 跨版本比较。
     抓取失败（拦截/超时/登录墙）不会覆盖旧快照，等问题解决后仍能对比到真实变化。
 
     Args:
@@ -3848,6 +4049,8 @@ async def web_watch(
         session: 登录态会话名（默认 default）；需与 login 时使用的会话名一致。
         deadline_ms: 整次调用的总预算（毫秒），不传表示不限。
         proxy: 本次请求使用的代理；不传则按代理池分配，未配池时沿用全局配置。
+        schema: 可选的字段抽取规则（同 web_extract）；提供后快照会附带字段数据，
+            变化时返回 changes（字段增删改，数值带 delta/pct）与 summary_text。
     """
     if not url.startswith(("http://", "https://")):
         return _payload(
@@ -3864,6 +4067,20 @@ async def web_watch(
     if deadline_err is not None:
         return _payload(**deadline_err)
 
+    fields = None
+    if schema is not None:
+        from .extract.schema import SchemaValidationError, parse_schema
+
+        try:
+            fields = parse_schema(schema)
+        except SchemaValidationError as exc:
+            return _payload(
+                ok=False,
+                url=url,
+                error_code=errors.INVALID_ARGUMENT,
+                error=f"schema 非法: {exc}",
+            )
+
     outcome, error = await _fetch_html(
         url,
         bypass_cache=bypass_cache,
@@ -3877,6 +4094,14 @@ async def web_watch(
 
     text = _watch_text(outcome.html, url, selector)[:MAX_SNAPSHOT_CHARS]
     digest = content_hash(text)
+    field_data = None
+    watch_notes: list[str] = []
+    if fields is not None:
+        from .extract.schema import extract_fields
+
+        extraction = extract_fields(outcome.html, fields, base_url=outcome.final_url or url)
+        field_data = extraction.fields
+        watch_notes.extend(extraction.errors)
     store = _watch_store()
     key = watch_key(url, selector)
     previous = None if reset else store.load(key)
@@ -3886,32 +4111,206 @@ async def web_watch(
         if previous is not None and changed
         else {"added_lines": 0, "removed_lines": 0, "diff": [], "diff_truncated": False}
     )
-    store.save(
-        key,
+    changes: dict[str, list] | None = None
+    summary_text: list[str] = []
+    if fields is not None and previous is not None:
+        if isinstance(previous.get("fields"), dict):
+            changes = field_changes(previous.get("fields"), field_data)
+            summary_text = change_summary(changes)
+        else:
+            watch_notes.append("历史快照未包含字段数据，本次只重建字段基线")
+    snapshot = {
+        "url": url,
+        "selector": selector,
+        "hash": digest,
+        "chars": len(text),
+        "text": text,
+    }
+    if field_data is not None:
+        snapshot["fields"] = field_data
+    store.save(key, snapshot)
+    payload = {
+        "ok": True,
+        "url": url,
+        "final_url": outcome.final_url,
+        "status": outcome.status,
+        "tier": outcome.tier,
+        "elapsed_ms": outcome.elapsed_ms,
+        "selector": selector,
+        "changed": changed,
+        "first_seen": previous is None,
+        "hash": digest,
+        "previous_hash": (previous or {}).get("hash"),
+        "chars": len(text),
+        "previous_chars": (previous or {}).get("chars"),
+        **summary,
+    }
+    if changes is not None:
+        payload["changes"] = changes
+        payload["summary_text"] = summary_text
+    if watch_notes:
+        payload["notes"] = watch_notes
+    return _payload(**payload)
+
+
+@_tool()
+async def web_history(url: str, selector: str | None = None, limit: int = 20) -> str:
+    """列出一个 URL 的历史快照版本（由 web_watch 建立），不抓取页面。
+
+    版本号从 1（最新）递增，可直接作为 web_fetch(version=...) / web_changes(compare=...)
+    的入参；captured_at 为 UTC 时间，也可用 ISO 时间点定位"某时刻之前最近的版本"。
+    快照默认最多保留 20 版 / 90 天（SCRAPE_MCP_WATCH_MAX_VERSIONS / WATCH_RETENTION_DAYS）。
+
+    Args:
+        url: 目标网页完整 URL。
+        selector: 与 web_watch 时一致的选择器；不传表示整页快照。
+        limit: 最多返回的版本数，1~100，默认 20。
+    """
+    if not url.startswith(("http://", "https://")):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if selector is not None and (not isinstance(selector, str) or not selector.strip()):
+        return _payload(**_argument_error("selector 需为非空字符串或不传"))
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        return _payload(**_argument_error("limit 需为 1~100 的整数"))
+
+    records = _watch_store().history(watch_key(url, selector), limit=limit)
+    if not records:
+        return _payload(
+            ok=False,
+            url=url,
+            selector=selector,
+            error_code=errors.NO_SNAPSHOT,
+            error="该 URL 还没有历史快照，请先调用 web_watch 建立基线",
+            retryable=False,
+        )
+    versions = [
         {
-            "url": url,
-            "selector": selector,
-            "hash": digest,
-            "chars": len(text),
-            "text": text,
-        },
-    )
+            "version": int(record.get("version") or index + 1),
+            "captured_at": record.get("captured_at"),
+            "chars": int(record.get("chars") or 0),
+            "hash": record.get("hash"),
+        }
+        for index, record in enumerate(records)
+    ]
     return _payload(
         ok=True,
         url=url,
-        final_url=outcome.final_url,
-        status=outcome.status,
-        tier=outcome.tier,
-        elapsed_ms=outcome.elapsed_ms,
         selector=selector,
-        changed=changed,
-        first_seen=previous is None,
-        hash=digest,
-        previous_hash=(previous or {}).get("hash"),
-        chars=len(text),
-        previous_chars=(previous or {}).get("chars"),
-        **summary,
+        count=len(versions),
+        versions=versions,
     )
+
+
+@_tool()
+async def web_changes(
+    url: str,
+    schema: dict | None = None,
+    compare: str | int = "prev",
+    selector: str | None = None,
+    limit: int = MAX_CHANGES,
+) -> str:
+    """比较某个 URL 的两个快照版本，不发请求、不产生额外抓取。
+
+    默认把最新版与上一版（compare="prev"）比较；compare 也可填序号（1=最新）或
+    ISO 时间点（取该时刻之前最近的版本）。不传 schema 时退化为行级 diff；
+    传 schema 且两版快照都带字段数据时，输出字段级 changes（数值带 delta/pct）。
+    字段由 web_watch(schema=...) 随快照保存，历史快照没有字段数据时自动回退行级 diff。
+
+    Args:
+        url: 目标网页完整 URL。
+        schema: 可选的字段抽取规则（同 web_extract），用于字段级比较。
+        compare: 与哪一版比较：prev（上一版，默认）/ 序号 / ISO 时间点。
+        selector: 与 web_watch 时一致的选择器；不传表示整页快照。
+        limit: 单类变更最多返回条数，1~50，默认 20。
+    """
+    if not url.startswith(("http://", "https://")):
+        return _payload(
+            ok=False,
+            error_code=errors.INVALID_URL,
+            error="url 必须以 http:// 或 https:// 开头",
+        )
+    if selector is not None and (not isinstance(selector, str) or not selector.strip()):
+        return _payload(**_argument_error("selector 需为非空字符串或不传"))
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
+        return _payload(**_argument_error("limit 需为 1~50 的整数"))
+
+    fields = None
+    if schema is not None:
+        from .extract.schema import SchemaValidationError, parse_schema
+
+        try:
+            fields = parse_schema(schema)
+        except SchemaValidationError as exc:
+            return _payload(
+                ok=False,
+                url=url,
+                error_code=errors.INVALID_ARGUMENT,
+                error=f"schema 非法: {exc}",
+            )
+
+    store = _watch_store()
+    key = watch_key(url, selector)
+    latest = store.resolve(key, "latest")
+    if latest is None:
+        return _payload(
+            ok=False,
+            url=url,
+            selector=selector,
+            error_code=errors.NO_SNAPSHOT,
+            error="该 URL 还没有历史快照，请先调用 web_watch 建立基线",
+            retryable=False,
+        )
+    try:
+        previous = store.resolve(key, compare)
+    except SnapshotError as exc:
+        return _payload(**_argument_error(str(exc)))
+    if previous is None or previous.get("version") == latest.get("version"):
+        return _payload(
+            ok=False,
+            url=url,
+            selector=selector,
+            error_code=errors.NO_SNAPSHOT,
+            error="没有可比较的更早版本（compare 指向最新版或已超出保留范围）",
+            retryable=False,
+        )
+
+    notes: list[str] = []
+    changes: dict[str, list] | None = None
+    summary_text: list[str] = []
+    if fields is not None:
+        old_fields = previous.get("fields")
+        new_fields = latest.get("fields")
+        if isinstance(old_fields, dict) and isinstance(new_fields, dict):
+            changes = field_changes(old_fields, new_fields, limit=limit)
+            summary_text = change_summary(changes, limit=limit)
+        else:
+            notes.append("快照未包含字段数据（建立快照时未传 schema），已回退行级 diff")
+    summary = diff_summary(str(previous.get("text") or ""), str(latest.get("text") or ""))
+    if changes is None:
+        summary_text = [f"新增 {summary['added_lines']} 行，删除 {summary['removed_lines']} 行"]
+
+    payload = {
+        "ok": True,
+        "url": url,
+        "selector": selector,
+        "mode": "fields" if changes is not None else "lines",
+        "from_version": int(previous.get("version") or 1),
+        "to_version": int(latest.get("version") or 1),
+        "captured_from": previous.get("captured_at"),
+        "captured_to": latest.get("captured_at"),
+        "compare": str(compare),
+        "summary": summary_text,
+        **summary,
+    }
+    if changes is not None:
+        payload["changes"] = changes
+    if notes:
+        payload["notes"] = notes
+    return _payload(**payload)
 
 
 _SCHEDULE_ACTIONS = frozenset({"list", "get", "create", "pause", "resume", "delete", "run"})
@@ -3970,7 +4369,13 @@ async def run_scheduled_task(task: dict, *, proxy: str | None = None) -> dict:
     session = str(task.get("session") or "default")
     url = str(task.get("url") or "")
     if kind == "watch":
-        raw = await web_watch(url, selector=task.get("selector"), session=session, proxy=proxy)
+        raw = await web_watch(
+            url,
+            selector=task.get("selector"),
+            session=session,
+            proxy=proxy,
+            schema=task.get("schema"),
+        )
     else:
         raw = await web_index(url, session=session, proxy=proxy)
     result = json.loads(raw)
@@ -3985,18 +4390,21 @@ async def run_scheduled_task(task: dict, *, proxy: str | None = None) -> dict:
     summary = _run_summary(kind, result)
     webhook = None
     if notify and task.get("webhook_url"):
-        webhook = await _post_webhook(
-            str(task["webhook_url"]),
-            {
-                "event": "change",
-                "task_id": task.get("id"),
-                "kind": kind,
-                "url": url,
-                "selector": task.get("selector"),
-                "checked_at": time.time(),
-                "summary": summary,
-            },
-        )
+        event = {
+            "event": "change",
+            "task_id": task.get("id"),
+            "kind": kind,
+            "url": url,
+            "selector": task.get("selector"),
+            "checked_at": time.time(),
+            "summary": summary,
+        }
+        # 字段级变更（任务创建时传了 schema 才有）：条数已在上游限制，可直接读
+        if kind == "watch" and isinstance(result.get("changes"), dict):
+            event["changes"] = result["changes"]
+            if result.get("summary_text"):
+                event["summary_text"] = result["summary_text"]
+        webhook = await _post_webhook(str(task["webhook_url"]), event)
 
     status = STATUS_OK if ok else STATUS_ERROR
     error = "" if ok else str(result.get("error") or result.get("error_code") or "未知错误")
@@ -4030,6 +4438,7 @@ async def web_schedule(
     webhook_url: str | None = None,
     session: str = "default",
     proxy: str | None = None,
+    schema: dict | None = None,
 ) -> str:
     """管理定时监控任务：按间隔执行 web_watch / web_index，变更后推送 webhook。
 
@@ -4048,6 +4457,8 @@ async def web_schedule(
         webhook_url: 检测到变更后 POST 的地址（http/https）；不传则只记录状态。
         session: 执行时使用的登录态会话名，默认 default。
         proxy: 执行时使用的代理；不传则按代理池分配，未配池时沿用全局配置。
+        schema: 可选的字段抽取规则（仅 kind=watch）：提供后每次执行都会做字段级对比，
+            webhook 载荷额外带 changes（≤20 条）与人类可读的 summary_text。
     """
     action = (action or "").strip().lower()
     if action not in _SCHEDULE_ACTIONS:
@@ -4076,6 +4487,11 @@ async def web_schedule(
             )
         if (session_err := _session_error(session)) is not None:
             return _payload(**session_err)
+        if schema is not None:
+            if not isinstance(schema, dict):
+                return _payload(**_argument_error("schema 需为字段规则字典"))
+            if kind != "watch":
+                return _payload(**_argument_error("schema 仅 kind=watch 支持"))
         try:
             task = store.create(
                 kind=kind,
@@ -4084,6 +4500,7 @@ async def web_schedule(
                 interval_s=interval_s,
                 webhook_url=webhook_url,
                 session=session,
+                schema=schema,
             )
         except ScheduleError as exc:
             return _payload(ok=False, error_code=errors.INVALID_ARGUMENT, error=str(exc))

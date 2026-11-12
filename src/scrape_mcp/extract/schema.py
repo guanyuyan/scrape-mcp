@@ -410,17 +410,37 @@ def _finalize_one(value: Any, f: SchemaField, base_url: str, errors: list[str], 
     return converted
 
 
-def _run(scope: Any, schema: list[SchemaField], base_url: str, path: str = "") -> SchemaResult:
+def _record(
+    hits: dict[str, dict] | None, label: str, node: Any, f: SchemaField, value: Any
+) -> None:
+    """可选地记下字段的命中节点，供字段级溯源使用；不改变抽取结果。"""
+    if hits is None or _is_missing(value):
+        return
+    hits[label] = {"node": node, "type": f.type, "value": value, "selector": f.selector}
+
+
+def _run(
+    scope: Any,
+    schema: list[SchemaField],
+    base_url: str,
+    path: str = "",
+    hits: dict[str, dict] | None = None,
+    hit_path: str | None = None,
+) -> SchemaResult:
+    """path 用于错误/必填路径（历史契约），hit_path 用于溯源键（list 带下标）。"""
     fields: dict[str, Any] = {}
     errors: list[str] = []
     required_missing: list[str] = []
+    hit_base = path if hit_path is None else hit_path
 
     for f in schema:
         label = f"{path}{f.key}"
+        hit_label = f"{hit_base}{f.key}"
 
         if f.type == "jsonld":
             value = _finalize(_jsonld_value(scope, f), f, base_url, errors, label)
             fields[f.key] = value
+            _record(hits, hit_label, None, f, value)
             if f.required and _is_missing(value):
                 required_missing.append(label)
             continue
@@ -430,6 +450,7 @@ def _run(scope: Any, schema: list[SchemaField], base_url: str, path: str = "") -
                 _plugin_value(scope, f, base_url, errors, label), f, base_url, errors, label
             )
             fields[f.key] = value
+            _record(hits, hit_label, scope, f, value)
             if f.required and _is_missing(value):
                 required_missing.append(label)
             continue
@@ -445,6 +466,7 @@ def _run(scope: Any, schema: list[SchemaField], base_url: str, path: str = "") -
 
         if f.type == "count":
             fields[f.key] = len(nodes)
+            _record(hits, hit_label, nodes[0] if nodes else None, f, fields[f.key])
             continue
 
         if not nodes:
@@ -454,7 +476,14 @@ def _run(scope: Any, schema: list[SchemaField], base_url: str, path: str = "") -
             continue
 
         if f.type == "object":
-            sub = _run(nodes[0], f.fields or [], base_url, path=f"{label}.")
+            sub = _run(
+                nodes[0],
+                f.fields or [],
+                base_url,
+                path=f"{label}.",
+                hits=hits,
+                hit_path=f"{hit_label}.",
+            )
             fields[f.key] = sub.fields if sub.fields else None
             errors.extend(sub.errors)
             required_missing.extend(sub.required_missing)
@@ -463,32 +492,52 @@ def _run(scope: Any, schema: list[SchemaField], base_url: str, path: str = "") -
         if f.type == "list":
             if f.fields:
                 items: list[dict[str, Any]] = []
-                for node in nodes:
-                    sub = _run(node, f.fields, base_url, path=f"{label}.")
+                for index, node in enumerate(nodes):
+                    sub = _run(
+                        node,
+                        f.fields,
+                        base_url,
+                        path=f"{label}.",
+                        hits=hits,
+                        hit_path=f"{hit_label}[{index}].",
+                    )
                     items.append(sub.fields)
                     errors.extend(sub.errors)
                     required_missing.extend(sub.required_missing)
                 fields[f.key] = items
             else:
-                fields[f.key] = [
+                values = [
                     _finalize(_raw_value(node, f), f, base_url, errors, label) for node in nodes
                 ]
+                fields[f.key] = values
+                for index, (node, value) in enumerate(zip(nodes, values, strict=False)):
+                    _record(hits, f"{hit_label}[{index}]", node, f, value)
             if f.required and _is_missing(fields[f.key]):
                 required_missing.append(label)
             continue
 
         value = _finalize(_raw_value(nodes[0], f), f, base_url, errors, label)
         fields[f.key] = value
+        _record(hits, hit_label, nodes[0], f, value)
         if f.required and _is_missing(value):
             required_missing.append(label)
 
     return SchemaResult(fields=fields, errors=errors, required_missing=required_missing)
 
 
-def extract_fields(html: str, schema: list[SchemaField], *, base_url: str = "") -> SchemaResult:
-    """在 HTML 上执行 schema，返回字段值 dict 与抽样失败的错误清单。"""
+def extract_fields(
+    html: str,
+    schema: list[SchemaField],
+    *,
+    base_url: str = "",
+    hits: dict[str, dict] | None = None,
+) -> SchemaResult:
+    """在 HTML 上执行 schema，返回字段值 dict 与抽样失败的错误清单。
+
+    传入 ``hits`` 时同时收集每个字段命中的节点（键为数据路径），供字段级溯源使用。
+    """
     tree = HTMLParser(html or "")
-    return _run(tree, schema, base_url)
+    return _run(tree, schema, base_url, hits=hits)
 
 
 def extract_from_html(html: str, schema: Any, *, base_url: str = "") -> SchemaResult:

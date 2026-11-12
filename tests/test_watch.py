@@ -66,9 +66,16 @@ def test_watch_store_roundtrip_and_bad_file(tmp_path):
     store.save(key, {"url": URL, "selector": "ul", "hash": "h", "chars": 1, "text": "x"})
     record = store.load(key)
     assert record is not None and record["hash"] == "h" and "saved_at" in record
+    assert record["version"] == 1
     # 不同 selector 各记一份，互不覆盖
     assert store.load(watch_key(URL, None)) is None
-    # 文件损坏时按"没有快照"处理，而不是抛异常
+    # 版本文件损坏时跳过，不抛异常；没有可用版本即"没有快照"
+    files = sorted((tmp_path / "snapshots" / key).glob("*.json"))
+    assert len(files) == 1
+    files[0].write_text("{", encoding="utf-8")
+    assert store.load(key) is None
+    # 旧版单文件损坏同样按"没有快照"处理
+    (tmp_path / "watch").mkdir(parents=True, exist_ok=True)
     (tmp_path / "watch" / f"{key}.json").write_text("{", encoding="utf-8")
     assert store.load(key) is None
 

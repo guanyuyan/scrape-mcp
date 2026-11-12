@@ -38,6 +38,8 @@ MISSING_REQUIRED = "missing_required"
 UNSUPPORTED_CONTENT = "unsupported_content"
 EMPTY = "empty"
 UNKNOWN = "unknown"
+# 请求的历史快照不存在（没抓过或版本号/时间点超出范围）；不会触发实时抓取
+NO_SNAPSHOT = "no_snapshot"
 
 # 协议中对外承诺的全部错误码（只增不改），用于契约测试与文档同步
 ALL_CODES = (
@@ -58,6 +60,7 @@ ALL_CODES = (
     UNSUPPORTED_CONTENT,
     EMPTY,
     UNKNOWN,
+    NO_SNAPSHOT,
 )
 
 # "过一会儿再试可能成功"的错误码。拦截/登录墙/被拒绝重试无意义，不计入

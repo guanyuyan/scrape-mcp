@@ -108,9 +108,9 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **同 URL 单飞（singleflight）**：同一页面被并发请求时（多租户同时抓、批量/爬取里重复链接）只真抓一次，其余等待并复用同一份响应，省出口流量也少踩目标站风控；L1 与 L2 渲染都会合并。带自定义头/凭证或 `bypass_cache=true` 的请求可能因人而异，不参与合并。
 - **两层缓存**：HTTP 响应按 TTL 落盘，过期后带 `ETag`/`Last-Modified` 做条件请求；正文（compact 后）与字段抽取结果另有一层结果缓存，二次调用直接返回，`bypass_cache=true` 同时绕过两层。`web_batch` 并发抓取一批 URL。
 - **轻量爬取**：`web_crawl` 支持两种模式——按 `depth`/`limit` 发现站内链接，或按 `next_selector` 顺序翻页（`max_pages` 封顶、自动去重、不跳站外）；静态资源自动跳过。页数多时改用 `web_crawl_start` 起后台任务，用 `status` 轮询、`cancel` 停止，进程重启后自动续跑。
-- **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。
-- **定时监控与通知**：`web_schedule` 把 `web_watch` / `web_index` 变成计划任务（任务可查、可暂停、可手动跑一次），由本机 `scrape-mcp schedule daemon` 按间隔执行；检测到真实变更后 POST 到你配置的 webhook。首次执行只建立基线，不发通知；抓取失败只记状态，不覆盖快照。
-- **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要 / 来源引擎 / 发布时间），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API 或配置 key 使用 Brave / Tavily；支持 `site`、`time_range`、`engines` 过滤与后端失败自动回退，结果可缓存。传 `read=true` 时一次调用并发抓取前 `top_k` 条正文，按 `max_tokens` 预算截断并去重，直接完成"搜索 + 阅读"。
+- **变更检测**：`web_watch` 每次成功抓取后留一份正文快照，下次与它对比并返回 `changed` 与增删行摘要；指定 `selector` 可只盯页面某一块（如榜单、价格区）。抓取失败不覆盖旧快照，风控恢复后仍能对比出这期间的真实变化。快照按时间序列保留（默认 20 版 / 90 天），`web_history` 列出历史版本，`web_fetch(version=...)` 直接回读某一版而不发请求，`web_changes` 比较任意两版（字段级 `delta` / `pct` 或行级 diff）。
+- **定时监控与通知**：`web_schedule` 把 `web_watch` / `web_index` 变成计划任务（任务可查、可暂停、可手动跑一次），由本机 `scrape-mcp schedule daemon` 按间隔执行；检测到真实变更后 POST 到你配置的 webhook。首次执行只建立基线，不发通知；抓取失败只记状态，不覆盖快照。`create` 时传 `schema` 还能做字段级监控：webhook 载荷额外带 `changes`（≤20 条）与人类可读的 `summary_text`。
+- **搜索发现**：`web_search` 把关键词变成结构化结果（标题 / URL / 摘要 / 来源引擎 / 发布时间），默认走 DuckDuckGo HTML 端点（无需 API key），也可指向自托管 SearXNG 的 JSON API 或配置 key 使用 Brave / Tavily；支持 `site`、`time_range`、`engines` 过滤与后端失败自动回退，结果可缓存。传 `read=true` 时一次调用并发抓取前 `top_k` 条正文，按 `max_tokens` 预算截断并去重，直接完成"搜索 + 阅读"；传 `read="excerpt"` 则每页只返回与问题最相关的段落（BM25 + 中文 bigram，标题加权），召回不足时回退整页并标 `excerpt_fallback`。
 - **页面交互地图**：`web_inspect` 只读扫描页面，列出可点击/可输入元素、表单字段与"下一页"候选；每个元素带稳定 `ref`（合法 CSS 选择器），可直接作为 `actions[].selector` 执行，不用模型猜选择器。不执行任意 JS，不返回整页 HTML。
 - **页面截图**：`web_screenshot` 用真实浏览器渲染后导出 PNG 或整页 PDF，支持整页/视口、自定义尺寸、元素裁剪、设备预设（desktop/mobile）、截图前隐藏固定导航/弹窗，以及等待元素与额外延时；`actions` 可在截图前先点击/输入/翻页。复用 `login` 保存的登录态，需要登录或 JS 渲染的页面也能拍。
 - **站点索引**：`web_index` 读 robots.txt 的 `Sitemap:`（回退 `/sitemap.xml`），递归展开 sitemap index 并解压 `.gz`；清单落盘后，下次返回新增 / 变更 / 未变 / 移除，可选回抓正文比哈希过滤"只改了时间戳"的假变更，或输出与 `web_watch` 同口径的差异摘要。
@@ -118,7 +118,8 @@ web_fetch(url="https://xxx/article/1") → JSON：{ok, content(极省正文), to
 - **异步爬取任务**：`web_crawl_start` 立即返回 `job_id`，任务在后台推进并把状态逐页原子落盘到 `DATA_DIR/jobs/`；`web_crawl_status` 可读进度与部分结果、并在进程重启后自动续跑，`web_crawl_cancel` 停止任务，`web_crawl_list` 列出最近任务。同参数重复 start 幂等。
 - **内置运行看板**：HTTP 模式下打开 `/` 即见请求量、L1/L2 分布、耗时分位与分桶、结果码、正文类型、L2 页位与代理池健康度；单文件 HTML，无外部依赖，每 5 秒自动刷新。
 - **总预算与降级**：`web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start` 都支持 `deadline_ms`。预算不够时按"压缩单步超时 → 跳过重试 → 不升级 L2 → 直接返回 `timeout`"逐级降级，已拿到的结果照常返回；降级结果不写入缓存，避免后续预算充足的调用拿到残缺内容。预算同样覆盖合规检查（限流等待与 robots.txt 抓取），不够就提前返回 `timeout`，不把时间耗在准备阶段。
-- **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`；第三方包可通过入口点注册自定义字段类型。
+- **结构化抽取**：`web_extract` 支持 `text`/`html`/`attr`/`count`/`list`/`object`/`jsonld`，配 `regex`、`abs_url`、`convert`（int/float/date）与 `required` 必填校验，缺字段直接返回 `missing_required`；第三方包可通过入口点注册自定义字段类型。传 `grounding=true` 时每个字段额外返回 `selector` / `snippet` / `offset` / `basis`（键路径与 `data` 完全一致，含 list 下标），必填缺失时附 ≤3 个近似命中候选。
+- **query 摘录**：`web_fetch(query=...)` 只返回与问题最相关的段落（`excerpts` 带 `heading` / `start` / `end` / `score`），适合问答型调用；召回不足时回退整页并标 `excerpt_fallback`，不返回空片段。
 - **站点 recipe**：把某站的渲染方式、正文选择器、抽取 schema、翻页规则写成一份 JSON 落到本地，之后同一站点免参数复用，单次调用仍可覆盖。
 - **输出格式可选**：`format=markdown|fit_markdown|text|json|chunks`；`json` 给段落数组，`chunks` 直接给 RAG 分块（固定窗口 + overlap + 标题路径），可原样入库。`fit_markdown` 在 compact 之后继续剔除导航、页脚、评论、推荐位与广告，并返回 `token_report`（原始 HTML 体积、输出体积、token 估算、压缩比、各类丢弃块数）。
 - **同域并发闸门**：同一站点默认最多 2 个并发请求，跨站仍可并行，避免批量抓取时把单站打穿。
@@ -265,6 +266,12 @@ cp .env.example .env    # 生成配置模板
 | `SEARCH_READ_PER_HOST` | `2` | `web_search(read=true)` 同一主机最多保留几条结果 |
 | `INSPECT_MAX_ELEMENTS` | `120` | `web_inspect` 默认返回的可交互元素数（硬上限 300） |
 | `FIT_MARKDOWN_DEFAULT` | `false` | `format` 未显式指定时是否对 markdown 默认启用 `fit_markdown` 裁剪 |
+| `READ_EXCERPT_CHUNKS` | `3` | `read="excerpt"` / `web_fetch(query=...)` 每页最多返回几段 |
+| `READ_EXCERPT_MAX_CHARS` | `600` | 每段摘录最多字符数 |
+| `GROUNDING_DEFAULT` | `false` | `web_extract` 是否默认返回字段级溯源（单次可用 `grounding` 覆盖） |
+| `GROUNDING_SNIPPET_CHARS` | `120` | 溯源片段截断长度（字符） |
+| `WATCH_MAX_VERSIONS` | `20` | 每个 URL(+selector) 保留的快照版本数上限 |
+| `WATCH_RETENTION_DAYS` | `90` | 快照保留天数；`0` 表示只按版本数限制 |
 | `LLM_BASE_URL` | — | OpenAI 兼容端点根地址（如 `https://api.deepseek.com/v1`）；留空则完全不发起 LLM 调用 |
 | `LLM_API_KEY` | — | LLM 端点 key（Bearer）；本地兼容端点可不填 |
 | `LLM_MODEL` | — | 模型名；与 `LLM_BASE_URL` 同时配置才启用 LLM 辅助抽取 |
@@ -465,6 +472,8 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - 非 HTML：PDF 返回结构化文本（装 `[pdf]` extra；`kind="pdf"` 且带 `pages`/`pages_parsed`）；DOCX/XLSX/PPTX 直接用标准库抽取（`kind` 对应 `docx`/`xlsx`/`pptx`）；纯文本原样返回（`kind="text"`）
   - 扫描 PDF：`OCR_ENABLED=1` 且装了 `[ocr]` extra 时对无文字层页面 OCR，载荷带 `ocr=true`；OCR 不可用或仍无文字时返回 `unsupported_content` / `empty`
   - 诊断参数：`debug=true` 时返回 `diagnostics`（决策轨迹、选择器命中数、L2 交互结果），不含页面内容
+  - `query`（可选）：只返回与问题最相关的段落，结构同 `web_search(read="excerpt")`；`content` 换成命中段落，附 `excerpts` / `excerpt_chars` / `excerpt_fallback`，仅支持 `format=markdown|text`
+  - `version`（可选）：读取历史快照而不发请求，取 `latest` / `prev` / 序号（`1`=最新）/ ISO 时间点；返回 `version` / `captured_at` / `hash` / `source_version`，无快照时 `error_code=no_snapshot`
 - **`web_extract(url, schema=None, ...)`** → 按字段 schema 抽取结构化 JSON（可入库）
   - `schema` 可省略：命中站点 recipe 时直接用 recipe 里的 schema，否则返回 `invalid_argument`
   - 字段类型：`text`（默认）/ `html` / `attr`（需配 `attr`）/ `count` / `list` / `object` / `jsonld`（需配 `path`）
@@ -478,6 +487,7 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - `prompt`（可选）：LLM 辅助抽取。配置 `LLM_BASE_URL` + `LLM_MODEL` 后把 compact 正文交给 OpenAI 兼容模型；未配置或调用/解析失败自动回退确定性 schema，**不会产生默认外部调用**
   - 返回 `extract_mode`（`llm` / `schema`）与 `model`；回退原因写在 `notes`。字段规则可用 `description` 说明含义，会随 prompt 一起交给模型
   - 隐私提示：启用 LLM 意味着页面正文会发送到你配置的端点，不要把不可外发的页面交给它
+  - `grounding`（可选，默认取 `GROUNDING_DEFAULT`）：返回 `grounding`，键与 `data` 路径一致（含 `items[0].price` 这类下标），每项含 `selector`（可定位的 CSS 选择器）/ `snippet`（页面原文片段）/ `offset`（相对 `basis` 的字符偏移，动态页可能为 `null`）/ `basis`（`markdown` 或 `html`）；必填缺失时额外给出 `missing_candidates`（每个字段 ≤3 个近似命中）。LLM 抽取不提供溯源，`notes` 会说明
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → 并发抓取一批，逐 URL 返回；单条异常不影响整批
   - 支持 `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session`（对该批所有 URL 生效）；`format=chunks` 与 `chunk_size` / `chunk_overlap` 同样逐条生效
   - `proxy` 同样对该批所有 URL 生效；缺省按代理池分配，未配池时沿用全局配置
@@ -498,24 +508,34 @@ scrape-mcp init --client cursor --write     # 或 claude / vscode / json
   - **`web_crawl_status(job_id, include_results=True)`** → 读取状态、进度与已抓页面；进程重启后会从断点续跑
   - **`web_crawl_cancel(job_id)`** → 停止任务，已完成页面的部分结果仍可读取；终态任务幂等返回
   - **`web_crawl_list(limit=20)`** → 列出最近任务（不含正文）
-- **`web_watch(url, selector=None, reset=False, bypass_cache=True, ...)`** → 对比页面自上次抓取以来的变化
-  - 每次成功抓取都把正文存一份快照到 `DATA_DIR/watch/`，下次调用与它对比：返回 `changed`、`added_lines` / `removed_lines` 与 `diff` 预览（最多 40 行，`diff_truncated` 标明是否截断）
+- **`web_watch(url, selector=None, reset=False, bypass_cache=True, schema=None, ...)`** → 对比页面自上次抓取以来的变化
+  - 每次成功抓取都把正文存一版快照到 `DATA_DIR/snapshots/<key>/`（同目录按时间戳序列保存，保留 20 版 / 90 天），下次调用与最新版对比：返回 `changed`、`added_lines` / `removed_lines` 与 `diff` 预览（最多 40 行，`diff_truncated` 标明是否截断）
   - `first_seen=true` 表示这是该 URL 的第一份快照（没有可比对象，故不给 diff）；`previous_hash` / `previous_chars` 便于人工核对
   - `selector` 只看页面内某一块（按命中的全部节点拼接），适合盯榜单/价格/公告位；不同 `selector` 各存一份快照，互不覆盖
   - `reset=true` 丢弃旧快照重建基线；比较口径忽略行尾空白与空行，避免渲染噪声误报
   - 抓取失败（拦截/超时/登录墙）不会覆盖快照，恢复后仍能对比出期间变化；`bypass_cache` 默认 `true`，保证拿到的是最新内容
-- **`web_schedule(action="list", id=None, kind="watch", url=None, selector=None, interval_s=3600, webhook_url=None, session="default", ...)`** → 管理定时监控任务
-  - `create`：登记"盯什么、多久一次、变化后通知谁"；`kind=watch` 复用 `web_watch`（可配 `selector`），`kind=index` 复用 `web_index`；同 `kind+url+selector` 只有一条任务，重复 create 视为更新
+  - `schema`（可选）：抽取字段并随快照保存，变化时返回 `changes`（`added` / `removed` / `modified`，数值字段带 `delta` / `pct`）与 `summary_text`，供 `web_changes` 跨版本比较
+- **`web_history(url, selector=None, limit=20)`** → 列出历史快照版本（不抓取）
+  - 返回 `versions`：`version`（1=最新，可直接给 `web_fetch(version=...)` / `web_changes(compare=...)`）/ `captured_at`（UTC ISO）/ `chars` / `hash`
+  - 没有快照时返回 `error_code=no_snapshot`
+- **`web_changes(url, schema=None, compare="prev", selector=None, limit=20)`** → 比较两个快照版本（不抓取）
+  - `compare` 取 `prev`（上一版，默认）/ 序号 / ISO 时间点；`mode=lines` 时返回行级 `diff`，`mode=fields` 时返回字段级 `changes` 与可读 `summary`
+  - 快照建立时没传 `schema`（或旧版单文件快照）时自动回退行级 diff，并在 `notes` 说明
+  - 只有一版或 `compare` 指向最新版时返回 `no_snapshot`
+- **`web_schedule(action="list", id=None, kind="watch", url=None, selector=None, interval_s=3600, webhook_url=None, session="default", schema=None, ...)`** → 管理定时监控任务
+  - `create`：登记"盯什么、多久一次、变化后通知谁"；`kind=watch` 复用 `web_watch`（可配 `selector` / `schema`），`kind=index` 复用 `web_index`；同 `kind+url+selector` 只有一条任务，重复 create 视为更新
+  - `schema` 仅 `kind=watch` 支持：每次执行做字段级对比，webhook 载荷额外带 `changes`（≤20 条）与 `summary_text`
   - `interval_s` 允许 60 ~ 604800（一周），默认 3600；`webhook_url` 只接受 http/https
   - `list` / `get` 查看任务与上次状态；`pause` / `resume` 启停（暂停后 daemon 不再执行）；`delete` 删除调度状态（页面快照保留）
   - `run` 立即执行一次：首次返回 `first_seen=true` 且不发通知；之后仅在真实变更时推送 webhook，失败不影响任务状态
   - 实际执行由 `scrape-mcp schedule daemon` 驱动（见下文「定时监控」）；任务状态落在 `DATA_DIR/schedule/tasks.json`
-- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, read=False, top_k=3, max_tokens=None, content_format="markdown", ...)`** → 搜索关键词，返回结构化结果列表
+- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, read=False, top_k=3, max_tokens=None, content_format="markdown", ...)`** → 搜索关键词，返回结构化结果列表（`read` 可取 `true` / `false` / `"excerpt"` / `"full"`）
   - `provider`: `duckduckgo`（默认，取 `SEARCH_PROVIDER`）/ `searxng`（需先设 `SEARCH_SEARXNG_URL`）/ `brave` / `tavily`（需先设对应 key）
   - `site` 以 `site:` 运算符透传给后端（是否严格限定取决于该引擎支持程度）；`time_range` 取 `day` / `week` / `month` / `year`；`engines` 为 SearXNG 引擎名单（仅对 searxng 生效）
   - 每条结果含 `rank` / `title` / `url` / `snippet` / `engine` / `published_at`；`attempts` 记录回退前的失败后端
   - `read=true` 时并发抓取前 `top_k` 条（1~10）的结果正文，每条新增 `content` / `content_chars` / `truncated`（或 `read_error`）；顶层 `tokens` 给出 `budget` / `used` / `results_read` / `results_skipped`
   - 阅读模式会先按规范化 URL 去重（忽略 `utm_*` 等跟踪参数）并限制同域条数（`SEARCH_READ_PER_HOST`）；正文按排名顺序填充，超出 `max_tokens` 的条目只保留标题/URL/摘要并标 `truncated=true`；单页失败不影响其他结果
+  - `read="excerpt"` 只返回与关键词最相关的段落（BM25 + 中文 bigram，标题加权，每页默认 3 段 / 600 字符）：每条新增 `excerpts` / `excerpt_chars` / `excerpt_fallback`，顶层 `tokens.mode="excerpt"`；召回不足时回退整页并标 `excerpt_fallback=true`，不会返回空片段
   - `content_format` 取 `markdown`（默认）或 `text`；`max_tokens` 默认取 `SEARCH_READ_MAX_TOKENS`，硬上限 `SEARCH_READ_HARD_MAX_TOKENS`
   - 后端失败（限流/拦截/传输错误）时按 `fallback`（默认取 `SEARCH_FALLBACK`）自动回退到其他已配置的后端；全部不可用时行为与之前一致
   - 搜索服务按接口使用：仍遵守主机白/黑名单与全局限流，但不套目标站的 robots 抓取规则
@@ -834,10 +854,10 @@ scrape-mcp schedule daemon --once # 只跑当前到期任务（适合系统 cron
 ```
 
 - 首次执行只建立基线，不算变更、不发通知；之后 watch 比对正文哈希，index 比对 sitemap 清单的 `new` + `changed`。
-- webhook 为 JSON POST：`{"event":"change","task_id","kind","url","selector","checked_at","summary"}`；`summary` 带 diff 摘要或新增/变更 URL 列表。
+- webhook 为 JSON POST：`{"event":"change","task_id","kind","url","selector","checked_at","summary"}`；`summary` 带 diff 摘要或新增/变更 URL 列表。任务带 `schema` 时额外带 `changes`（字段级差异，≤20 条）与 `summary_text`（人类可读摘要），旧键保持不变。
 - webhook 失败只体现在本次执行结果里，不改写任务状态；下一次仍会照常检测。
 - 想复用系统 cron 时，把 `schedule daemon --once` 放进 crontab 即可，不必常驻进程。
-- 任务状态在 `DATA_DIR/schedule/tasks.json`；页面快照仍在 `DATA_DIR/watch/`、`DATA_DIR/index/`，删除任务不会丢快照。
+- 任务状态在 `DATA_DIR/schedule/tasks.json`；页面快照仍在 `DATA_DIR/snapshots/`、`DATA_DIR/index/`，删除任务不会丢快照。
 
 ## 分布式执行（可选）
 
@@ -918,7 +938,7 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 ## 快照对象存储（可选）
 
-默认快照仍写 `DATA_DIR/watch`。设置 `SNAPSHOT_BACKEND=s3` 后，`web_watch` 与 `web_index(content_diff)` 共用同一份快照，落到 S3 兼容存储，多个实例共享基线。
+默认快照仍写 `DATA_DIR/snapshots/<key>/`（时间序列，保留 20 版 / 90 天）。设置 `SNAPSHOT_BACKEND=s3` 后，`web_watch` 与 `web_index(content_diff)` 共用同一份快照，落到 S3 兼容存储，多个实例共享基线。
 
 ```bash
 pip install 'mcp-scrape[s3]'
@@ -930,7 +950,7 @@ export SCRAPE_MCP_S3_SECRET_ACCESS_KEY=...
 export SCRAPE_MCP_S3_PATH_STYLE=true
 ```
 
-- 对象键为 `<S3_PREFIX>/watch/<hash>.json`，内容与本地快照一致（含 `saved_at`）。
+- 对象键为 `<S3_PREFIX>/snapshots/<key>/<13位毫秒时间戳>.json`，内容与本地快照一致（含 `captured_at`）；旧版本的 `<S3_PREFIX>/watch/<key>.json` 仍可读取。
 - 快照是旁路：上传或读取失败都按“没有快照”处理，不影响本次抓取；首次写入即建立基线。
 - 默认仍是 `local`；`SNAPSHOT_BACKEND=s3` 未设置 `S3_BUCKET` 或未安装 boto3 时启动直接报错。
 - 凭据留空时走 boto3 默认链（环境变量 / IAM 角色），也适合用预签名或实例角色免密部署。

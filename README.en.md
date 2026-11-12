@@ -104,9 +104,9 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Single-flight per URL**: concurrent requests for the same page (multiple tenants, or duplicate links inside a batch/crawl) fetch it once and share the response — less egress and fewer anti-bot triggers. Both L1 and L2 renders are coalesced. Requests with custom headers/credentials or `bypass_cache=true` may be caller-specific, so they are never merged.
 - **Two cache layers**: HTTP responses are cached on disk with a TTL and revalidated with `ETag` / `Last-Modified`; compacted content and extraction results get their own cache so repeat calls return immediately. `bypass_cache=true` skips both layers. `web_batch` fetches a list concurrently.
 - **Lightweight crawling**: `web_crawl` supports link discovery via `depth` / `limit`, or "next page" pagination via `next_selector` (`max_pages` cap, automatic dedup, same-host by default). Static assets are skipped. For large jobs use `web_crawl_start` to run in the background, poll with `status`, stop with `cancel`, and it resumes after a restart.
-- **Change detection**: `web_watch` keeps a snapshot of the body after every successful fetch and reports `changed` plus an added/removed line summary on the next call; pass `selector` to watch just one block (leaderboard, price box). Failed fetches never overwrite the snapshot, so changes that happened during a block are still visible afterwards.
-- **Scheduled monitoring + notifications**: `web_schedule` turns `web_watch` / `web_index` into scheduled tasks (listable, pausable, runnable on demand) executed by a local `scrape-mcp schedule daemon`; real changes are POSTed to your webhook. The first run only establishes a baseline and never notifies, and failed fetches are recorded without overwriting snapshots.
-- **Search discovery**: `web_search` turns keywords into structured results (title / URL / snippet / engine / publish date). It uses DuckDuckGo's HTML endpoint by default (no API key), or a self-hosted SearXNG JSON API, or Brave / Tavily with configured keys; it supports `site`, `time_range` and `engines` filters plus automatic backend fallback, and results are cacheable — ideal for a search-then-fetch flow. With `read=true`, one call also fetches the top `top_k` pages concurrently, trims them to a `max_tokens` budget and dedupes URLs, so "search then read" is a single round trip.
+- **Change detection**: `web_watch` keeps a snapshot of the body after every successful fetch and reports `changed` plus an added/removed line summary on the next call; pass `selector` to watch just one block (leaderboard, price box). Failed fetches never overwrite the snapshot, so changes that happened during a block are still visible afterwards. Snapshots keep a time series (20 versions / 90 days by default): `web_history` lists versions, `web_fetch(version=...)` reads one back without a request, and `web_changes` compares any two versions (field-level `delta` / `pct` or line diff).
+- **Scheduled monitoring + notifications**: `web_schedule` turns `web_watch` / `web_index` into scheduled tasks (listable, pausable, runnable on demand) executed by a local `scrape-mcp schedule daemon`; real changes are POSTed to your webhook. The first run only establishes a baseline and never notifies, and failed fetches are recorded without overwriting snapshots. Passing `schema` on `create` enables field-level monitoring: the webhook also carries `changes` (up to 20) and a human-readable `summary_text`.
+- **Search discovery**: `web_search` turns keywords into structured results (title / URL / snippet / engine / publish date). It uses DuckDuckGo's HTML endpoint by default (no API key), or a self-hosted SearXNG JSON API, or Brave / Tavily with configured keys; it supports `site`, `time_range` and `engines` filters plus automatic backend fallback, and results are cacheable — ideal for a search-then-fetch flow. With `read=true`, one call also fetches the top `top_k` pages concurrently, trims them to a `max_tokens` budget and dedupes URLs, so "search then read" is a single round trip; with `read="excerpt"` each page only returns the passages most relevant to the question (BM25 + Chinese bigrams, heading-weighted), falling back to the whole page with `excerpt_fallback` when recall is too low.
 - **Page interaction map**: `web_inspect` scans a page read-only and lists clickable/fillable elements, form fields and "next page" candidates; each element carries a stable `ref` (a valid CSS selector) that can be passed straight to `actions[].selector`, so the model never has to guess selectors. It runs no arbitrary JS and never returns the full HTML.
 - **Page screenshots**: `web_screenshot` renders in a real browser and exports a PNG or a full-page PDF, supporting full-page/viewport capture, custom dimensions, element cropping, device presets (desktop/mobile), hiding fixed navigation or pop-ups before capture, selector waiting and extra delay; `actions` can click/type/scroll before the shot. It reuses the login session, so pages behind auth or JS rendering still work.
 - **Site index**: `web_index` reads `Sitemap:` lines from robots.txt (falling back to `/sitemap.xml`), recursively expands sitemap indexes and unpacks `.gz` files. It persists a baseline and later reports new / changed / unchanged / removed entries, optionally re-fetching changed pages to filter out timestamp-only changes or to return the same diff summary as `web_watch`.
@@ -114,7 +114,8 @@ web_fetch(url="https://example.com/article/1") → JSON: {ok, content, token_est
 - **Async crawl jobs**: `web_crawl_start` returns a `job_id` immediately and the job runs in the background, atomically persisting state per page under `DATA_DIR/jobs/`; `web_crawl_status` reads progress and partial results and resumes after a process restart, `web_crawl_cancel` stops it, and `web_crawl_list` lists recent jobs. Repeating the same start is idempotent.
 - **Built-in dashboard**: in HTTP mode, open `/` to see request volume, L1/L2 split, latency percentiles and buckets, result codes, content kinds, L2 page slots and proxy-pool health; single-file HTML, no external assets, refreshed every 5 seconds.
 - **Total budget with degradation**: `web_fetch` / `web_extract` / `web_batch` / `web_crawl` / `web_map` / `web_crawl_start` accept `deadline_ms`. When time runs short it degrades step by step — cap each request → skip retries → skip L2 rendering → return `timeout` — while any content already fetched is still returned. Degraded results are never cached, so later calls with a larger budget cannot inherit truncated content. The budget also covers the compliance stage (rate-limit wait and robots.txt fetch): if it is too tight, the call returns `timeout` early instead of burning the budget on preparation.
-- **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent. Third-party packages can register their own field types through an entry point.
+- **Structured extraction**: `web_extract` supports `text` / `html` / `attr` / `count` / `list` / `object` / `jsonld`, plus `regex`, `abs_url`, `convert` (int/float/date) and `required`, returning `missing_required` when a mandatory field is absent. Third-party packages can register their own field types through an entry point. With `grounding=true` every field also returns `selector` / `snippet` / `offset` / `basis` (key paths match `data` exactly, including list indexes), and missing required fields come with up to 3 near-miss candidates.
+- **Query excerpts**: `web_fetch(query=...)` returns only the passages most relevant to the question (`excerpts` with `heading` / `start` / `end` / `score`), which suits question-answering calls; when recall is too low it falls back to the whole page and marks `excerpt_fallback` rather than returning empty fragments.
 - **Site recipes**: keep per-site rendering hints, root selector, extraction schema and pagination rules in a JSON file; later calls need no arguments, and per-call arguments still win.
 - **Selectable output format**: `format=markdown|fit_markdown|text|json|chunks`; `json` yields a paragraph array, while `chunks` yields RAG-ready chunks (fixed window + overlap + heading path) that can be stored as-is. `fit_markdown` goes further than compact and also drops navigation, footers, comments, related boxes and ads, returning a `token_report` (raw HTML size, output size, token estimate, compression ratio, per-category dropped lines).
 - **Per-host concurrency gate**: at most 2 concurrent requests per host by default, while different hosts still run in parallel.
@@ -258,6 +259,10 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `SEARCH_READ_HARD_MAX_TOKENS` | `16000` | Hard cap on that token budget |
 | `SEARCH_READ_PER_HOST` | `2` | Max results kept per host in read mode |
 | `INSPECT_MAX_ELEMENTS` | `120` | Interactive elements returned by `web_inspect` by default (hard cap 300) |
+| `READ_EXCERPT_CHUNKS` | `3` | Maximum passages per page for `read="excerpt"` / `web_fetch(query=...)` |
+| `READ_EXCERPT_MAX_CHARS` | `600` | Maximum characters per excerpt |
+| `GROUNDING_DEFAULT` | `false` | Whether `web_extract` returns field-level grounding by default (a per-call `grounding` overrides it) |
+| `GROUNDING_SNIPPET_CHARS` | `120` | Snippet truncation length (characters) |
 | `FIT_MARKDOWN_DEFAULT` | `false` | Whether markdown output uses `fit_markdown` trimming when `format` is not given |
 | `LLM_BASE_URL` | — | OpenAI-compatible endpoint root (e.g. `https://api.deepseek.com/v1`); empty disables every LLM call |
 | `LLM_API_KEY` | — | API key (Bearer) for the endpoint; local compatible servers may omit it |
@@ -288,6 +293,8 @@ Precedence: process environment > `.env` > defaults. `.env` is gitignored; `.env
 | `JOB_TTL` | `604800` | How long job state stays in Redis (seconds); `0` disables expiry |
 | `JOB_STALE_AFTER` | `600` | On worker start, `running` jobs untouched for this many seconds are requeued |
 | `SNAPSHOT_BACKEND` | `local` | Snapshot backend for `web_watch` / `web_index(content_diff)`: `local` or `s3` (requires `mcp-scrape[s3]`) |
+| `WATCH_MAX_VERSIONS` | `20` | Maximum snapshot versions kept per URL (+selector) |
+| `WATCH_RETENTION_DAYS` | `90` | Snapshot retention in days; `0` keeps only the version-count limit |
 | `S3_BUCKET` | empty | Bucket name when `SNAPSHOT_BACKEND=s3`; required |
 | `S3_ENDPOINT_URL` | empty | S3-compatible endpoint (MinIO / R2 / OSS); empty means AWS default |
 | `S3_REGION` | empty | Region name; usually optional for self-hosted endpoints |
@@ -459,6 +466,8 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - Non-HTML: PDFs return structured text (with the `[pdf]` extra; `kind="pdf"` plus `pages` / `pages_parsed`); DOCX/XLSX/PPTX are parsed with the standard library (`kind` is `docx`/`xlsx`/`pptx`); plain text is returned as-is (`kind="text"`)
   - Scanned PDFs: with `OCR_ENABLED=1` and the `[ocr]` extra, text-layer-free pages are OCR'd and the payload carries `ocr=true`; if OCR is unavailable or still empty the result is `unsupported_content` / `empty`
   - Diagnostics: `debug=true` adds `diagnostics` (tier decisions, selector hits, L2 interactions), without page content
+  - `query` (optional): return only the passages most relevant to the question, same shape as `web_search(read="excerpt")`; `content` becomes the matched passages and the payload adds `excerpts` / `excerpt_chars` / `excerpt_fallback`; only supported with `format=markdown|text`
+  - `version` (optional): read a historical snapshot without a request — `latest` / `prev` / a 1-based index (`1` = newest) / an ISO timestamp; the payload returns `version` / `captured_at` / `hash` / `source_version`, and `error_code=no_snapshot` when none exists
 - **`web_extract(url, schema=None, ...)`** → structured JSON from a field schema
   - `schema` may be omitted when a site recipe exists; otherwise `invalid_argument`
   - Field types: `text` (default) / `html` / `attr` (with `attr`) / `count` / `list` / `object` / `jsonld` (with `path`)
@@ -472,6 +481,7 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - `prompt` (optional): LLM-assisted extraction. With `LLM_BASE_URL` + `LLM_MODEL` configured, the compacted page is sent to an OpenAI-compatible model; when unconfigured or the call/JSON parse fails it falls back to the deterministic schema, and **no external call is made by default**
   - The payload carries `extract_mode` (`llm` / `schema`) and `model`; fallback reasons go into `notes`. Field rules may set `description` to guide the model
   - Privacy: enabling the LLM sends page content to your endpoint; do not use it on pages you cannot share
+  - `grounding` (optional, defaults to `GROUNDING_DEFAULT`): returns `grounding` whose keys match `data` paths exactly (including `items[0].price` style indexes), each with `selector` (a usable CSS selector) / `snippet` (verbatim page fragment) / `offset` (character offset within `basis`, may be `null` for dynamic pages) / `basis` (`markdown` or `html`); when required fields are missing it also returns `missing_candidates` (up to 3 near misses per field). LLM extraction provides no grounding and says so in `notes`
 - **`web_batch(urls, max_tokens=3000, link_policy="internal", format="markdown", ...)`** → concurrent fetch, one result per URL; a single failure does not sink the batch
   - Supports `headers` / `cookies` / `timeout` / `bypass_cache` / `debug` / `session` for the whole batch; `format=chunks` with `chunk_size` / `chunk_overlap` applies per URL as well
   - `proxy` also applies to every URL in the batch; omit it to use the proxy pool, then `SCRAPE_MCP_PROXY`
@@ -492,24 +502,34 @@ Generated shape (Claude/Cursor use `mcpServers`; VS Code uses `servers` with `"t
   - **`web_crawl_status(job_id, include_results=True)`** → read state, progress and fetched pages; resumes from where it stopped after a process restart
   - **`web_crawl_cancel(job_id)`** → stop the job; partial results already fetched remain readable, and terminal jobs are returned idempotently
   - **`web_crawl_list(limit=20)`** → list recent jobs (without page bodies)
-- **`web_watch(url, selector=None, reset=False, bypass_cache=True, ...)`** → compare a page against the last time it was fetched
-  - Each successful fetch stores a body snapshot under `DATA_DIR/watch/`; the next call returns `changed`, `added_lines` / `removed_lines` and a `diff` preview (at most 40 lines, `diff_truncated` marks truncation)
+- **`web_watch(url, selector=None, reset=False, bypass_cache=True, schema=None, ...)`** → compare a page against the last time it was fetched
+  - Each successful fetch appends a body snapshot under `DATA_DIR/snapshots/<key>/` (a timestamp series kept at 20 versions / 90 days); the next call compares it with the newest one and returns `changed`, `added_lines` / `removed_lines` and a `diff` preview (at most 40 lines, `diff_truncated` marks truncation)
   - `first_seen=true` means this is the first snapshot for that URL (nothing to compare against, so no diff); `previous_hash` / `previous_chars` help manual verification
   - `selector` narrows the watch to one block (all matched nodes joined); different selectors keep separate snapshots
   - `reset=true` drops the old snapshot and rebuilds the baseline; comparison ignores trailing whitespace and blank lines so render noise does not count
   - Failed fetches (blocked/timeout/login wall) never overwrite the snapshot; `bypass_cache` defaults to `true` so the content is fresh
-- **`web_schedule(action="list", id=None, kind="watch", url=None, selector=None, interval_s=3600, webhook_url=None, session="default", ...)`** → manage scheduled monitoring tasks
-  - `create` records what to watch, how often, and where to notify; `kind=watch` reuses `web_watch` (with optional `selector`), `kind=index` reuses `web_index`. One task per `kind+url+selector`; creating again updates it
+  - `schema` (optional): extract fields and store them with the snapshot; when they change the payload returns `changes` (`added` / `removed` / `modified`, numeric fields with `delta` / `pct`) and `summary_text`, which `web_changes` also uses across versions
+- **`web_history(url, selector=None, limit=20)`** → list snapshot versions (no fetch)
+  - Returns `versions`: `version` (`1` = newest, usable directly as `web_fetch(version=...)` / `web_changes(compare=...)`) / `captured_at` (UTC ISO) / `chars` / `hash`
+  - Returns `error_code=no_snapshot` when nothing has been stored
+- **`web_changes(url, schema=None, compare="prev", selector=None, limit=20)`** → compare two snapshot versions (no fetch)
+  - `compare` takes `prev` (default) / an index / an ISO timestamp; `mode=lines` returns a line-level `diff`, `mode=fields` returns field-level `changes` plus a readable `summary`
+  - Snapshots created without `schema` (or legacy single-file snapshots) automatically fall back to a line diff, explained in `notes`
+  - Returns `no_snapshot` when only one version exists or `compare` points at the newest one
+- **`web_schedule(action="list", id=None, kind="watch", url=None, selector=None, interval_s=3600, webhook_url=None, session="default", schema=None, ...)`** → manage scheduled monitoring tasks
+  - `create` records what to watch, how often, and where to notify; `kind=watch` reuses `web_watch` (with optional `selector` / `schema`), `kind=index` reuses `web_index`. One task per `kind+url+selector`; creating again updates it
+  - `schema` is only supported for `kind=watch`: each run compares fields, and the webhook payload also carries `changes` (up to 20) and `summary_text`
   - `interval_s` accepts 60 ~ 604800 (one week), default 3600; `webhook_url` must be http/https
   - `list` / `get` show tasks and last status; `pause` / `resume` toggle execution; `delete` removes the schedule (page snapshots are kept)
   - `run` executes once now: the first run returns `first_seen=true` without notifying; later runs notify only on real changes, and failures never break task state
   - Execution is driven by `scrape-mcp schedule daemon` (see "Scheduled monitoring" below); task state lives in `DATA_DIR/schedule/tasks.json`
-- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, read=False, top_k=3, max_tokens=None, content_format="markdown", ...)`** → search keywords and return structured results
+- **`web_search(query, max_results=10, provider=None, site=None, time_range=None, engines=None, fallback=None, read=False, top_k=3, max_tokens=None, content_format="markdown", ...)`** → search keywords and return structured results (`read` accepts `true` / `false` / `"excerpt"` / `"full"`)
   - `provider`: `duckduckgo` (default, from `SEARCH_PROVIDER`) / `searxng` (requires `SEARCH_SEARXNG_URL`) / `brave` / `tavily` (requires the matching key)
   - `site` is passed through as the `site:` operator (how strictly it is enforced depends on the backend engine); `time_range` takes `day` / `week` / `month` / `year`; `engines` is a SearXNG engine list (searxng only)
   - Each hit has `rank` / `title` / `url` / `snippet` / `engine` / `published_at`; `attempts` records backends that failed before the fallback succeeded
   - `read=true` fetches the body of the top `top_k` hits (1~10) concurrently; each hit gains `content` / `content_chars` / `truncated` (or `read_error`), and the payload carries `tokens` with `budget` / `used` / `results_read` / `results_skipped`
   - Read mode dedupes by canonical URL (ignoring `utm_*` and similar tracking parameters) and limits hits per host (`SEARCH_READ_PER_HOST`); bodies fill the budget in rank order, and hits beyond it keep only title/URL/snippet with `truncated=true`; one failed page never sinks the others
+  - `read="excerpt"` returns only passages most relevant to the keywords (BM25 + Chinese bigrams, heading-weighted, 3 passages / 600 chars per page by default): each hit adds `excerpts` / `excerpt_chars` / `excerpt_fallback` and the top-level `tokens.mode="excerpt"`; low recall falls back to the whole page with `excerpt_fallback=true` instead of empty fragments
   - `content_format` is `markdown` (default) or `text`; `max_tokens` defaults to `SEARCH_READ_MAX_TOKENS` with `SEARCH_READ_HARD_MAX_TOKENS` as the hard cap
   - On failure (rate limit / block / transport error) it falls back to other configured backends per `fallback` (defaults to `SEARCH_FALLBACK`); when nothing else is configured, behaviour matches previous releases
   - The search service is used as an API: host allow/deny lists and the global rate limit still apply, but robots rules for the target site do not
@@ -824,10 +844,10 @@ scrape-mcp schedule daemon --once # run currently due tasks only (cron-friendly)
 ```
 
 - The first run only establishes a baseline and never notifies; afterwards watch compares body hashes and index compares the sitemap list's `new` + `changed`.
-- Webhooks are JSON POSTs: `{"event":"change","task_id","kind","url","selector","checked_at","summary"}`; `summary` carries the diff summary or the new/changed URL lists.
+- Webhooks are JSON POSTs: `{"event":"change","task_id","kind","url","selector","checked_at","summary"}`; `summary` carries the diff summary or the new/changed URL lists. When the task has a `schema`, the payload also carries `changes` (field-level differences, up to 20) and `summary_text` (a readable summary), leaving the old keys untouched.
 - A failed webhook only shows up in that run's result and never rewrites task state; the next cycle still runs.
 - To reuse system cron, put `schedule daemon --once` in crontab instead of keeping a process alive.
-- Task state lives in `DATA_DIR/schedule/tasks.json`; snapshots stay in `DATA_DIR/watch/` and `DATA_DIR/index/`, so deleting a task never loses them.
+- Task state lives in `DATA_DIR/schedule/tasks.json`; snapshots stay in `DATA_DIR/snapshots/` and `DATA_DIR/index/`, so deleting a task never loses them.
 
 ## Distributed execution (optional)
 
@@ -908,7 +928,7 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 ## Object-storage snapshots (optional)
 
-Snapshots still default to `DATA_DIR/watch`. With `SNAPSHOT_BACKEND=s3`, `web_watch` and `web_index(content_diff)` share the same snapshot store backed by an S3-compatible bucket, so multiple instances share the baseline.
+Snapshots still default to `DATA_DIR/snapshots/<key>/` (a time series kept at 20 versions / 90 days). With `SNAPSHOT_BACKEND=s3`, `web_watch` and `web_index(content_diff)` share the same snapshot store backed by an S3-compatible bucket, so multiple instances share the baseline.
 
 ```bash
 pip install 'mcp-scrape[s3]'
@@ -920,7 +940,7 @@ export SCRAPE_MCP_S3_SECRET_ACCESS_KEY=...
 export SCRAPE_MCP_S3_PATH_STYLE=true
 ```
 
-- Object keys are `<S3_PREFIX>/watch/<hash>.json`, with the same payload as local snapshots (including `saved_at`).
+- Object keys are `<S3_PREFIX>/snapshots/<key>/<13-digit-ms-timestamp>.json`, with the same payload as local snapshots (including `captured_at`); legacy `<S3_PREFIX>/watch/<key>.json` objects are still readable.
 - Snapshots are a side path: a failed upload or read is treated as "no snapshot" and never breaks the fetch; the first write establishes the baseline.
 - `local` remains the default; `SNAPSHOT_BACKEND=s3` fails fast at startup when `S3_BUCKET` is empty or boto3 is missing.
 - Leave credentials empty to use the boto3 default chain (env vars / IAM role), which also suits keyless deployments.

@@ -104,6 +104,7 @@ class ScheduleStore:
         webhook_url: str | None = None,
         session: str = "default",
         enabled: bool | None = None,
+        schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """创建或更新任务；同 kind+url+selector 只有一条，重复创建视为更新。"""
         if kind not in KINDS:
@@ -127,6 +128,7 @@ class ScheduleStore:
                 "session": session,
                 "interval_s": interval_s,
                 "webhook_url": webhook_url,
+                "schema": schema,
                 "enabled": True if enabled is None else bool(enabled),
                 "created_at": now,
                 "updated_at": now,
@@ -146,6 +148,7 @@ class ScheduleStore:
                     "session": session,
                     "interval_s": interval_s,
                     "webhook_url": webhook_url,
+                    "schema": schema,
                     "updated_at": now,
                 }
             )

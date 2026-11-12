@@ -75,6 +75,21 @@ class Settings(BaseSettings):
     # format=markdown 时是否默认启用 fit_markdown 裁剪；默认关闭，保持既有输出不变
     fit_markdown_default: bool = False
 
+    # ---- 读取质量：query 摘录 / 字段溯源 ----
+    # read="excerpt" 时每页最多返回几段、每段最多多少字符
+    read_excerpt_chunks: int = 3
+    read_excerpt_max_chars: int = 600
+    # web_extract 是否默认返回字段级溯源；默认关闭，保持旧载荷不变
+    grounding_default: bool = False
+    # 溯源片段截断长度（字符）
+    grounding_snippet_chars: int = 120
+
+    # ---- 历史快照 ----
+    # web_watch 每个 URL(+selector) 保留的版本数上限；写入前先淘汰最旧的
+    watch_max_versions: int = 20
+    # 快照保留天数；0 表示只按版本数限制
+    watch_retention_days: int = 90
+
     # ---- 传输层重试 ----
     # 仅对网络异常与 5xx 生效；429/403 属反爬信号，同层重试通常无效，交给分级降级处理
     retry_times: int = 2
