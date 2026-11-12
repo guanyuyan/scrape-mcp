@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。所有显著变更都会记录在本文件。
 
-## [Unreleased]
+## [0.34.0] - 2026-11-12
 
 ### Added
 - `web_search(read=true)` 搜索即阅读：一次调用并发抓取前 `top_k` 条结果正文（`SEARCH_READ_CONCURRENCY`），按规范化 URL 去重（忽略 `utm_*` 等跟踪参数）、限制同域条数（`SEARCH_READ_PER_HOST`），并按排名填充 `max_tokens` 预算（默认 `SEARCH_READ_MAX_TOKENS`，硬上限 `SEARCH_READ_HARD_MAX_TOKENS`）；每条新增 `content` / `content_chars` / `truncated`（失败为 `read_error`），顶层 `tokens` 给出 `budget` / `used` / `results_read` / `results_skipped`，单页失败不影响其他结果
